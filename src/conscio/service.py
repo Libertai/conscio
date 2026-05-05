@@ -13,6 +13,7 @@ from conscio.config import ServiceConfig, load_config
 from conscio.core.cognition import InputEvent
 from conscio.core.runtime import CognitiveRuntime, EpisodeResult
 from conscio.goals import GoalStore
+from conscio.llm.client import LLMClient
 from conscio.memory.store import MemoryStore
 from conscio.tools import PolicyToolRegistry
 
@@ -113,7 +114,14 @@ class ConscioService:
             working_directory=self.config.working_directory,
         )
         tools.load_builtins()
-        self.runtime = CognitiveRuntime(memory=self.memory, tools=tools)
+        llm = None
+        if self.config.llm_base_url:
+            llm = LLMClient(
+                base_url=self.config.llm_base_url,
+                api_key=self.config.llm_api_key,
+                model=self.config.llm_model,
+            )
+        self.runtime = CognitiveRuntime(memory=self.memory, tools=tools, llm=llm)
         self.goals = GoalStore(self.memory)
         self.autonomy = AutonomyStore(self.memory)
         self.lock = ServiceLock(self.config.lock_path)

@@ -31,6 +31,7 @@ class LLMClient:
             api_key
             or os.environ.get("LIBERTAI_API_KEY")
             or os.environ.get("OPENAI_API_KEY")
+            or "not-needed"
         )
         self.model = model or os.environ.get("LIBERTAI_MODEL") or _DEFAULT_MODEL
         self._sync: OpenAI | None = None

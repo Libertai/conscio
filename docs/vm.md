@@ -21,6 +21,15 @@ conscio service init
 Edit `/home/conscio/.conscio/config.toml` and set a strong `api_key` and
 `web_password`.
 
+To use a hosted OpenAI-compatible inference endpoint, add:
+
+```toml
+[llm]
+base_url = "https://glm-4-7-1-babc539749cd724946a669eee4da3ac6.models.libertai.io/v1"
+api_key = ""
+model = "deepseek-v4-flash"
+```
+
 Start the service:
 
 ```bash

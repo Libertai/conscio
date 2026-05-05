@@ -25,6 +25,9 @@ class ServiceConfig:
     autonomous: bool = True
     tick_interval: float = 30.0
     unsafe_autonomy: bool = False
+    llm_base_url: str = ""
+    llm_api_key: str = ""
+    llm_model: str = "deepseek-v4-flash"
     allowed_tools: list[str] = field(default_factory=list)
     denied_tools: list[str] = field(default_factory=list)
     max_actions_per_hour: int = 60
@@ -86,6 +89,7 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         with config_path.open("rb") as f:
             raw = tomllib.load(f)
     service = raw.get("service", raw)
+    llm = raw.get("llm", {})
     tools = raw.get("tools", {})
 
     cfg = ServiceConfig(
@@ -103,6 +107,26 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         autonomous=bool(service.get("autonomous", True)),
         tick_interval=float(service.get("tick_interval", 30.0)),
         unsafe_autonomy=bool(service.get("unsafe_autonomy", False)),
+        llm_base_url=str(
+            llm.get("base_url")
+            or service.get("llm_base_url")
+            or os.environ.get("LIBERTAI_BASE_URL")
+            or os.environ.get("OPENAI_BASE_URL")
+            or ""
+        ),
+        llm_api_key=str(
+            llm.get("api_key")
+            or service.get("llm_api_key")
+            or os.environ.get("LIBERTAI_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+            or ""
+        ),
+        llm_model=str(
+            llm.get("model")
+            or service.get("llm_model")
+            or os.environ.get("LIBERTAI_MODEL")
+            or "deepseek-v4-flash"
+        ),
         allowed_tools=_as_str_list(tools.get("allowed")),
         denied_tools=_as_str_list(tools.get("denied")),
         max_actions_per_hour=int(tools.get("max_actions_per_hour", 60)),
@@ -133,6 +157,11 @@ autonomous = true
 tick_interval = 30
 unsafe_autonomy = false
 pause_on_error = true
+
+[llm]
+base_url = ""
+api_key = ""
+model = "deepseek-v4-flash"
 
 [tools]
 allowed = []

@@ -67,6 +67,22 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.host, "0.0.0.0")
         self.assertEqual(cfg.base_url, "http://127.0.0.1:8765")
 
+    def test_llm_config_loads_from_dedicated_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(
+                "[llm]\n"
+                "base_url = \"https://example.test/v1\"\n"
+                "api_key = \"test-llm-key\"\n"
+                "model = \"test-model\"\n",
+                encoding="utf-8",
+            )
+            cfg = load_config(path)
+
+        self.assertEqual(cfg.llm_base_url, "https://example.test/v1")
+        self.assertEqual(cfg.llm_api_key, "test-llm-key")
+        self.assertEqual(cfg.llm_model, "test-model")
+
 
 class ToolPolicyTests(unittest.IsolatedAsyncioTestCase):
     async def test_unsafe_tool_is_blocked_without_config_policy(self) -> None:

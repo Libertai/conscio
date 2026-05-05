@@ -12,6 +12,11 @@ tick_interval = 30
 unsafe_autonomy = false
 pause_on_error = true
 
+[llm]
+base_url = ""
+api_key = ""
+model = "deepseek-v4-flash"
+
 [tools]
 allowed = []
 denied = []
