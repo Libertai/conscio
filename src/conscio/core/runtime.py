@@ -139,7 +139,11 @@ class ReflectionModule:
     name = "reflector"
 
     async def tick(self, workspace: Workspace, state: SelfState) -> list[WorkspaceEntry]:
-        conflicts = [e for e in workspace.global_entries if e.type == EntryType.CONFLICT]
+        episode_start = getattr(state, "episode_start", 0.0)
+        conflicts = [
+            e for e in workspace.global_entries
+            if e.type == EntryType.CONFLICT and e.timestamp >= episode_start
+        ]
         if not conflicts:
             return []
         latest = conflicts[-1]
@@ -368,6 +372,8 @@ class CognitiveRuntime:
         self._reset_modules_for_episode()
         start = time.time()
         self._current_episode_start = start
+        self.self_state.episode_start = start
+        self.self_state.conflict_level = 0.0
         metrics = EpisodeMetrics()
         self.trace.record("episode_started", "runtime", event_source=event.source)
         self._ingest_event(event)
