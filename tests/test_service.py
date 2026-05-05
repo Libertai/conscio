@@ -187,6 +187,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 "[service]\n"
                 f"home = \"{tmp}\"\n"
                 "api_key = \"test-key\"\n"
+                "web_password = \"test-pass\"\n"
                 "autonomous = false\n",
                 encoding="utf-8",
             )
@@ -203,6 +204,43 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(denied.status_code, 401)
         self.assertEqual(allowed.status_code, 200)
+
+    async def test_web_ui_requires_password_session(self) -> None:
+        try:
+            import httpx
+            from conscio.api import create_app
+        except ModuleNotFoundError:
+            self.skipTest("fastapi is not installed in this environment")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(
+                "[service]\n"
+                f"home = \"{tmp}\"\n"
+                "api_key = \"test-key\"\n"
+                "web_password = \"test-pass\"\n"
+                "autonomous = false\n",
+                encoding="utf-8",
+            )
+            service = ConscioService(load_config(path))
+            await service.start(background=False)
+            try:
+                app = create_app(service=service)
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                    denied = await client.get("/ui/api/snapshot")
+                    bad_login = await client.post("/ui/login", json={"password": "wrong"})
+                    login = await client.post("/ui/login", json={"password": "test-pass"})
+                    snapshot = await client.get("/ui/api/snapshot")
+                    dashboard = await client.get("/ui")
+            finally:
+                await service.stop()
+
+        self.assertEqual(denied.status_code, 401)
+        self.assertEqual(bad_login.status_code, 401)
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(snapshot.status_code, 200)
+        self.assertIn("Conscio", dashboard.text)
 
 
 if __name__ == "__main__":

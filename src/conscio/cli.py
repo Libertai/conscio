@@ -387,8 +387,8 @@ def _service_start() -> None:
     from conscio.api import create_app
 
     cfg = load_config()
-    if cfg.host != "127.0.0.1" and not cfg.api_key:
-        raise SystemExit("Public bind requires service.api_key in config.toml.")
+    if cfg.host != "127.0.0.1" and (not cfg.api_key or not cfg.web_password):
+        raise SystemExit("Public bind requires service.api_key and service.web_password in config.toml.")
     app = create_app(config=cfg)
     uvicorn.run(app, host=cfg.host, port=cfg.port)
 

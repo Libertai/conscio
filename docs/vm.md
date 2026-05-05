@@ -15,7 +15,7 @@ pip install -e .
 conscio service init
 ```
 
-Edit `~/.conscio/config.toml` and set a strong `api_key`.
+Edit `~/.conscio/config.toml` and set a strong `api_key` and `web_password`.
 
 Start the service:
 
@@ -23,10 +23,20 @@ Start the service:
 conscio service start
 ```
 
-The API binds to `127.0.0.1:8765` by default. Keep that default unless the VM
-has a reverse proxy, firewall, and an API key configured.
+The API and web UI bind to `127.0.0.1:8765` by default. Open the dashboard at
+`http://127.0.0.1:8765/ui`. Keep the localhost default unless the VM has HTTPS,
+a reverse proxy, firewall rules, and both `api_key` and `web_password`
+configured.
 
 ## User Interaction
+
+Browser:
+
+```text
+http://127.0.0.1:8765/ui
+```
+
+CLI:
 
 ```bash
 conscio service status
@@ -47,6 +57,7 @@ Shell and code tools are disabled unless config explicitly enables them:
 
 ```toml
 [service]
+web_password = "replace-with-a-strong-password"
 unsafe_autonomy = true
 
 [tools]

@@ -40,8 +40,8 @@ remembered, and how its goals changed.
 - **Autonomous Service**: a nonstop loop performs heartbeat, reflection, goal
   review, project/task updates, memory consolidation, and action episodes.
 - **Tool Policy**: unsafe shell/code autonomy is config-gated for isolated VMs.
-- **Authenticated API + CLI**: users can talk to it, influence it, inspect it,
-  pause it, and resume it.
+- **Authenticated Web UI, API, and CLI**: users can talk to it, influence it,
+  inspect it, pause it, and resume it.
 
 ## Quick Start
 
@@ -74,6 +74,12 @@ Start the long-running API service:
 conscio service start
 ```
 
+Open the password-protected web dashboard:
+
+```text
+http://127.0.0.1:8765/ui
+```
+
 In another shell:
 
 ```bash
@@ -89,11 +95,13 @@ conscio resume
 
 ## VM Autonomy
 
-Conscio defaults to localhost API binding and disabled unsafe tools. To let it
-use shell and code tools on its own, deploy it in a disposable VM and set:
+Conscio defaults to localhost API binding, password-protected web access, and
+disabled unsafe tools. To let it use shell and code tools on its own, deploy it
+in a disposable VM and set:
 
 ```toml
 [service]
+web_password = "replace-with-a-strong-password"
 unsafe_autonomy = true
 
 [tools]
@@ -104,6 +112,9 @@ shell_timeout = 30
 
 Unsafe autonomy is read from `~/.conscio/config.toml`; it cannot be enabled by
 an API request or CLI flag at runtime.
+
+For web exposure, put Conscio behind HTTPS and keep both `api_key` and
+`web_password` set. Public binding is refused without both values.
 
 See [docs/vm.md](docs/vm.md) for systemd and Docker deployment.
 
@@ -151,6 +162,7 @@ src/conscio/
 ├── memory/             # SQLite episodic/semantic/procedural memory
 ├── tools/              # Tool registry and guarded built-ins
 ├── api.py              # FastAPI service API
+├── webui.py            # Password-protected browser dashboard
 ├── service.py          # Long-running autonomous service
 ├── autonomy.py         # Durable projects, tasks, service episodes, traces
 ├── goals.py            # Durable goal and influence state

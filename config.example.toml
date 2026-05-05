@@ -3,6 +3,7 @@ home = "/home/conscio/.conscio"
 host = "127.0.0.1"
 port = 8765
 api_key = "replace-me"
+web_password = "replace-me-too"
 autonomous = true
 tick_interval = 30
 unsafe_autonomy = false

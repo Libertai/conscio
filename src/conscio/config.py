@@ -17,6 +17,7 @@ class ServiceConfig:
     host: str = "127.0.0.1"
     port: int = 8765
     api_key: str = ""
+    web_password: str = ""
     autonomous: bool = True
     tick_interval: float = 30.0
     unsafe_autonomy: bool = False
@@ -77,6 +78,7 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         host=str(service.get("host", "127.0.0.1")),
         port=int(service.get("port", 8765)),
         api_key=str(service.get("api_key") or os.environ.get("CONSCIO_API_KEY", "")),
+        web_password=str(service.get("web_password") or os.environ.get("CONSCIO_WEB_PASSWORD", "")),
         autonomous=bool(service.get("autonomous", True)),
         tick_interval=float(service.get("tick_interval", 30.0)),
         unsafe_autonomy=bool(service.get("unsafe_autonomy", False)),
@@ -96,11 +98,13 @@ def write_default_config(path: str | Path | None = None) -> Path:
     if config_path.exists():
         return config_path
     api_key = secrets.token_urlsafe(32)
+    web_password = secrets.token_urlsafe(24)
     text = f"""[service]
 home = "{config_path.parent}"
 host = "127.0.0.1"
 port = 8765
 api_key = "{api_key}"
+web_password = "{web_password}"
 autonomous = true
 tick_interval = 30
 unsafe_autonomy = false

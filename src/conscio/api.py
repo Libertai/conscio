@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from conscio.config import ServiceConfig
 from conscio.service import ConscioService
+from conscio.webui import create_web_router
 
 
 class MessageRequest(BaseModel):
@@ -130,5 +131,6 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
     async def memory_search(q: str, limit: int = Query(default=20, ge=1, le=100)) -> list[dict[str, Any]]:
         return await svc.search_memory(q, limit)
 
+    app.include_router(create_web_router(svc))
     app.state.conscio_service = svc
     return app

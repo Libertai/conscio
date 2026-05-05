@@ -43,7 +43,7 @@ pause/resume controls.
 
 - Make goal review more generative with LLM-backed self-authored goals.
 - Add LLM-backed structured planning beyond the deterministic fallback planner.
-- Add a web dashboard for chat, trace inspection, and approvals.
+- Harden the web dashboard with HTTPS deployment examples, optional secure-cookie mode, and approvals.
 - Add stronger command sandboxing and VM reset workflows.
 - Add long-horizon evals for autonomy, goal coherence, and self-correction.
 
