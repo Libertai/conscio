@@ -112,6 +112,19 @@ consciousness, but Conscio does not implement IIT and does not compute Phi.
 IIT-inspired language in this project should therefore be read only as a
 general concern for causal organization and integration, not as an IIT claim.
 
+**Figure 1. Theory Indicators Mapped to Conscio Mechanisms**
+
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "30px", "primaryColor": "#e6f0ff", "primaryBorderColor": "#3b82f6", "primaryTextColor": "#102a43", "lineColor": "#52606d"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 24, "rankSpacing": 38, "curve": "basis"}}}%%
+flowchart LR
+    CONSCIO["Conscio"] --> GWT["GWT broadcast"]
+    GWT --> RPT["Recurrent ticks"]
+    RPT --> SELF["Self model"]
+    SELF --> AST["Attention schema"]
+    AST --> PP["Prediction error"]
+    PP --> AGENT["Goals + autonomy"]
+```
+
 ## 3. Operational Definition
 
 Conscio defines operational consciousness as the presence of a persistent,
@@ -152,29 +165,34 @@ state, and autonomous heartbeat ticks.
 
 The per-episode loop is:
 
-```text
-InputEvent
-  -> local workspace entry
-  -> specialist module ticks
-  -> candidate workspace entries
-  -> attention selection
-  -> global broadcast
-  -> intention competition
-  -> action selection
-  -> answer/tool/reflection/wait/refusal
-  -> prediction-error check
-  -> memory consolidation
+**Figure 2. Per-Episode Cognitive Runtime**
+
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "34px", "primaryColor": "#e6f0ff", "primaryBorderColor": "#3b82f6", "primaryTextColor": "#102a43", "lineColor": "#52606d"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 22, "rankSpacing": 34, "curve": "basis"}}}%%
+flowchart LR
+    INPUT["Input"] --> CANDIDATES["Workspace candidates"]
+    CANDIDATES --> ATTENTION["Attention + broadcast SelfState"]
+    ATTENTION --> ACTION["Action outcome"]
+    ACTION --> REVIEW["Prediction memory trace"]
 ```
 
 The service loop adds:
 
-```text
-durable goals
-  -> active project
-  -> active task
-  -> autonomous episode
-  -> stored trace
-  -> goal/project/task update
+**Figure 3. Persistent Service and Autonomy Loop**
+
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "26px", "primaryColor": "#e6f0ff", "primaryBorderColor": "#3b82f6", "primaryTextColor": "#102a43", "lineColor": "#52606d"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 34, "rankSpacing": 46, "curve": "basis"}}}%%
+flowchart TD
+    SERVICE["ConscioService"] --> GOAL["Select durable goal"]
+    GOAL --> PROJECT["Project + task"]
+    PROJECT --> EPISODE["Cognitive episode"]
+    EPISODE --> TRACE["Store trace"]
+    TRACE --> UPDATE["Update state"]
+    UPDATE --> SERVICE
+
+    USER["User message or influence"] --> LOCK["Serialized service event"]
+    LOCK --> EPISODE
+    CONFIG["Config-gated tool policy"] --> EPISODE
 ```
 
 ### 4.1 Workspace
@@ -228,6 +246,19 @@ score =
 The highest-scoring entries are broadcast globally. The selected focus updates
 the self-state and is recorded in the cognitive trace. Broadcast is therefore a
 runtime event, not a metaphor in the prompt.
+
+**Figure 4. Base Attention Score Weights**
+
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "24px", "pieTitleTextSize": "24px", "pieSectionTextSize": "22px", "pieLegendTextSize": "22px"}}}%%
+pie showData
+    title Attention score weights before bonuses
+    "Novelty" : 25
+    "Salience" : 25
+    "Urgency" : 20
+    "Confidence" : 10
+    "Priority" : 10
+```
 
 ### 4.4 Attention Schema
 
@@ -373,6 +404,18 @@ Useful baselines include:
 5. **Full Conscio runtime**: workspace, attention schema, self-model,
    prediction error, memory, goals, projects, tasks, and autonomous ticks.
 
+**Figure 5. Evaluation Ladder**
+
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "30px", "primaryColor": "#e6f0ff", "primaryBorderColor": "#3b82f6", "primaryTextColor": "#102a43", "lineColor": "#52606d"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 24, "rankSpacing": 38, "curve": "basis"}}}%%
+flowchart LR
+    B0["Direct response"] --> B1["Prompted reflection"]
+    B1 --> B2["Evented workspace"]
+    B2 --> B3["Workspace + self-model"]
+    B3 --> B4["Full Conscio runtime"]
+    B4 --> RESULT["Compare behavior + traces"]
+```
+
 ### 6.2 Metrics
 
 Task-level metrics should include:
@@ -415,6 +458,18 @@ specific capabilities. For example, removing the conflict monitor should reduce
 instruction-constraint correction. Removing memory retrieval should reduce
 cross-episode continuity. Removing prediction error should reduce recovery from
 failed tool actions or unmet expectations.
+
+**Table 1. Ablation Predictions**
+
+| Ablation | Expected degradation |
+| --- | --- |
+| No attention schema | Weaker auditability of focus and ignored candidates |
+| No memory retrieval | Weaker cross-episode continuity |
+| No conflict monitor | Lower instruction-constraint correction |
+| No prediction error | Weaker recovery from failed expectations |
+| No self-state contribution to attention | Less adaptive prioritization under uncertainty |
+| No goal review | Weaker long-horizon goal coherence |
+| No project/task persistence | Less durable autonomous work |
 
 ### 6.4 Current Smoke Tests
 

@@ -1,0 +1,6 @@
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "34px", "primaryColor": "#e6f0ff", "primaryBorderColor": "#3b82f6", "primaryTextColor": "#102a43", "lineColor": "#52606d"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 22, "rankSpacing": 34, "curve": "basis"}}}%%
+flowchart LR
+    INPUT["Input"] --> CANDIDATES["Workspace candidates"]
+    CANDIDATES --> ATTENTION["Attention + broadcast SelfState"]
+    ATTENTION --> ACTION["Action outcome"]
+    ACTION --> REVIEW["Prediction memory trace"]

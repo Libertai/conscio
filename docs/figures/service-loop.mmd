@@ -1,0 +1,12 @@
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "26px", "primaryColor": "#e6f0ff", "primaryBorderColor": "#3b82f6", "primaryTextColor": "#102a43", "lineColor": "#52606d"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 34, "rankSpacing": 46, "curve": "basis"}}}%%
+flowchart TD
+    SERVICE["ConscioService"] --> GOAL["Select durable goal"]
+    GOAL --> PROJECT["Project + task"]
+    PROJECT --> EPISODE["Cognitive episode"]
+    EPISODE --> TRACE["Store trace"]
+    TRACE --> UPDATE["Update state"]
+    UPDATE --> SERVICE
+
+    USER["User message or influence"] --> LOCK["Serialized service event"]
+    LOCK --> EPISODE
+    CONFIG["Config-gated tool policy"] --> EPISODE
