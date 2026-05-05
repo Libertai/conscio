@@ -105,6 +105,18 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.context_compaction_interval, 10)
         self.assertFalse(cfg.context_enable_semantic_compaction)
 
+    def test_tool_loop_round_budget_loads_from_tools_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(
+                "[tools]\n"
+                "model_tool_rounds = 17\n",
+                encoding="utf-8",
+            )
+            cfg = load_config(path)
+
+        self.assertEqual(cfg.model_tool_rounds, 17)
+
 
 class ToolPolicyTests(unittest.IsolatedAsyncioTestCase):
     async def test_unsafe_tool_is_blocked_without_config_policy(self) -> None:

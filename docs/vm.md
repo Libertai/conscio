@@ -76,6 +76,7 @@ unsafe_autonomy = true
 [tools]
 working_directory = "/opt/conscio/work"
 max_actions_per_hour = 60
+model_tool_rounds = 32
 shell_timeout = 30
 ```
 

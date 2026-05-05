@@ -29,5 +29,6 @@ enable_semantic_compaction = true
 allowed = []
 denied = []
 max_actions_per_hour = 60
+model_tool_rounds = 32
 shell_timeout = 30
 working_directory = "/opt/conscio/work"

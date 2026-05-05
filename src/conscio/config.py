@@ -37,6 +37,7 @@ class ServiceConfig:
     allowed_tools: list[str] = field(default_factory=list)
     denied_tools: list[str] = field(default_factory=list)
     max_actions_per_hour: int = 60
+    model_tool_rounds: int = 32
     shell_timeout: int = 30
     working_directory: Path = field(default_factory=Path.cwd)
     pause_on_error: bool = True
@@ -143,6 +144,7 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         allowed_tools=_as_str_list(tools.get("allowed")),
         denied_tools=_as_str_list(tools.get("denied")),
         max_actions_per_hour=int(tools.get("max_actions_per_hour", 60)),
+        model_tool_rounds=int(tools.get("model_tool_rounds", 32)),
         shell_timeout=int(tools.get("shell_timeout", 30)),
         working_directory=_as_path(tools.get("working_directory"), Path.cwd()),
         pause_on_error=bool(service.get("pause_on_error", True)),
@@ -188,6 +190,7 @@ enable_semantic_compaction = true
 allowed = []
 denied = []
 max_actions_per_hour = 60
+model_tool_rounds = 32
 shell_timeout = 30
 working_directory = "{Path.cwd()}"
 """

@@ -465,6 +465,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 llm=llm,  # type: ignore[arg-type]
                 memory=MemoryStore(db_path=os.path.join(tmp, "limit.db")),
                 tools=tools,
+                max_tool_rounds=4,
             )
             await runtime.initialize()
             try:

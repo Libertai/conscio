@@ -137,6 +137,7 @@ class ConscioService:
             llm=llm,
             context_settings=context_settings,
             context_provider=self._context_state,
+            max_tool_rounds=self.config.model_tool_rounds,
         )
         self.goals = GoalStore(self.memory)
         self.autonomy = AutonomyStore(self.memory)

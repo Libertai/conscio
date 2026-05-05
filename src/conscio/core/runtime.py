@@ -184,7 +184,7 @@ class ReflectionModule:
 
 class ResponseModule:
     name = "responder"
-    max_tool_rounds = 4
+    DEFAULT_MAX_TOOL_ROUNDS = 32
 
     def __init__(
         self,
@@ -195,6 +195,7 @@ class ResponseModule:
         session_id: str = "",
         context_provider: Any | None = None,
         tools: ToolRegistry | None = None,
+        max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS,
     ) -> None:
         self.llm = llm
         self.assembler = assembler or PromptAssembler()
@@ -202,6 +203,7 @@ class ResponseModule:
         self.session_id = session_id
         self.context_provider = context_provider
         self.tools = tools
+        self.max_tool_rounds = max(1, int(max_tool_rounds))
         self._ran = False
         self.last_model_context = ""
         self.last_tool_requests: list[ToolRequest] = []
@@ -517,6 +519,7 @@ class CognitiveRuntime:
         session_id: str | None = None,
         modules: list[CognitiveModule] | None = None,
         max_ticks: int = 4,
+        max_tool_rounds: int = ResponseModule.DEFAULT_MAX_TOOL_ROUNDS,
         context_settings: ContextSettings | None = None,
         context_provider: Any | None = None,
     ) -> None:
@@ -544,6 +547,7 @@ class CognitiveRuntime:
             session_id=self.session_id,
             context_provider=context_provider,
             tools=self.tools,
+            max_tool_rounds=max_tool_rounds,
         )
         self.modules = modules or self._default_modules()
         self.consolidator = MemoryConsolidator(self.context_settings)
