@@ -9,6 +9,7 @@ from typing import Any
 
 
 DEFAULT_HOME = Path.home() / ".conscio"
+PLACEHOLDER_SECRETS = {"", "replace-me", "replace-me-too", "changeme", "password"}
 
 
 @dataclass
@@ -16,8 +17,11 @@ class ServiceConfig:
     home: Path = DEFAULT_HOME
     host: str = "127.0.0.1"
     port: int = 8765
+    client_url: str = ""
     api_key: str = ""
     web_password: str = ""
+    web_secure_cookies: bool = False
+    allow_insecure_public_bind: bool = False
     autonomous: bool = True
     tick_interval: float = 30.0
     unsafe_autonomy: bool = False
@@ -42,12 +46,23 @@ class ServiceConfig:
 
     @property
     def base_url(self) -> str:
-        return f"http://{self.host}:{self.port}"
+        if self.client_url:
+            return self.client_url.rstrip("/")
+        host = "127.0.0.1" if self.host == "0.0.0.0" else self.host
+        return f"http://{host}:{self.port}"
 
     def ensure_layout(self) -> None:
         self.home.mkdir(parents=True, exist_ok=True)
         for child in ("logs", "events", "approvals", "sessions"):
             (self.home / child).mkdir(parents=True, exist_ok=True)
+
+    def validate_public_bind(self) -> None:
+        if self.host in {"127.0.0.1", "localhost", "::1"}:
+            return
+        if self.api_key in PLACEHOLDER_SECRETS or self.web_password in PLACEHOLDER_SECRETS:
+            raise ValueError("Public bind requires non-placeholder service.api_key and service.web_password.")
+        if not self.web_secure_cookies and not self.allow_insecure_public_bind:
+            raise ValueError("Public bind requires service.web_secure_cookies = true.")
 
 
 def _as_path(value: Any, default: Path) -> Path:
@@ -75,10 +90,16 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
 
     cfg = ServiceConfig(
         home=_as_path(service.get("home"), config_path.parent if config_path.name == "config.toml" else DEFAULT_HOME),
-        host=str(service.get("host", "127.0.0.1")),
-        port=int(service.get("port", 8765)),
+        host=str(os.environ.get("CONSCIO_HOST") or service.get("host", "127.0.0.1")),
+        port=int(os.environ.get("CONSCIO_PORT") or service.get("port", 8765)),
+        client_url=str(service.get("client_url") or os.environ.get("CONSCIO_CLIENT_URL", "")),
         api_key=str(service.get("api_key") or os.environ.get("CONSCIO_API_KEY", "")),
         web_password=str(service.get("web_password") or os.environ.get("CONSCIO_WEB_PASSWORD", "")),
+        web_secure_cookies=bool(service.get("web_secure_cookies", False) or os.environ.get("CONSCIO_WEB_SECURE_COOKIES") == "1"),
+        allow_insecure_public_bind=bool(
+            service.get("allow_insecure_public_bind", False)
+            or os.environ.get("CONSCIO_ALLOW_INSECURE_BIND") == "1"
+        ),
         autonomous=bool(service.get("autonomous", True)),
         tick_interval=float(service.get("tick_interval", 30.0)),
         unsafe_autonomy=bool(service.get("unsafe_autonomy", False)),
@@ -103,8 +124,11 @@ def write_default_config(path: str | Path | None = None) -> Path:
 home = "{config_path.parent}"
 host = "127.0.0.1"
 port = 8765
+client_url = ""
 api_key = "{api_key}"
 web_password = "{web_password}"
+web_secure_cookies = false
+allow_insecure_public_bind = false
 autonomous = true
 tick_interval = 30
 unsafe_autonomy = false

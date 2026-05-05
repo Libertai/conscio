@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import asyncio
+import hmac
+import os
+import signal
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel
 
 from conscio.config import ServiceConfig
@@ -28,7 +32,7 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
         expected = svc.config.api_key
         if not expected:
             raise HTTPException(status_code=500, detail="API key is not configured")
-        if authorization != f"Bearer {expected}":
+        if not hmac.compare_digest(authorization or "", f"Bearer {expected}"):
             raise HTTPException(status_code=401, detail="invalid API key")
 
     @asynccontextmanager
@@ -79,8 +83,9 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
         return {"paused": False}
 
     @app.post("/control/stop", dependencies=[Depends(require_auth)])
-    async def stop() -> dict[str, Any]:
+    async def stop(background_tasks: BackgroundTasks) -> dict[str, Any]:
         await svc.stop()
+        background_tasks.add_task(_terminate_process)
         return {"running": False}
 
     @app.get("/goals", dependencies=[Depends(require_auth)])
@@ -104,12 +109,18 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
 
     @app.post("/projects/{project_id}/pause", dependencies=[Depends(require_auth)])
     async def pause_project(project_id: str) -> dict[str, str]:
-        await svc.set_project_status(project_id, "paused")
+        try:
+            await svc.set_project_status(project_id, "paused")
+        except KeyError:
+            raise HTTPException(status_code=404, detail="project not found")
         return {"status": "paused"}
 
     @app.post("/projects/{project_id}/resume", dependencies=[Depends(require_auth)])
     async def resume_project(project_id: str) -> dict[str, str]:
-        await svc.set_project_status(project_id, "active")
+        try:
+            await svc.set_project_status(project_id, "active")
+        except KeyError:
+            raise HTTPException(status_code=404, detail="project not found")
         return {"status": "active"}
 
     @app.post("/autonomy/tick", dependencies=[Depends(require_auth)])
@@ -134,3 +145,8 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
     app.include_router(create_web_router(svc))
     app.state.conscio_service = svc
     return app
+
+
+async def _terminate_process() -> None:
+    await asyncio.sleep(0.1)
+    os.kill(os.getpid(), signal.SIGTERM)

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hmac
+import secrets
+import time
 from typing import Any
 
-from fastapi import APIRouter, Cookie, HTTPException, Response
+from fastapi import APIRouter, Cookie, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
@@ -22,19 +24,23 @@ class TextRequest(BaseModel):
 
 
 def _session_token(service: ConscioService) -> str:
-    secret = service.config.api_key or service.config.web_password
-    return hmac.new(secret.encode("utf-8"), service.config.web_password.encode("utf-8"), "sha256").hexdigest()
+    return secrets.token_urlsafe(32)
 
 
-def _require_web_auth(service: ConscioService, cookie: str | None) -> None:
+def _require_web_auth(service: ConscioService, sessions: dict[str, float], cookie: str | None) -> None:
     if not service.config.web_password:
         raise HTTPException(status_code=500, detail="web_password is not configured")
-    if not cookie or not hmac.compare_digest(cookie, _session_token(service)):
+    expires_at = sessions.get(cookie or "")
+    if not expires_at or expires_at < time.time():
+        if cookie:
+            sessions.pop(cookie, None)
         raise HTTPException(status_code=401, detail="not authenticated")
 
 
 def create_web_router(service: ConscioService) -> APIRouter:
     router = APIRouter()
+    sessions: dict[str, float] = {}
+    login_failures: dict[str, list[float]] = {}
 
     @router.get("/", include_in_schema=False)
     async def root() -> RedirectResponse:
@@ -45,37 +51,49 @@ def create_web_router(service: ConscioService) -> APIRouter:
         return LOGIN_HTML
 
     @router.post("/ui/login", include_in_schema=False)
-    async def login(req: LoginRequest, response: Response) -> dict[str, bool]:
+    async def login(req: LoginRequest, request: Request, response: Response) -> dict[str, bool]:
         if not service.config.web_password:
             raise HTTPException(status_code=500, detail="web_password is not configured")
+        client = request.client.host if request.client else "unknown"
+        recent = [t for t in login_failures.get(client, []) if t >= time.time() - 300]
+        if len(recent) >= 8:
+            login_failures[client] = recent
+            raise HTTPException(status_code=429, detail="too many login attempts")
         if not hmac.compare_digest(req.password, service.config.web_password):
+            recent.append(time.time())
+            login_failures[client] = recent
             raise HTTPException(status_code=401, detail="invalid password")
+        login_failures.pop(client, None)
+        token = _session_token(service)
+        sessions[token] = time.time() + (60 * 60 * 24 * 14)
         response.set_cookie(
             SESSION_COOKIE,
-            _session_token(service),
+            token,
             httponly=True,
-            secure=False,
+            secure=service.config.web_secure_cookies,
             samesite="lax",
             max_age=60 * 60 * 24 * 14,
         )
         return {"ok": True}
 
     @router.post("/ui/logout", include_in_schema=False)
-    async def logout(response: Response) -> dict[str, bool]:
+    async def logout(response: Response, conscio_web_session: str | None = Cookie(default=None)) -> dict[str, bool]:
+        if conscio_web_session:
+            sessions.pop(conscio_web_session, None)
         response.delete_cookie(SESSION_COOKIE)
         return {"ok": True}
 
     @router.get("/ui", response_class=HTMLResponse, include_in_schema=False)
     async def dashboard(conscio_web_session: str | None = Cookie(default=None)) -> HTMLResponse:
         try:
-            _require_web_auth(service, conscio_web_session)
+            _require_web_auth(service, sessions, conscio_web_session)
         except HTTPException:
             return HTMLResponse(LOGIN_HTML, status_code=401)
         return HTMLResponse(DASHBOARD_HTML)
 
     @router.get("/ui/api/snapshot", include_in_schema=False)
     async def snapshot(conscio_web_session: str | None = Cookie(default=None)) -> dict[str, Any]:
-        _require_web_auth(service, conscio_web_session)
+        _require_web_auth(service, sessions, conscio_web_session)
         return {
             "status": (await service.status()).__dict__,
             "goals": await service.goals.list_goals(),
@@ -87,23 +105,23 @@ def create_web_router(service: ConscioService) -> APIRouter:
 
     @router.post("/ui/api/message", include_in_schema=False)
     async def ui_message(req: TextRequest, conscio_web_session: str | None = Cookie(default=None)) -> dict[str, Any]:
-        _require_web_auth(service, conscio_web_session)
+        _require_web_auth(service, sessions, conscio_web_session)
         result = await service.submit_message(req.content)
         return {"output": result.output, "selected_action": result.selected_action}
 
     @router.post("/ui/api/influence/goal", include_in_schema=False)
     async def ui_goal(req: TextRequest, conscio_web_session: str | None = Cookie(default=None)) -> dict[str, Any]:
-        _require_web_auth(service, conscio_web_session)
+        _require_web_auth(service, sessions, conscio_web_session)
         return await service.submit_influence(req.content, kind="goal")
 
     @router.post("/ui/api/influence/constraint", include_in_schema=False)
     async def ui_constraint(req: TextRequest, conscio_web_session: str | None = Cookie(default=None)) -> dict[str, Any]:
-        _require_web_auth(service, conscio_web_session)
+        _require_web_auth(service, sessions, conscio_web_session)
         return await service.submit_influence(req.content, kind="constraint")
 
     @router.post("/ui/api/control/{action}", include_in_schema=False)
     async def ui_control(action: str, conscio_web_session: str | None = Cookie(default=None)) -> dict[str, Any]:
-        _require_web_auth(service, conscio_web_session)
+        _require_web_auth(service, sessions, conscio_web_session)
         if action == "pause":
             service.pause()
             return {"paused": True}
@@ -114,7 +132,7 @@ def create_web_router(service: ConscioService) -> APIRouter:
 
     @router.post("/ui/api/tick", include_in_schema=False)
     async def ui_tick(conscio_web_session: str | None = Cookie(default=None)) -> dict[str, Any]:
-        _require_web_auth(service, conscio_web_session)
+        _require_web_auth(service, sessions, conscio_web_session)
         result = await service.run_autonomous_tick()
         if result is None:
             return {"output": "", "selected_action": "wait"}

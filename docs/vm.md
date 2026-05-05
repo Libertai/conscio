@@ -7,7 +7,10 @@ inspection, pause, and resume.
 ## First Boot
 
 ```bash
-git clone <repo-url> /opt/conscio
+sudo useradd --create-home --home-dir /home/conscio conscio
+sudo git clone <repo-url> /opt/conscio
+sudo chown -R conscio:conscio /opt/conscio
+sudo -u conscio bash
 cd /opt/conscio
 python3 -m venv .venv
 . .venv/bin/activate
@@ -15,7 +18,8 @@ pip install -e .
 conscio service init
 ```
 
-Edit `~/.conscio/config.toml` and set a strong `api_key` and `web_password`.
+Edit `/home/conscio/.conscio/config.toml` and set a strong `api_key` and
+`web_password`.
 
 Start the service:
 
@@ -25,8 +29,8 @@ conscio service start
 
 The API and web UI bind to `127.0.0.1:8765` by default. Open the dashboard at
 `http://127.0.0.1:8765/ui`. Keep the localhost default unless the VM has HTTPS,
-a reverse proxy, firewall rules, and both `api_key` and `web_password`
-configured.
+a reverse proxy, firewall rules, non-placeholder `api_key` and `web_password`,
+and `web_secure_cookies = true` configured.
 
 ## User Interaction
 
@@ -71,8 +75,8 @@ cannot be enabled by an API request or CLI flag.
 
 ## systemd
 
-Create a `conscio` user, install the repo at `/opt/conscio`, create the venv,
-copy `systemd/conscio.service` to `/etc/systemd/system/conscio.service`, then:
+After creating `/home/conscio/.conscio/config.toml` as the `conscio` user, copy
+`systemd/conscio.service` to `/etc/systemd/system/conscio.service`, then:
 
 ```bash
 sudo systemctl daemon-reload
@@ -83,11 +87,14 @@ sudo journalctl -u conscio -f
 ## Docker Compose
 
 ```bash
+export CONSCIO_API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export CONSCIO_WEB_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
 docker compose up --build
 ```
 
-The compose file maps the service to localhost and stores state in the
-`conscio_home` volume.
+The compose file binds the service to `0.0.0.0` inside the container, publishes
+it only to host localhost, and stores state in the `conscio_home` volume. The
+CLI client should use `CONSCIO_CLIENT_URL=http://127.0.0.1:8765`.
 
 ## State And Recovery
 

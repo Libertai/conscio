@@ -46,6 +46,11 @@ CREATE TABLE IF NOT EXISTS service_traces (
     content TEXT NOT NULL,
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS action_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
 """
 
 
@@ -84,14 +89,20 @@ class AutonomyStore:
         self._conn().executescript(AUTONOMY_SCHEMA)
         self._conn().commit()
 
-    async def get_or_create_project(self, goal_id: str, goal_description: str) -> Project:
+    async def get_or_create_project(self, goal_id: str, goal_description: str) -> Project | None:
         row = self._conn().execute(
-            "SELECT * FROM projects WHERE goal_id = ? AND status IN ('active', 'paused') "
+            "SELECT * FROM projects WHERE goal_id = ? AND status = 'active' "
             "ORDER BY updated_at DESC LIMIT 1",
             (goal_id,),
         ).fetchone()
         if row:
             return Project(**dict(row))
+        paused = self._conn().execute(
+            "SELECT * FROM projects WHERE goal_id = ? AND status = 'paused' ORDER BY updated_at DESC LIMIT 1",
+            (goal_id,),
+        ).fetchone()
+        if paused:
+            return None
         now = time.time()
         project = Project(
             id=uuid.uuid4().hex,
@@ -118,7 +129,7 @@ class AutonomyStore:
         tool_args: dict[str, Any] | None = None,
     ) -> Task:
         row = self._conn().execute(
-            "SELECT * FROM tasks WHERE project_id = ? AND status IN ('pending', 'active', 'blocked') "
+            "SELECT * FROM tasks WHERE project_id = ? AND status IN ('pending', 'active') "
             "ORDER BY created_at LIMIT 1",
             (project_id,),
         ).fetchone()
@@ -191,16 +202,34 @@ class AutonomyStore:
 
     async def active_task(self) -> dict[str, Any] | None:
         row = self._conn().execute(
-            "SELECT * FROM tasks WHERE status IN ('pending', 'active') ORDER BY updated_at DESC LIMIT 1"
+            "SELECT tasks.* FROM tasks "
+            "JOIN projects ON projects.id = tasks.project_id "
+            "WHERE tasks.status IN ('pending', 'active') AND projects.status = 'active' "
+            "ORDER BY tasks.updated_at DESC LIMIT 1"
         ).fetchone()
         return asdict(self._task_from_row(row)) if row else None
 
-    async def set_project_status(self, project_id: str, status: str) -> None:
-        self._conn().execute(
+    async def set_project_status(self, project_id: str, status: str) -> bool:
+        cursor = self._conn().execute(
             "UPDATE projects SET status = ?, updated_at = ? WHERE id = ?",
             (status, time.time(), project_id),
         )
         self._conn().commit()
+        return cursor.rowcount > 0
+
+    async def record_action(self, kind: str) -> None:
+        self._conn().execute(
+            "INSERT INTO action_events (kind, created_at) VALUES (?, ?)",
+            (kind, time.time()),
+        )
+        self._conn().commit()
+
+    async def count_recent_actions(self, kind: str, seconds: int = 3600) -> int:
+        row = self._conn().execute(
+            "SELECT COUNT(*) AS count FROM action_events WHERE kind = ? AND created_at >= ?",
+            (kind, time.time() - seconds),
+        ).fetchone()
+        return int(row["count"]) if row else 0
 
     async def store_episode(
         self,

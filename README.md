@@ -114,7 +114,9 @@ Unsafe autonomy is read from `~/.conscio/config.toml`; it cannot be enabled by
 an API request or CLI flag at runtime.
 
 For web exposure, put Conscio behind HTTPS and keep both `api_key` and
-`web_password` set. Public binding is refused without both values.
+`web_password` set. Public binding is refused with placeholder secrets and
+requires `web_secure_cookies = true` unless an explicitly localhost-published
+container sets `CONSCIO_ALLOW_INSECURE_BIND=1`.
 
 See [docs/vm.md](docs/vm.md) for systemd and Docker deployment.
 

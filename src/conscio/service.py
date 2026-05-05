@@ -66,10 +66,30 @@ class ServiceLock:
         try:
             fd = os.open(self.path, flags)
         except FileExistsError as exc:
-            raise RuntimeError(f"Conscio service lock already exists: {self.path}") from exc
+            if self._remove_stale_lock():
+                fd = os.open(self.path, flags)
+            else:
+                raise RuntimeError(f"Conscio service lock already exists: {self.path}") from exc
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(json.dumps({"pid": os.getpid(), "created_at": time.time()}))
         self.acquired = True
+
+    def _remove_stale_lock(self) -> bool:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            pid = int(data.get("pid", 0))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return False
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            self.path.unlink(missing_ok=True)
+            return True
+        except PermissionError:
+            return False
+        return False
 
     def release(self) -> None:
         if self.acquired:
@@ -106,9 +126,9 @@ class ConscioService:
         self.last_autonomous_action = ""
         self._loop_task: asyncio.Task | None = None
         self._event_task: asyncio.Task | None = None
+        self._current_queue_item: QueuedEvent | None = None
         self._episodes: list[StoredEpisode] = []
-        self._action_times: list[float] = []
-        self._tool_action_times: list[float] = []
+        self._autonomous_action_times: list[float] = []
         self._event_lock = asyncio.Lock()
 
     async def start(self, *, acquire_lock: bool = True, background: bool = True) -> None:
@@ -116,18 +136,22 @@ class ConscioService:
             return
         if acquire_lock:
             self.lock.acquire()
-        await self.goals.initialize()
-        await self.autonomy.initialize()
-        await self.runtime.initialize()
-        self.running = True
-        self.started_at = time.time()
-        goal = await self.goals.active_goal()
-        if goal:
-            self.runtime.self_state.active_goal = goal.description
-        if background:
-            self._event_task = asyncio.create_task(self._event_worker())
-        if background and self.config.autonomous:
-            self._loop_task = asyncio.create_task(self._autonomous_loop())
+        try:
+            await self.goals.initialize()
+            await self.autonomy.initialize()
+            await self.runtime.initialize()
+            self.running = True
+            self.started_at = time.time()
+            goal = await self.goals.active_goal()
+            if goal:
+                self.runtime.self_state.active_goal = goal.description
+            if background:
+                self._event_task = asyncio.create_task(self._event_worker())
+            if background and self.config.autonomous:
+                self._loop_task = asyncio.create_task(self._autonomous_loop())
+        except Exception:
+            self.lock.release()
+            raise
 
     async def stop(self) -> None:
         self.running = False
@@ -145,6 +169,7 @@ class ConscioService:
             except asyncio.CancelledError:
                 pass
             self._event_task = None
+        self._fail_pending_events(RuntimeError("Conscio service stopped."))
         await self.runtime.close()
         self.lock.release()
 
@@ -174,8 +199,9 @@ class ConscioService:
     async def run_autonomous_tick(self) -> EpisodeResult | None:
         if self.paused or not self.running:
             return None
-        if not self._within_action_budget(self._action_times, self.config.max_actions_per_hour):
+        if not self._within_action_budget(self._autonomous_action_times, self.config.max_actions_per_hour):
             return None
+        self._autonomous_action_times.append(time.time())
         return await self._submit_event(
             InputEvent(
                 content="Autonomous heartbeat: review my wants and choose the next useful action.",
@@ -203,15 +229,35 @@ class ConscioService:
     async def _event_worker(self) -> None:
         while self.running:
             item = await self.queue.get()
+            self._current_queue_item = item
             try:
                 result = await self._process_event(item.event, autonomous=item.autonomous)
                 if not item.future.done():
                     item.future.set_result(result)
+            except asyncio.CancelledError as exc:
+                if not item.future.done():
+                    item.future.set_exception(RuntimeError("Conscio service stopped."))
+                raise exc
             except Exception as exc:
                 if not item.future.done():
                     item.future.set_exception(exc)
             finally:
+                if self._current_queue_item is item:
+                    self._current_queue_item = None
                 self.queue.task_done()
+
+    def _fail_pending_events(self, exc: Exception) -> None:
+        if self._current_queue_item is not None and not self._current_queue_item.future.done():
+            self._current_queue_item.future.set_exception(exc)
+            self._current_queue_item = None
+        while True:
+            try:
+                item = self.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if not item.future.done():
+                item.future.set_exception(exc)
+            self.queue.task_done()
 
     async def _process_event(self, event: InputEvent, *, autonomous: bool = False) -> EpisodeResult | None:
         async with self._event_lock:
@@ -224,7 +270,6 @@ class ConscioService:
                 self.current_event = ""
 
     async def _run_episode(self, event: InputEvent) -> EpisodeResult:
-        self._action_times.append(time.time())
         try:
             result = await self.runtime.run_episode(event)
             await self._store_episode(event, result)
@@ -241,8 +286,18 @@ class ConscioService:
             return await self._run_episode(event)
         self.runtime.self_state.active_goal = goal.description
         project = await self.autonomy.get_or_create_project(goal.id, goal.description)
+        if project is None:
+            self.last_autonomous_action = "wait:project_paused"
+            return await self._run_episode(
+                InputEvent(
+                    content=f"Autonomous heartbeat: active goal '{goal.description}' has a paused project, so I will not continue it.",
+                    source="autonomous",
+                    event_type="project_paused",
+                )
+            )
         constraints = await self.goals.active_constraints()
-        if self.config.unsafe_autonomy and self._within_action_budget(self._tool_action_times, self.config.max_actions_per_hour):
+        recent_tool_actions = await self.autonomy.count_recent_actions("tool")
+        if self.config.unsafe_autonomy and recent_tool_actions < self.config.max_actions_per_hour:
             note = (
                 f"Conscio autonomous action for goal {goal.id}: "
                 f"{goal.description[:80]} | constraints={len(constraints)}"
@@ -256,7 +311,7 @@ class ConscioService:
             )
             await self.autonomy.update_task(task.id, status="active")
             tool_result = await self.runtime.tools.call(task.tool_name or "bash", task.tool_args)
-            self._tool_action_times.append(time.time())
+            await self.autonomy.record_action("tool")
             status = "done" if not tool_result.get("error") and int(tool_result.get("exit_code", 0)) == 0 else "blocked"
             await self.autonomy.update_task(task.id, status=status, result=str(tool_result.get("output", ""))[:1000])
             self.last_autonomous_action = f"tool:{task.tool_name}:{status}"
@@ -297,7 +352,7 @@ class ConscioService:
             current_project=current_project,
             current_task=current_task,
             last_autonomous_action=self.last_autonomous_action,
-            actions_last_hour=len(self._recent_actions(self._tool_action_times)),
+            actions_last_hour=await self.autonomy.count_recent_actions("tool"),
             episode_count=len(await self.recent_episodes(1000)),
             last_error=self.last_error,
         )
@@ -322,7 +377,9 @@ class ConscioService:
         return await self.autonomy.get_project(project_id)
 
     async def set_project_status(self, project_id: str, status: str) -> None:
-        await self.autonomy.set_project_status(project_id, status)
+        changed = await self.autonomy.set_project_status(project_id, status)
+        if not changed:
+            raise KeyError(project_id)
 
     async def list_influences(self) -> list[dict[str, Any]]:
         return await self.goals.list_influences()

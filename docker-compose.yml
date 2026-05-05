@@ -9,6 +9,11 @@ services:
       - ./work:/opt/conscio/work
     environment:
       - CONSCIO_CONFIG=/home/conscio/.conscio/config.toml
+      - CONSCIO_HOST=0.0.0.0
+      - CONSCIO_CLIENT_URL=http://127.0.0.1:8765
+      - CONSCIO_API_KEY=${CONSCIO_API_KEY:?set CONSCIO_API_KEY}
+      - CONSCIO_WEB_PASSWORD=${CONSCIO_WEB_PASSWORD:?set CONSCIO_WEB_PASSWORD}
+      - CONSCIO_ALLOW_INSECURE_BIND=1
 
 volumes:
   conscio_home:
