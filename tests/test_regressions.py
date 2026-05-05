@@ -6,7 +6,6 @@ import unittest
 from unittest.mock import patch
 
 from conscio.core.agent import ConsciousAgent, compose_cycle_output
-from conscio.core.identity import Identity
 from conscio.core.monologue import Monologue
 from conscio.core.workspace import Workspace
 from conscio.memory.store import MemoryStore
@@ -61,18 +60,11 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class IdentityTests(unittest.TestCase):
-    def test_agent_explicit_persona_updates_loaded_identity(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            identity_path = os.path.join(tmp, "identity.json")
-            with patch("conscio.core.identity._HOME_DIR", tmp), patch(
-                "conscio.core.identity._IDENTITY_PATH",
-                identity_path,
-            ):
-                Identity(name="Conscio", persona="old").save()
-                ConsciousAgent(persona="new")
+    def test_agent_exposes_runtime_identity_proxy(self) -> None:
+        agent = ConsciousAgent(name="Test", persona="research harness")
 
-                reloaded = Identity.load_or_create()
-                self.assertEqual(reloaded.persona, "new")
+        self.assertEqual(agent.identity.name, "Test")
+        self.assertEqual(agent.identity.persona, "research harness")
 
 
 class AgentOutputTests(unittest.TestCase):

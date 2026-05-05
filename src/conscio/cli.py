@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+import tempfile
 import time
 
 from rich.console import Console
@@ -10,10 +11,13 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.table import Table
-from rich.text import Text
 from rich.tree import Tree
 
 from conscio.core.agent import ConsciousAgent
+from conscio.core.cognition import InputEvent
+from conscio.core.runtime import CognitiveRuntime
+from conscio.eval import run_eval_suite
+from conscio.memory.store import MemoryStore
 
 console = Console()
 
@@ -60,9 +64,13 @@ def _print_result(result) -> None:
     info.add_row("Confidence", result.confidence)
     info.add_row("Rounds", str(result.rounds))
     info.add_row("Duration", f"{result.duration:.2f}s")
+    if result.selected_action:
+        info.add_row("Action", result.selected_action)
     if result.self_state:
         info.add_row("Uncertainty", f"{result.self_state.get('uncertainty', 0):.2f}")
         info.add_row("Conflict", f"{result.self_state.get('conflict_level', 0):.2f}")
+    if result.attention_schema:
+        info.add_row("Focus", result.attention_schema.get("focus", ""))
     console.print(Panel(info, title="⚡ Cycle Summary", border_style="dim"))
 
     if result.inner_monologue:
@@ -93,13 +101,14 @@ async def _run_interactive(
     name: str,
     persona: str,
     model: str | None,
+    offline: bool = False,
 ) -> None:
     console.print(Panel.fit(
         f"[bold]conscio[/] — {name}\n"
         f"[dim]{persona or 'No persona set'}[/]",
         border_style="blue",
     ))
-    agent = ConsciousAgent(name=name, persona=persona, model=model)
+    agent = ConsciousAgent(name=name, persona=persona, model=model, use_llm=not offline)
     await agent.initialize()
     try:
         while True:
@@ -145,8 +154,9 @@ async def _run_ask(
     persona: str,
     model: str | None,
     quiet: bool = False,
+    offline: bool = False,
 ) -> None:
-    agent = ConsciousAgent(name=name, persona=persona, model=model)
+    agent = ConsciousAgent(name=name, persona=persona, model=model, use_llm=not offline)
     await agent.initialize()
     try:
         if not quiet:
@@ -201,6 +211,43 @@ async def _search_memory(query: str) -> None:
         await agent.memory.close()
 
 
+async def _run_daemon_dry_run(events: list[str]) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        runtime = CognitiveRuntime(llm=None, memory=MemoryStore(db_path=f"{tmp}/daemon.db"))
+        await runtime.initialize()
+        try:
+            input_events = [InputEvent(content=e, source="daemon", event_type="dry_run") for e in events]
+            results = await runtime.run_daemon(input_events, dry_run=True)
+            for result in results:
+                console.print(Panel(result.output, title=f"Action: {result.selected_action}", border_style="green"))
+                console.print(Panel(result.cognitive_trace, title="Cognitive Trace", border_style="dim"))
+        finally:
+            await runtime.close()
+
+
+async def _run_eval(suite: str) -> None:
+    rows = await run_eval_suite(suite)
+    table = Table(title=f"Eval Suite: {suite}")
+    table.add_column("Case", style="cyan")
+    table.add_column("Mode")
+    table.add_column("Pass")
+    table.add_column("Action")
+    table.add_column("Ticks")
+    table.add_column("Attention")
+    table.add_column("PredErr")
+    for row in rows:
+        table.add_row(
+            row.name,
+            row.mode,
+            "yes" if row.passed else "no",
+            row.selected_action,
+            str(row.ticks),
+            str(row.attention_selections),
+            str(row.prediction_errors),
+        )
+    console.print(table)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="conscio — A consciousness harness for AI agents",
@@ -211,6 +258,7 @@ def main() -> None:
     run_p.add_argument("--name", default="Conscio", help="Agent name")
     run_p.add_argument("--persona", default="", help="Agent persona/backstory")
     run_p.add_argument("--model", default=None, help="LLM model to use")
+    run_p.add_argument("--offline", action="store_true", help="Disable LLM calls and use deterministic modules")
 
     ask_p = sub.add_parser("ask", help="Ask a single question")
     ask_p.add_argument("input", nargs="+", help="Question to ask")
@@ -218,23 +266,33 @@ def main() -> None:
     ask_p.add_argument("--persona", default="", help="Agent persona/backstory")
     ask_p.add_argument("--model", default=None, help="LLM model to use")
     ask_p.add_argument("--quiet", action="store_true", help="Only print the answer")
+    ask_p.add_argument("--offline", action="store_true", help="Disable LLM calls and use deterministic modules")
 
     sub.add_parser("history", help="Show past sessions")
     search_p = sub.add_parser("search", help="Search across memories")
     search_p.add_argument("query", nargs="+", help="Search query")
+    daemon_p = sub.add_parser("daemon", help="Run daemon dry-run events")
+    daemon_p.add_argument("--dry-run", action="store_true", default=True, help="Process events without unsafe autonomy")
+    daemon_p.add_argument("events", nargs="*", default=["Daemon dry-run heartbeat"], help="Events to process")
+    eval_p = sub.add_parser("eval", help="Run built-in evaluation suites")
+    eval_p.add_argument("--suite", default="smoke", help="Evaluation suite name")
 
     args = parser.parse_args()
 
     if args.command == "run":
-        asyncio.run(_run_interactive(args.name, args.persona, args.model))
+        asyncio.run(_run_interactive(args.name, args.persona, args.model, args.offline))
     elif args.command == "ask":
         text = " ".join(args.input)
-        asyncio.run(_run_ask(text, args.name, args.persona, args.model, args.quiet))
+        asyncio.run(_run_ask(text, args.name, args.persona, args.model, args.quiet, args.offline))
     elif args.command == "history":
         asyncio.run(_show_history())
     elif args.command == "search":
         query = " ".join(args.query)
         asyncio.run(_search_memory(query))
+    elif args.command == "daemon":
+        asyncio.run(_run_daemon_dry_run(args.events))
+    elif args.command == "eval":
+        asyncio.run(_run_eval(args.suite))
     else:
         parser.print_help()
         sys.exit(1)

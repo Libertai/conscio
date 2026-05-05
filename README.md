@@ -1,203 +1,162 @@
-# conscio — A Consciousness Harness for AI Agents
+# conscio
 
-A research harness for exploring what "consciousness" means architecturally in an LLM agent. Grounded in **Global Workspace Theory** + **structured self-reflection** + **stream-of-consciousness inner monologue**.
+An auditable harness for building and testing consciousness-inspired AI agent
+architectures.
 
-## What It Does
+Conscio does **not** claim that language models are conscious. Its goal is more
+concrete: implement computational indicators discussed in consciousness science
+and measure whether they improve agent control, self-monitoring, memory, and
+recovery from error.
 
-An agent running in `conscio` cycles through a visible conscious process:
+## Core Thesis
 
-```
-OBSERVE → REFLECT → PLAN → ACT → REVIEW
-```
+Most LLM agents are prompt pipelines. Conscio is organized as an event-driven
+cognitive architecture:
 
-At every step, the agent writes into a visible **inner monologue** (stream of consciousness) and a shared **Global Workspace** (blackboard) that specialist modules read from and write to. It critiques its own plans, estimates its confidence, and reflects more when uncertain.
-
-```
-🧠 Stream of Consciousness
-├── 👁 observation: The user asks a philosophical question about consciousness...
-├── 💭 reflection: This question has three dimensions — subjective experience,...
-├── 🎯 intention: I should address each dimension clearly...
-├── ✅ evaluation: Correctness: 8/10, the response is accurate but could be...
-├── 📖 learning: The user values concise explanations with concrete examples...
+```text
+events -> local specialist candidates -> attention competition
+       -> global workspace broadcast -> competing intentions
+       -> action selection -> prediction/error -> memory consolidation
 ```
 
-## Features
+The system separates mechanistic trace from model self-report. A generated
+"inner monologue" is not treated as ground truth; the harness records what
+actually happened in the runtime.
 
-- **Global Workspace** — shared blackboard with priority-scored entries, attention mechanism, and subscriber broadcast
-- **Selective Attention** — local workspace entries compete on salience, novelty, urgency, confidence, and conflict before global broadcast
-- **Inner Monologue DAG** — stream of consciousness as a directed acyclic graph of thoughts (observations, reflections, intentions, evaluations, learnings)
-- **Cognitive Trace** — factual mechanism log separated from the model's natural-language self-report
-- **Self-Reflection Loop** — generate → critique → refine with multi-axis evaluation (correctness, completeness, safety, clarity)
-- **Dynamic Confidence** — LOW/MEDIUM/HIGH estimation gates how deeply the agent reflects before acting
-- **Self-Model** — explicit uncertainty, conflict, cognitive load, current strategy, and last-error state
-- **Persistent Identity** — persona, goals, and history stored across sessions in `~/.conscio/identity.json`
-- **SQLite Memory** — episodic, semantic, and procedural memory with FTS5 full-text search
-- **Specialist Modules** — Observer, Planner, Critic, and Executor that compete/cooperate via the workspace
-- **Built-in Tools** — bash shell, web search, Python code execution (auto-discovered via registry)
-- **Rich CLI** — interactive TUI with tree-view monologue and cycle summaries
+## Implemented Architecture
+
+- **Global Workspace**: local/preconscious entries compete for global broadcast.
+- **Selective Attention**: scores novelty, salience, urgency, confidence,
+  conflict, uncertainty, and priority.
+- **Attention Schema**: records what the runtime attended to, why it won, and
+  what was ignored.
+- **Self-Model**: tracks active goal, uncertainty, conflict, cognitive load,
+  attention focus, current intention, prediction error, and limitations.
+- **Evented Modules**: observer, memory retriever, responder, tool proposer,
+  constraint monitor, and reflector emit candidates independently.
+- **Competing Intentions**: action selection chooses answer, tool use, ask,
+  reflect, refuse, wait, or stop.
+- **Prediction Engine**: selected intentions declare expected observations;
+  mismatches become prediction-error entries.
+- **Memory Consolidation**: episodes become episodic summaries and procedural
+  skill traces.
+- **Built-in Evals**: smoke ablations exercise instruction constraints,
+  self-report boundaries, attention selection, and prediction/error metrics.
 
 ## Quick Start
 
-### Install
-
 ```bash
-git clone <repo>
-cd consciousness
 uv venv && source .venv/bin/activate
 uv pip install -e .
 ```
 
-### Configure
-
-Copy the example config and add your API key:
+Configure an OpenAI-compatible backend if you want LLM-backed responses:
 
 ```bash
-cp .env.example .env
-# edit .env with your credentials
+export LIBERTAI_API_KEY=...
+export LIBERTAI_BASE_URL=https://api.libertai.io/v1
+export LIBERTAI_MODEL=deepseek-v4-flash
 ```
 
-### Run
+Run one cognitive episode:
 
 ```bash
-# Interactive session
-conscio run --persona "A curious philosopher"
-
-# One-shot question
-conscio ask "What is consciousness?" --quiet
-
-# Full output with inner monologue
-conscio ask "What makes a system conscious?"
-
-# Search past memories
-conscio search "consciousness"
-
-# View session history
-conscio history
+conscio ask "Answer in one word: what is 2+2?"
 ```
 
-## Architecture
-
-```
-src/conscio/
-├── cli.py                      # CLI entry point (run/ask/history/search)
-├── core/
-│   ├── agent.py                # ConsciousAgent — the cycle orchestrator
-│   ├── cognition.py            # Attention, self-state, conflict monitor, action selection
-│   ├── workspace.py            # Global Workspace (blackboard + broadcast)
-│   ├── monologue.py            # Stream-of-consciousness DAG
-│   ├── reflection.py           # Self-reflection loop (generate→critique→refine)
-│   ├── identity.py             # Persistent self (persona, goals, history)
-│   └── confidence.py           # Dynamic confidence estimation
-├── modules/
-│   ├── observer.py             # Perception → structured observations
-│   ├── planner.py              # Goal setting & plan generation
-│   ├── critic.py               # Multi-axis evaluation
-│   └── executor.py             # Tool call execution
-├── memory/
-│   ├── store.py                # SQLite: episodic/semantic/procedural + FTS5
-│   └── search.py               # Full-text search across memories
-├── llm/
-│   ├── client.py               # OpenAI-compatible client → LibertAI
-│   └── prompts.py              # Module-specific system prompts
-└── tools/
-    ├── registry.py             # Auto-discovering tool registry
-    ├── bash.py                 # Shell command execution
-    ├── web.py                  # Web search + fetch (via libertai CLI)
-    └── code.py                 # Python code execution
-```
-
-## The Conscious Cycle
-
-### One Full Cycle
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                     CONSCIOUS CYCLE                          │
-├──────────────────────────────────────────────────────────────┤
-│  1. OBSERVE → Observer perceives input, writes to workspace  │
-│               and inner monologue                             │
-│                                                              │
-│  2. REFLECT → Agent reviews workspace state, asks itself:    │
-│               "What am I trying to do?"                      │
-│               "What do I know?"                              │
-│               "What am I unsure about?"                      │
-│                                                              │
-│  3. ATTEND → Salient entries are selected for broadcast       │
-│              Self-state tracks uncertainty/conflict/load      │
-│                                                              │
-│  4. PLAN → Planner proposes actions                          │
-│             Critic and conflict monitor evaluate them         │
-│             Low confidence/conflict → reflect more           │
-│             High confidence/no conflict → proceed            │
-│                                                              │
-│  5. ACT → Executor runs tool calls, writes results           │
-│                                                              │
-│  6. REVIEW → "Did that work? What did I learn?"             │
-│              Persist to memory                               │
-└──────────────────────────────────────────────────────────────┘
-```
-
-## Configuration
-
-| Env Var | Default | Description |
-|---------|---------|-------------|
-| `LIBERTAI_API_KEY` | — | LibertAI API key |
-| `LIBERTAI_BASE_URL` | `https://api.libertai.io/v1` | API base URL |
-| `LIBERTAI_MODEL` | `deepseek-v4-flash` | Model name |
-| `OPENAI_API_KEY` | — | Fallback (same endpoint) |
-| `OPENAI_BASE_URL` | — | Fallback (same endpoint) |
-
-### State Storage
-
-```
-~/.conscio/
-├── identity.json     # Persistent self (persona, goals, history)
-└── sessions.db       # SQLite: inner monologues + memories
-```
-
-## Theoretical Foundations
-
-| Theory | How It Maps to Architecture |
-|--------|---------------------------|
-| **Global Workspace Theory** (Baars) | Shared `Workspace` blackboard. Specialist modules compete/cooperate. Attention selects content for global broadcast. |
-| **Self-Refine / Self-Reflection** (Madaan et al.) | Generate → Critique → Refine loop with dynamic depth. |
-| **Integrated Information Theory** | Dense recurrent connectivity between modules. The whole produces effects no part alone can. |
-| **Inner Monologue / CoT** (Wei et al.) | Visible DAG of structured introspective thoughts. |
-| **Dual-Process Theory** | Fast (intuitive) vs. slow (deliberative) processing gated by confidence. |
-
-## CLI Reference
+Run without any LLM/network dependency:
 
 ```bash
-conscio run [--name NAME] [--persona PERSONA] [--model MODEL]
-    Start an interactive conscious agent session.
+conscio ask --offline "Answer in one word: what is 2+2?"
+```
 
-conscio ask TEXT [--name NAME] [--persona PERSONA] [--model MODEL] [--quiet]
-    Ask a single question. Without --quiet, shows the full inner monologue.
+Run an interactive session:
+
+```bash
+conscio run
+```
+
+Run daemon dry-run events without autonomous unsafe actions:
+
+```bash
+conscio daemon --dry-run "Daemon dry-run heartbeat"
+```
+
+Run the built-in evaluation smoke suite:
+
+```bash
+conscio eval --suite smoke
+```
+
+## CLI Commands
+
+```text
+conscio ask TEXT [--model MODEL] [--quiet] [--offline]
+    Run one evented cognitive episode and print the selected response.
+
+conscio run [--model MODEL] [--offline]
+    Interactive turn-based cognitive episodes.
+
+conscio daemon --dry-run [EVENT ...]
+    Process events through the daemon scaffold without unsafe autonomy.
+
+conscio eval --suite smoke
+    Run built-in harness evaluations and show metrics.
 
 conscio history
-    Show past sessions.
+    Show persisted episodes.
 
 conscio search QUERY
-    Search across all memories (FTS5).
-
-# Interactive commands (inside conscio run):
-/exit, /quit        End the session
-/clear              Clear the workspace
-/memory             Show recent memories
-/persona <text>     Change persona mid-session
+    Search memory.
 ```
 
-## Comparison with Hermes Agent
+## Theory Mapping
 
-**Hermes Agent** (NousResearch, 133k+ stars) is a production-grade general-purpose AI assistant with CLI, Telegram, Discord, MCP, cron scheduling, 40+ tools, and a sophisticated skill curation/learning loop.
+| Theory | Conscio implementation |
+| --- | --- |
+| Global Workspace Theory / GNW | Local candidates, attention competition, global broadcast |
+| Recurrent Processing | Repeated module ticks over a changing workspace |
+| Higher-Order / Self-Model theories | Explicit self-state and self-monitoring fields |
+| Attention Schema Theory | Runtime model of attention focus, ignored candidates, and interruptors |
+| Predictive Processing / Active Inference | Intentions carry expected observations; mismatch creates prediction error |
+| IIT-inspired integration | Shared recurrent workspace and traceable cross-module causal influence, not Phi claims |
 
-**`conscio`** is complementary — it focuses specifically on:
+## Project Layout
 
-- Making consciousness architectures **explicit and visible** rather than implicit in prompt templates
-- **Inner monologue as a first-class citizen** — not hidden internals but a visible stream of thought
-- **Global Workspace Theory** as the organizing architectural principle
-- **Dynamic reflection depth** gated by confidence estimation, not fixed loop counts
-- **Research / experimentation** over production readiness
+```text
+src/conscio/
+├── core/
+│   ├── runtime.py      # Evented cognitive runtime
+│   ├── cognition.py    # Self-state, attention, intentions, prediction
+│   ├── workspace.py    # Local/global workspace entries
+│   └── agent.py        # Thin compatibility wrapper around the runtime
+├── memory/             # SQLite episodic/semantic/procedural memory
+├── tools/              # Tool registry and guarded built-ins
+├── eval.py             # Built-in evaluation harness
+└── cli.py              # CLI entrypoint
+```
+
+## Research Claim
+
+The defensible claim is:
+
+> Conscio implements and measures a set of computational indicators associated
+> with scientific theories of consciousness in an auditable AI-agent runtime.
+
+The project does not infer phenomenal experience, moral status, or subjective
+feeling. It provides a substrate for experiments about attention, self-modeling,
+prediction, memory, and adaptive control.
+
+## References
+
+- Butlin et al. 2023, "Consciousness in Artificial Intelligence":
+  https://huggingface.co/papers/2308.08708
+- Albantakis et al. 2023, "Integrated Information Theory 4.0":
+  https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1011465
+- Graziano & Webb 2015, "The Attention Schema Theory":
+  https://pubmed.ncbi.nlm.nih.gov/25954242/
+- LIDA Global Workspace architecture:
+  https://aaai.org/papers/0011-fs07-01-011-%EF%80%A0lida-a-computational-model-of-global-workspace-theory-and-developmental-learning/
 
 ## License
 

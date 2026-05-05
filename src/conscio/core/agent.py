@@ -1,29 +1,11 @@
 from __future__ import annotations
 
-import time
-import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from conscio.core.cognition import (
-    ActionSelector,
-    AttentionController,
-    CognitiveTrace,
-    ConflictMonitor,
-    SelfState,
-)
-from conscio.core.confidence import ConfidenceLevel
-from conscio.core.identity import Identity
-from conscio.core.monologue import Monologue, ThoughtType
-from conscio.core.reflection import Reflection
-from conscio.core.workspace import EntryType, Workspace
+from conscio.core.cognition import InputEvent
+from conscio.core.runtime import CognitiveRuntime, EpisodeResult
 from conscio.llm.client import LLMClient
-from conscio.memory.store import MemoryStore
-from conscio.modules.critic import Critic
-from conscio.modules.executor import Executor
-from conscio.modules.observer import Observer
-from conscio.modules.planner import Planner
-from conscio.tools import ToolRegistry
 
 
 @dataclass
@@ -37,6 +19,9 @@ class CycleResult:
     duration: float = 0.0
     cognitive_trace: str = ""
     self_state: dict[str, Any] = field(default_factory=dict)
+    attention_schema: dict[str, Any] = field(default_factory=dict)
+    selected_action: str = ""
+    workspace_trace: str = ""
 
 
 def compose_cycle_output(reflection_output: str, tool_results: list[dict]) -> str:
@@ -59,14 +44,7 @@ def compose_cycle_output(reflection_output: str, tool_results: list[dict]) -> st
 
 
 class ConsciousAgent:
-    """A conscious AI agent that perceives, reflects, plans, acts, and reviews.
-
-    The agent runs a conscious cycle inspired by Global Workspace Theory:
-       OBSERVE → REFLECT → PLAN → ACT → REVIEW
-
-    At each stage, thoughts are recorded in an inner monologue (visible DAG) and
-    posted to a shared workspace that specialist modules read from and write to.
-    """
+    """Compatibility wrapper around the evented cognitive runtime."""
 
     def __init__(
         self,
@@ -74,219 +52,63 @@ class ConsciousAgent:
         persona: str = "",
         model: str | None = None,
         base_url: str | None = None,
+        use_llm: bool = True,
     ) -> None:
         self.name = name
         self.persona = persona
-        self.session_id = uuid.uuid4().hex[:16]
-        self._created = time.time()
-
         self.llm = LLMClient(base_url=base_url, model=model)
-        self.identity = Identity.load_or_create(name=name, persona=persona)
-        identity_changed = False
-        if persona and self.identity.persona != persona:
-            self.identity.persona = persona
-            identity_changed = True
-        if name != "Conscio" and self.identity.name != name:
-            self.identity.name = name
-            identity_changed = True
-        if identity_changed:
-            self.identity.save()
-        self.workspace = Workspace()
-        self.monologue = Monologue()
-        self.trace = CognitiveTrace()
-        self.self_state = SelfState(active_goal=self.identity.format_goals())
-        self.attention = AttentionController()
-        self.conflicts = ConflictMonitor()
-        self.action_selector = ActionSelector()
-        self.memory = MemoryStore()
-        self.tools = ToolRegistry()
-        self.tools.load_builtins()
-        self.reflection = Reflection(self.llm)
-        self.observer = Observer(self.llm, self.workspace, self.monologue)
-        self.planner = Planner(self.llm, self.workspace, self.monologue)
-        self.critic = Critic(self.llm, self.monologue)
-        self.executor = Executor(self.workspace, self.monologue, self.tools)
+        runtime_llm = self.llm if use_llm and self.llm.api_key else None
+        self.runtime = CognitiveRuntime(llm=runtime_llm)
+        self.session_id = self.runtime.session_id
+        self.workspace = self.runtime.workspace
+        self.memory = self.runtime.memory
+        self.identity = _RuntimeIdentityProxy(name=name, persona=persona)
 
     async def initialize(self) -> None:
-        await self.memory.initialize()
-        await self.memory.create_session(self.session_id, name=f"{self.name} session")
-        self.identity.session_count += 1
-        self.identity.save()
+        await self.runtime.initialize()
 
     async def close(self) -> None:
-        await self.memory.end_session(self.session_id)
+        await self.runtime.close()
 
     async def observe(self, raw_input: str, source: str = "user") -> dict[str, Any]:
-        goals_text = self.identity.format_goals()
-        return await self.observer.observe(raw_input, source=source, goal=goals_text)
+        event = InputEvent(content=raw_input, source=source)
+        self.runtime._ingest_event(event)
+        return {"source": source, "raw": raw_input, "observation": raw_input}
 
     async def cycle(self, user_input: str, source: str = "user") -> CycleResult:
-        """Run one full conscious cycle: OBSERVE → REFLECT → PLAN → ACT → REVIEW."""
-        start_time = time.time()
-        self.self_state.active_goal = self.identity.format_goals()
-        self.self_state.cognitive_load = min(1.0, self.workspace.size / 100)
-        self.trace.record("cycle_started", "agent", source=source)
+        result = await self.runtime.run_episode(InputEvent(content=user_input, source=source))
+        return _cycle_result_from_episode(result)
 
-        # ── 1. OBSERVE ────────────────────────────────────────────────
-        observation = await self.observe(user_input, source=source)
-        self.trace.record("observed_input", "observer", source=source)
-        self._publish_self_state()
-        self.attention.attend(self.workspace, self.self_state, self.trace)
 
-        # ── 2. REFLECT ────────────────────────────────────────────────
-        workspace_context = self.workspace.format_context()
-        memory_context = await self.memory.format_context(self.session_id)
-        goals_text = self.identity.format_goals()
-        context = f"{memory_context}\n{workspace_context}"
-        reflection_result = await self.reflection.reflect(
-            context=context,
-            goal=goals_text,
-            task=user_input,
-        )
-        self.self_state.update_from_confidence(reflection_result["confidence"])
-        self.trace.record(
-            "reflection_completed",
-            "reflection",
-            confidence=reflection_result["confidence"],
-            rounds=reflection_result["rounds"],
-        )
-        self._publish_self_state()
-        self.attention.attend(self.workspace, self.self_state, self.trace)
+class _RuntimeIdentityProxy:
+    """Small CLI compatibility shim while identity moves into the runtime."""
 
-        # ── 3. PLAN ───────────────────────────────────────────────────
-        tool_descs = self.tools.tool_descriptions()
-        plan_result = await self.planner.plan(
-            goal=goals_text,
-            context=f"{context}\n\nReflection: {reflection_result['output'][:500]}",
-            tool_descriptions=tool_descs,
-        )
-        plan_conflicts = self.conflicts.inspect_plan(user_input, plan_result["plan"], self.workspace)
-        if plan_conflicts:
-            self.self_state.conflict_level = min(1.0, self.self_state.conflict_level + 0.35)
-            self.trace.record("conflict_detected", "conflict_monitor", count=len(plan_conflicts))
-        self.attention.attend(self.workspace, self.self_state, self.trace)
+    def __init__(self, name: str, persona: str) -> None:
+        self.name = name
+        self.persona = persona
 
-        # ── 3b. EVALUATE plan confidence ──────────────────────────────
-        eval_result = await self.critic.evaluate(
-            proposal=plan_result["plan"],
-            goal=goals_text,
-        )
-        confidence = eval_result["confidence"]
-        self.self_state.update_from_confidence(confidence)
-        self.trace.record("plan_evaluated", "critic", confidence=confidence)
-        decision = self.action_selector.decide(
-            self.self_state,
-            confidence,
-            has_conflict=bool(plan_conflicts),
-        )
-        self.trace.record("action_decision", "action_selector", action=decision.action, reason=decision.reason)
+    def save(self) -> None:
+        return None
 
-        # If confidence or conflict requires it, reflect more and re-plan.
-        if confidence == ConfidenceLevel.LOW.value or decision.action == "reflect":
-            deeper_reflection = await self.reflection.reflect(
-                context=context,
-                goal=f"I need a better approach. {goals_text}",
-                task=user_input,
-                axes=["correctness", "completeness", "safety", "efficiency"],
-            )
-            plan_result = await self.planner.plan(
-                goal=f"Improved approach needed. {goals_text}",
-                context=f"{context}\n\nDeeper reflection: {deeper_reflection['output'][:500]}",
-                tool_descriptions=tool_descs,
-            )
-            self.self_state.update_from_confidence(deeper_reflection["confidence"])
-            self.self_state.conflict_level = max(0.0, self.self_state.conflict_level - 0.2)
-            self.trace.record(
-                "replanned_after_reflection",
-                "planner",
-                confidence=deeper_reflection["confidence"],
-            )
-            self._publish_self_state()
-            self.attention.attend(self.workspace, self.self_state, self.trace)
 
-        # ── 4. ACT ────────────────────────────────────────────────────
-        tool_results = await self.executor.execute(plan_result["actions"])
-        tool_conflicts = self.conflicts.inspect_tool_results(tool_results, self.workspace)
-        if tool_conflicts:
-            self.self_state.conflict_level = min(1.0, self.self_state.conflict_level + 0.25)
-            self.self_state.last_error = tool_conflicts[-1].content
-            self.trace.record("tool_conflict_detected", "conflict_monitor", count=len(tool_conflicts))
-        self._publish_self_state()
-        self.attention.attend(self.workspace, self.self_state, self.trace)
-
-        # ── 5. REVIEW ─────────────────────────────────────────────────
-        review_prompt = (
-            f"I observed: {observation['observation'][:200]}\n\n"
-            f"I reflected and arrived at: {reflection_result['output'][:300]}\n\n"
-            f"I executed actions with results: "
-            f"{', '.join(r.get('output', '')[:100] for r in tool_results)}\n\n"
-            "What did I learn? What should I remember?"
-        )
-        review_messages = [
-            {
-                "role": "system",
-                "content": "You are reviewing your own thought process. Summarize what happened, what you learned, and what to remember.",
-            },
-            {"role": "user", "content": review_prompt},
-        ]
-        review = await self.llm.chat_async(review_messages, temperature=0.5, max_tokens=300)
-        learning = review["content"]
-
-        self.monologue.think(
-            question="What did I learn from this cycle?",
-            answer=learning,
-            type=ThoughtType.LEARNING,
-        )
-
-        # ── Persist to memory ─────────────────────────────────────────
-        await self.memory.add_episode(
-            session_id=self.session_id,
-            summary=f"Input: {user_input[:100]} → {learning[:200]}",
-            outcome=learning[:200],
-            confidence=confidence,
-        )
-        await self.memory.save_thoughts(self.session_id, self.monologue.to_dicts())
-
-        # ── Update identity ───────────────────────────────────────────
-        self.identity.evolve(learning)
-        self.identity.add_to_history(f"Cycle: {user_input[:80]}")
-        self.identity.save()
-
-        # Determine final answer: prefer tool outputs for real tool calls,
-        # otherwise use the refined reflection output.
-        result_output = compose_cycle_output(reflection_result["output"], tool_results)
-
-        duration = time.time() - start_time
-        self.trace.record("cycle_completed", "agent", duration=f"{duration:.2f}s")
-
-        return CycleResult(
-            output=result_output,
-            inner_monologue=self.monologue.format(),
-            confidence=confidence,
-            rounds=reflection_result["rounds"],
-            tool_results=tool_results,
-            session_id=self.session_id,
-            duration=duration,
-            cognitive_trace=self.trace.format(),
-            self_state={
-                "active_goal": self.self_state.active_goal,
-                "uncertainty": self.self_state.uncertainty,
-                "conflict_level": self.self_state.conflict_level,
-                "cognitive_load": self.self_state.cognitive_load,
-                "current_strategy": self.self_state.current_strategy,
-                "last_error": self.self_state.last_error,
-            },
-        )
-
-    def _publish_self_state(self) -> None:
-        self.workspace.write(
-            self.self_state.to_workspace_content(),
-            source="self_model",
-            type=EntryType.SELF_STATE,
-            priority=4,
-            salience=0.45 + min(0.35, self.self_state.uncertainty * 0.35),
-            confidence=1.0 - self.self_state.uncertainty,
-            novelty=0.2,
-            urgency=self.self_state.conflict_level,
-            metadata={"mechanistic": True},
-        )
+def _cycle_result_from_episode(result: EpisodeResult) -> CycleResult:
+    confidence = "HIGH"
+    uncertainty = result.self_state.get("uncertainty", 0.5)
+    if uncertainty >= 0.75:
+        confidence = "LOW"
+    elif uncertainty >= 0.35:
+        confidence = "MEDIUM"
+    return CycleResult(
+        output=result.output,
+        inner_monologue=result.workspace_trace,
+        confidence=confidence,
+        rounds=result.metrics.ticks,
+        tool_results=result.tool_results,
+        session_id=result.session_id,
+        duration=result.metrics.duration,
+        cognitive_trace=result.cognitive_trace,
+        self_state=result.self_state,
+        attention_schema=result.attention_schema,
+        selected_action=result.selected_action,
+        workspace_trace=result.workspace_trace,
+    )
