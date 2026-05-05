@@ -327,7 +327,7 @@ class ConscioService:
                 f"Conscio autonomous action for goal {goal.id}: "
                 f"{goal.description[:80]} | constraints={len(constraints)}"
             )
-            command = f"printf '%s\\n' {json.dumps(note)} >> conscio_autonomy.log"
+            command = f"printf '%s\\n' {json.dumps(note)} | tee -a conscio_autonomy.log"
             task = await self.autonomy.ensure_next_task(
                 project.id,
                 "Write an autonomous progress note inside the configured VM working directory.",

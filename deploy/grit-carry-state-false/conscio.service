@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/conscio
 Environment=CONSCIO_CONFIG=/home/conscio/.conscio/config.toml
+Environment=PATH=/usr/local/bin:/home/conscio/.cargo/bin:/home/conscio/.local/bin:/opt/conscio/.venv/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/opt/conscio/.venv/bin/conscio service start
 Restart=always
 RestartSec=5

@@ -210,6 +210,49 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(result.selected_action, "tool")
         self.assertEqual(result.metrics.tool_calls, 0)
 
+    async def test_internal_tool_result_does_not_become_chat_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = CognitiveRuntime(
+                llm=None,
+                memory=MemoryStore(db_path=os.path.join(tmp, "tool-result.db")),
+            )
+            await runtime.initialize()
+            try:
+                result = await runtime.run_episode(
+                    InputEvent(
+                        content="Autonomous tool result for task abc: (no output)",
+                        source="tool",
+                        event_type="tool_result",
+                    )
+                )
+            finally:
+                await runtime.close()
+
+        self.assertEqual(result.selected_action, "wait")
+        self.assertEqual(result.output, "Internal observation recorded; no user-facing response needed.")
+        self.assertNotIn("I treated this as a cognitive episode", result.output)
+
+    async def test_autonomous_heartbeat_does_not_become_chat_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = CognitiveRuntime(
+                llm=None,
+                memory=MemoryStore(db_path=os.path.join(tmp, "heartbeat-internal.db")),
+            )
+            await runtime.initialize()
+            try:
+                result = await runtime.run_episode(
+                    InputEvent(
+                        content="Autonomous heartbeat: active goal is preserve continuity.",
+                        source="autonomous",
+                        event_type="heartbeat",
+                    )
+                )
+            finally:
+                await runtime.close()
+
+        self.assertEqual(result.selected_action, "wait")
+        self.assertEqual(result.output, "Internal observation recorded; no user-facing response needed.")
+
     async def test_memory_consolidation_creates_facts_and_skills(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime = CognitiveRuntime(

@@ -4,6 +4,8 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+from conscio.tools.env import tool_env
+
 
 async def bash(
     command: str | None = None,
@@ -21,6 +23,7 @@ async def bash(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(Path(cwd).expanduser()) if cwd else None,
+            env=tool_env(),
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         output = stdout.decode("utf-8", errors="replace")

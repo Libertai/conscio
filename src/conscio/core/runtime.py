@@ -210,12 +210,7 @@ class ResponseModule:
             and e.timestamp >= getattr(state, "episode_start", 0.0)
         ]
         if not user_entries:
-            user_entries = [
-                e for e in workspace.read(limit=20)
-                if e.source == "input"
-                and e.type == EntryType.OBSERVATION
-                and e.timestamp >= getattr(state, "episode_start", 0.0)
-            ]
+            return []
         user_entries.sort(key=lambda e: e.timestamp, reverse=True)
         user_text = user_entries[0].content if user_entries else ""
         answer = await self._answer(user_text, workspace)
@@ -497,9 +492,14 @@ class CognitiveRuntime:
                 break
 
         if selected_intention is None:
+            wait_content = (
+                "Internal observation recorded; no user-facing response needed."
+                if event.source in {"autonomous", "tool", "system"}
+                else "No stable intention emerged."
+            )
             selected_intention = Intention(
                 kind=ActionKind.WAIT,
-                content="No stable intention emerged.",
+                content=wait_content,
                 source="runtime",
                 confidence=0.2,
             )

@@ -5,6 +5,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from conscio.tools.env import resolve_tool, tool_env
+
 
 async def execute_code(
     code: str | None = None,
@@ -22,11 +24,12 @@ async def execute_code(
             f.write(code)
             f.write("\n")
         proc = await asyncio.create_subprocess_exec(
-            "python3",
+            resolve_tool("python3"),
             path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(Path(cwd).expanduser()) if cwd else None,
+            env=tool_env(),
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         out = stdout.decode("utf-8", errors="replace")
