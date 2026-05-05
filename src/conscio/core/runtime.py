@@ -82,6 +82,9 @@ class MemoryRetrievalModule:
         self.session_id = session_id
         self._ran = False
 
+    def reset(self) -> None:
+        self._ran = False
+
     async def tick(self, workspace: Workspace, state: SelfState) -> list[WorkspaceEntry]:
         if self._ran:
             return []
@@ -172,6 +175,9 @@ class ResponseModule:
         self.llm = llm
         self._ran = False
 
+    def reset(self) -> None:
+        self._ran = False
+
     async def tick(self, workspace: Workspace, state: SelfState) -> list[WorkspaceEntry]:
         if self._ran:
             return []
@@ -180,6 +186,7 @@ class ResponseModule:
             e for e in workspace.read(limit=20)
             if e.source in {"input", "observer"} and e.type == EntryType.OBSERVATION
         ]
+        user_entries.sort(key=lambda e: e.timestamp, reverse=True)
         user_text = user_entries[0].content if user_entries else ""
         answer = await self._answer(user_text, workspace)
         intention = Intention(
@@ -348,7 +355,9 @@ class CognitiveRuntime:
     async def run_episode(self, event: InputEvent | str) -> EpisodeResult:
         if isinstance(event, str):
             event = InputEvent(content=event)
+        self._reset_modules_for_episode()
         start = time.time()
+        self._current_episode_start = start
         metrics = EpisodeMetrics()
         self.trace.record("episode_started", "runtime", event_source=event.source)
         self._ingest_event(event)
@@ -463,6 +472,12 @@ class CognitiveRuntime:
         intentions: list[Intention] = []
         for entry in self.workspace.global_entries:
             candidate = entry.metadata.get("intention")
-            if isinstance(candidate, Intention):
+            if isinstance(candidate, Intention) and entry.timestamp >= getattr(self, "_current_episode_start", 0.0):
                 intentions.append(candidate)
         return intentions
+
+    def _reset_modules_for_episode(self) -> None:
+        for module in self.modules:
+            reset = getattr(module, "reset", None)
+            if callable(reset):
+                reset()

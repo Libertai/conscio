@@ -49,6 +49,23 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(results), 1)
         self.assertIn(results[0].selected_action, {"answer", "wait"})
 
+    async def test_response_module_resets_between_episodes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = CognitiveRuntime(
+                llm=None,
+                memory=MemoryStore(db_path=os.path.join(tmp, "reset.db")),
+            )
+            await runtime.initialize()
+            try:
+                first = await runtime.run_episode(InputEvent(content="First message", source="user"))
+                second = await runtime.run_episode(InputEvent(content="Second message", source="user"))
+            finally:
+                await runtime.close()
+
+        self.assertEqual(first.selected_action, "answer")
+        self.assertEqual(second.selected_action, "answer")
+        self.assertIn("Second message", second.output)
+
     async def test_autonomous_heartbeat_current_context_does_not_trigger_web_search(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime = CognitiveRuntime(
