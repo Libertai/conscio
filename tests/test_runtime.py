@@ -49,6 +49,33 @@ class ToolCallLLM:
         }
 
 
+class IterativeLLM:
+    def __init__(self, responses: list[dict]) -> None:
+        self.responses = responses
+        self.calls: list[list[dict]] = []
+        self.kwargs: list[dict] = []
+
+    async def chat_async(self, messages: list[dict], **kwargs) -> dict:
+        self.calls.append(messages)
+        self.kwargs.append(kwargs)
+        if self.responses:
+            return self.responses.pop(0)
+        return {"content": "done"}
+
+
+def tool_call(name: str, arguments: str, call_id: str = "call-1") -> dict:
+    return {
+        "content": "",
+        "tool_calls": [
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": arguments},
+            }
+        ],
+    }
+
+
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_prompt_assembler_keeps_stable_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -327,14 +354,46 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         semantic_rows = [row for row in rows if row["memory_type"] == "semantic"]
         self.assertEqual(len(semantic_rows), 1)
 
-    async def test_llm_can_choose_memory_tool_when_available(self) -> None:
+    async def test_llm_tool_result_feeds_final_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tools = ToolRegistry()
+            llm = IterativeLLM([
+                tool_call("bash", '{"input": "whoami && pwd"}'),
+                {"content": "I am conscio in /opt/conscio/work."},
+            ])
+
+            async def bash(input: str) -> dict:
+                self.assertEqual(input, "whoami && pwd")
+                return {"output": "conscio\n/opt/conscio/work", "exit_code": 0}
+
+            tools.register("bash", bash, "Execute shell commands.")
+            runtime = CognitiveRuntime(
+                llm=llm,  # type: ignore[arg-type]
+                memory=MemoryStore(db_path=os.path.join(tmp, "iterative.db")),
+                tools=tools,
+            )
+            await runtime.initialize()
+            try:
+                result = await runtime.run_episode(InputEvent(content="Poke around.", source="user"))
+            finally:
+                await runtime.close()
+
+        self.assertEqual(result.selected_action, "answer")
+        self.assertIn("conscio", result.output)
+        self.assertEqual(result.metrics.tool_calls, 1)
+        self.assertEqual(result.tool_results[0]["output"], "conscio\n/opt/conscio/work")
+        self.assertIn("Tool bash returned", result.workspace_trace)
+        self.assertEqual(len(llm.calls), 2)
+        self.assertTrue(any(message.get("role") == "tool" for message in llm.calls[1]))
+
+    async def test_llm_can_chain_memory_tool_then_answer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             memory = MemoryStore(db_path=os.path.join(tmp, "memory-tool.db"))
             tools = ToolRegistry()
-            llm = ToolCallLLM(
-                "remember_facts",
-                '{"facts": ["Agent self/context: You run in a VM"], "source": "user"}',
-            )
+            llm = IterativeLLM([
+                tool_call("remember_facts", '{"facts": ["Agent self/context: You run in a VM"], "source": "user"}'),
+                {"content": "Stored that I run in a VM."},
+            ])
 
             async def remember_facts(facts: list[str], source: str = "user") -> dict:
                 for fact in facts:
@@ -352,38 +411,71 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await runtime.close()
 
-        self.assertEqual(result.selected_action, "tool")
-        self.assertIn("Stored 1 fact", result.output)
+        self.assertEqual(result.selected_action, "answer")
+        self.assertIn("Stored that", result.output)
         self.assertIn("tools", llm.kwargs[0])
         fact_text = "\n".join(row["fact"] for row in facts)
         self.assertIn("You run in a VM", fact_text)
 
-    async def test_llm_can_choose_bash_tool_when_available(self) -> None:
+    async def test_two_subsequent_chat_turns_keep_working(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tools = ToolRegistry()
-            llm = ToolCallLLM("bash", '{"input": "whoami && pwd"}')
+            llm = IterativeLLM([
+                {"content": "First answer."},
+                tool_call("remember_facts", '{"facts": ["User preference: concise"], "source": "user"}'),
+                {"content": "Second answer after storing memory."},
+            ])
+
+            async def remember_facts(facts: list[str], source: str = "user") -> dict:
+                return {"output": f"stored {len(facts)}", "error": False}
+
+            tools.register("remember_facts", remember_facts, "Store facts.")
+            runtime = CognitiveRuntime(
+                llm=llm,  # type: ignore[arg-type]
+                memory=MemoryStore(db_path=os.path.join(tmp, "turns.db")),
+                tools=tools,
+            )
+            await runtime.initialize()
+            try:
+                first = await runtime.run_episode(InputEvent(content="hello", source="user"))
+                second = await runtime.run_episode(InputEvent(content="remember concise", source="user"))
+            finally:
+                await runtime.close()
+
+        self.assertEqual(first.output, "First answer.")
+        self.assertEqual(second.output, "Second answer after storing memory.")
+        self.assertEqual(second.metrics.tool_calls, 1)
+
+    async def test_tool_loop_forces_final_answer_at_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tools = ToolRegistry()
+            llm = IterativeLLM([
+                tool_call("bash", '{"input": "pwd"}', "call-1"),
+                tool_call("bash", '{"input": "whoami"}', "call-2"),
+                tool_call("bash", '{"input": "hostname"}', "call-3"),
+                tool_call("bash", '{"input": "id"}', "call-4"),
+                {"content": "Final summary from observed tools."},
+            ])
 
             async def bash(input: str) -> dict:
-                self.assertEqual(input, "whoami && pwd")
-                return {"output": "conscio\n/opt/conscio/work", "exit_code": 0}
+                return {"output": f"ran {input}", "exit_code": 0}
 
             tools.register("bash", bash, "Execute shell commands.")
             runtime = CognitiveRuntime(
                 llm=llm,  # type: ignore[arg-type]
-                memory=MemoryStore(db_path=os.path.join(tmp, "bash-tool.db")),
+                memory=MemoryStore(db_path=os.path.join(tmp, "limit.db")),
                 tools=tools,
-            ) 
+            )
             await runtime.initialize()
             try:
-                result = await runtime.run_episode(
-                    InputEvent(content="Poke around in your terminal.", source="user")
-                )
+                result = await runtime.run_episode(InputEvent(content="Use tools then summarize.", source="user"))
             finally:
                 await runtime.close()
 
-        self.assertEqual(result.selected_action, "tool")
-        self.assertIn("/opt/conscio/work", result.output)
-        self.assertEqual(result.metrics.tool_calls, 1)
+        self.assertEqual(result.selected_action, "answer")
+        self.assertEqual(result.output, "Final summary from observed tools.")
+        self.assertEqual(result.metrics.tool_calls, 4)
+        self.assertNotIn("tool limit", result.output.lower())
 
 
 class EvalTests(unittest.IsolatedAsyncioTestCase):

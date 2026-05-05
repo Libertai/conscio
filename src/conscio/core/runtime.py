@@ -51,6 +51,12 @@ class EpisodeResult:
     model_context: str = ""
 
 
+@dataclass
+class ToolRequest:
+    name: str
+    args: dict[str, Any]
+
+
 class PerceptionModule:
     name = "observer"
 
@@ -178,6 +184,7 @@ class ReflectionModule:
 
 class ResponseModule:
     name = "responder"
+    max_tool_rounds = 4
 
     def __init__(
         self,
@@ -197,9 +204,11 @@ class ResponseModule:
         self.tools = tools
         self._ran = False
         self.last_model_context = ""
+        self.last_tool_requests: list[ToolRequest] = []
 
     def reset(self) -> None:
         self._ran = False
+        self.last_tool_requests = []
 
     async def tick(self, workspace: Workspace, state: SelfState) -> list[WorkspaceEntry]:
         if self._ran:
@@ -256,15 +265,13 @@ class ResponseModule:
             retrieval_query=user_text or " ".join(str(v) for v in state.values()),
         )
         self.last_model_context = assembled.dynamic_context
-        response = await self.llm.chat_async(
-            assembled.messages,
-            temperature=0.4,
-            max_tokens=600,
-            tools=self._tool_schemas(),
-        )
-        tool_intention = self._tool_intention(response)
-        if tool_intention is not None:
-            return tool_intention
+        messages = list(assembled.messages)
+        tool_schemas = self._tool_schemas()
+        if self.tools is not None and tool_schemas:
+            final = await self._run_tool_loop(messages, workspace, tool_schemas)
+            if final is not None:
+                return final
+        response = await self.llm.chat_async(messages, temperature=0.4, max_tokens=600, tools=tool_schemas)
         content = str(response.get("content") or "").strip()
         if content:
             return self._answer_intention(content)
@@ -284,7 +291,97 @@ class ResponseModule:
             expected_value=0.8,
         )
 
-    def _tool_intention(self, response: dict[str, Any]) -> Intention | None:
+    async def _run_tool_loop(
+        self,
+        messages: list[dict[str, Any]],
+        workspace: Workspace,
+        tool_schemas: list[dict[str, Any]],
+    ) -> Intention | None:
+        for _ in range(self.max_tool_rounds):
+            response = await self.llm.chat_async(
+                messages,
+                temperature=0.4,
+                max_tokens=600,
+                tools=tool_schemas,
+            )
+            tool_request = self._tool_request(response)
+            if tool_request is None:
+                content = str(response.get("content") or "").strip()
+                if content:
+                    return self._answer_intention(content)
+                return None
+            self.last_tool_requests.append(tool_request)
+            output = await self._execute_model_tool(tool_request, workspace)
+            messages.append(self._assistant_tool_call_message(response, tool_request))
+            messages.append({
+                "role": "tool",
+                "tool_call_id": self._tool_call_id(response),
+                "name": tool_request.name,
+                "content": output[:8000],
+            })
+        messages.append({
+            "role": "user",
+            "content": (
+                "Tool-use limit reached for this turn. Stop calling tools and provide a concise final answer "
+                "using the tool observations above."
+            ),
+        })
+        response = await self.llm.chat_async(messages, temperature=0.4, max_tokens=600)
+        content = str(response.get("content") or "").strip()
+        if content:
+            return self._answer_intention(content)
+        observations = [entry.content for entry in self._tool_observations(workspace)]
+        fallback = observations[-1] if observations else "Tool-use limit reached before a final answer."
+        return self._answer_intention(fallback)
+
+    async def _execute_model_tool(self, request: ToolRequest, workspace: Workspace) -> str:
+        if self.tools is None:
+            return "Tool registry is unavailable."
+        result = await self.tools.call(request.name, request.args)
+        output = str(result.get("output", ""))
+        workspace.write(
+            f"Tool {request.name} returned: {output[:1000]}",
+            source="tool",
+            type=EntryType.OBSERVATION,
+            priority=6,
+            salience=0.72,
+            confidence=0.9 if not result.get("error") else 0.35,
+            novelty=0.75,
+            urgency=0.45,
+            metadata={"source": "tool", "event_type": "tool_result", "tool": request.name, "result": result},
+        )
+        return output or "(no output)"
+
+    def _assistant_tool_call_message(self, response: dict[str, Any], request: ToolRequest) -> dict[str, Any]:
+        calls = response.get("tool_calls") or []
+        if calls:
+            return {"role": "assistant", "content": response.get("content") or "", "tool_calls": calls}
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": request.name, "arguments": json.dumps(request.args)},
+                }
+            ],
+        }
+
+    def _tool_call_id(self, response: dict[str, Any]) -> str:
+        calls = response.get("tool_calls") or []
+        if calls and calls[0].get("id"):
+            return str(calls[0]["id"])
+        return "call-1"
+
+    def _tool_observations(self, workspace: Workspace) -> list[WorkspaceEntry]:
+        return [
+            entry
+            for entry in workspace.read(limit=100, type_filter={EntryType.OBSERVATION})
+            if entry.source == "tool"
+        ]
+
+    def _tool_request(self, response: dict[str, Any]) -> ToolRequest | None:
         calls = response.get("tool_calls") or []
         if not calls:
             return None
@@ -299,17 +396,7 @@ class ResponseModule:
             args = {"input": str(function.get("arguments") or "")}
         if not isinstance(args, dict):
             args = {"input": args}
-        return Intention(
-            kind=ActionKind.TOOL,
-            content=f"Use tool {name}.",
-            source=self.name,
-            confidence=0.78,
-            expected_observation=f"{name} returned useful output",
-            tool_name=name,
-            tool_args=args,
-            urgency=0.55,
-            expected_value=0.8,
-        )
+        return ToolRequest(name=name, args=args)
 
     def _tool_schemas(self) -> list[dict[str, Any]] | None:
         if self.tools is None:
@@ -548,6 +635,11 @@ class CognitiveRuntime:
             tool_result = await self.tools.call(selected_intention.tool_name, selected_intention.tool_args)
             tool_results.append({"tool": selected_intention.tool_name, **tool_result})
             output = str(tool_result.get("output", output))
+        for request in self._response_module.last_tool_requests:
+            metrics.tool_calls += 1
+            result = self._latest_tool_result(request.name)
+            if result is not None:
+                tool_results.append({"tool": request.name, **result})
         prediction_entry = self.predictions.evaluate(selected_intention, output, self.workspace)
         if prediction_entry is not None:
             metrics.prediction_errors += 1
@@ -619,6 +711,14 @@ class CognitiveRuntime:
             context = getattr(module, "last_model_context", "")
             if context:
                 self.last_model_context = context
+
+    def _latest_tool_result(self, name: str) -> dict[str, Any] | None:
+        for entry in reversed(self.workspace.read(limit=100, type_filter={EntryType.OBSERVATION})):
+            if entry.source == "tool" and entry.metadata.get("tool") == name:
+                result = entry.metadata.get("result")
+                if isinstance(result, dict):
+                    return result
+        return None
 
     def _reset_modules_for_episode(self) -> None:
         for module in self.modules:
