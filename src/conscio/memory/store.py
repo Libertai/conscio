@@ -178,6 +178,10 @@ class MemoryStore:
                 (fact, source, confidence, now, now, now, confidence),
             ),
             (
+                "DELETE FROM memory_fts WHERE content = ? AND memory_type = ? AND source = ?",
+                (fact, "semantic", source),
+            ),
+            (
                 "INSERT INTO memory_fts (content, memory_type, source) VALUES (?, ?, ?)",
                 (fact, "semantic", source),
             ),

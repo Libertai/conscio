@@ -115,6 +115,7 @@ class ConscioService:
             working_directory=self.config.working_directory,
         )
         tools.load_builtins()
+        self._register_memory_tools(tools)
         llm = None
         if self.config.llm_base_url:
             llm = LLMClient(
@@ -154,6 +155,58 @@ class ConscioService:
         self._episodes: list[StoredEpisode] = []
         self._autonomous_action_times: list[float] = []
         self._event_lock = asyncio.Lock()
+
+    def _register_memory_tools(self, tools: PolicyToolRegistry) -> None:
+        async def remember_fact(
+            fact: str | None = None,
+            facts: list[str] | None = None,
+            source: str = "agent",
+            confidence: str = "HIGH",
+            input: str | None = None,
+        ) -> dict[str, Any]:
+            candidates: list[str] = []
+            if facts:
+                candidates.extend(str(item) for item in facts)
+            if fact:
+                candidates.append(fact)
+            if input:
+                candidates.append(input)
+            cleaned = [" ".join(item.strip().split()) for item in candidates if item and item.strip()]
+            if not cleaned:
+                return {"output": "No fact provided.", "error": True}
+            for item in dict.fromkeys(cleaned):
+                await self.memory.add_fact(item[:500], source=source, confidence=confidence)
+            return {"output": f"Stored {len(dict.fromkeys(cleaned))} fact(s) in semantic memory.", "error": False}
+
+        async def search_memory(
+            query: str | None = None,
+            limit: int = 10,
+            input: str | None = None,
+        ) -> dict[str, Any]:
+            q = query if query is not None else input
+            if not q:
+                return {"output": "No memory query provided.", "error": True}
+            rows = await self.memory.search_facts(q, limit)
+            if not rows:
+                return {"output": "No matching semantic memories found.", "error": False}
+            lines = [f"- {row['fact']} ({row.get('confidence', '')})" for row in rows]
+            return {"output": "\n".join(lines), "error": False, "results": rows}
+
+        tools.register(
+            "remember_fact",
+            remember_fact,
+            "Store one semantic fact in long-term memory.",
+        )
+        tools.register(
+            "remember_facts",
+            remember_fact,
+            "Store one or more semantic facts in long-term memory.",
+        )
+        tools.register(
+            "search_memory",
+            search_memory,
+            "Search semantic long-term memory facts.",
+        )
 
     async def start(self, *, acquire_lock: bool = True, background: bool = True) -> None:
         if self.running:

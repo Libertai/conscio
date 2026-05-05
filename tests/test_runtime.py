@@ -10,6 +10,7 @@ from conscio.core.workspace import EntryType, Visibility
 from conscio.core.runtime import CognitiveRuntime
 from conscio.eval import run_eval_suite
 from conscio.memory.store import MemoryStore
+from conscio.tools import ToolRegistry
 
 
 class FakeLLM:
@@ -19,6 +20,11 @@ class FakeLLM:
     async def chat_async(self, messages: list[dict], **kwargs) -> dict:
         self.calls.append(messages)
         return {"content": "fake response"}
+
+
+class EmptyLLM:
+    async def chat_async(self, messages: list[dict], **kwargs) -> dict:
+        return {"content": ""}
 
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -66,6 +72,21 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.output, "fake response")
         self.assertIn("USER_INPUT\nhello", result.model_context)
         self.assertEqual(fake.calls[0][0], fake.calls[-1][0])
+
+    async def test_empty_llm_response_gets_visible_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = CognitiveRuntime(
+                llm=EmptyLLM(),  # type: ignore[arg-type]
+                memory=MemoryStore(db_path=os.path.join(tmp, "empty-llm.db")),
+            )
+            await runtime.initialize()
+            try:
+                result = await runtime.run_episode(InputEvent(content="hello", source="user"))
+            finally:
+                await runtime.close()
+
+        self.assertEqual(result.selected_action, "answer")
+        self.assertIn("empty response", result.output)
 
     async def test_evented_episode_returns_trace_and_attention_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -271,6 +292,54 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(any("prefer concise answers" in fact["fact"] for fact in facts))
         self.assertTrue(any(skill["skill"].startswith("answer_") for skill in skills))
+
+    async def test_semantic_fact_reindex_does_not_duplicate_fts_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(db_path=os.path.join(tmp, "dedupe.db"))
+            await memory.initialize()
+            try:
+                await memory.add_fact("Agent self/context: You have a memory tool.", source="user")
+                await memory.add_fact("Agent self/context: You have a memory tool.", source="user")
+                rows = await memory.search("memory tool", limit=10)
+            finally:
+                await memory.close()
+
+        semantic_rows = [row for row in rows if row["memory_type"] == "semantic"]
+        self.assertEqual(len(semantic_rows), 1)
+
+    async def test_declared_self_context_uses_memory_tool_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(db_path=os.path.join(tmp, "memory-tool.db"))
+            tools = ToolRegistry()
+
+            async def remember_facts(facts: list[str], source: str = "user") -> dict:
+                for fact in facts:
+                    await memory.add_fact(fact, source=source, confidence="HIGH")
+                return {"output": f"Stored {len(facts)} fact(s) in semantic memory.", "error": False}
+
+            tools.register("remember_facts", remember_facts, "Store facts.")
+            runtime = CognitiveRuntime(llm=None, memory=memory, tools=tools)
+            await runtime.initialize()
+            try:
+                result = await runtime.run_episode(
+                    InputEvent(
+                        content=(
+                            "I am Jonathan Schemoul. You run in a VM. "
+                            "Your user is a sudoer on your VM."
+                        ),
+                        source="user",
+                    )
+                )
+                facts = await memory.recent_facts(10)
+            finally:
+                await runtime.close()
+
+        self.assertEqual(result.selected_action, "tool")
+        self.assertIn("Stored 3 fact", result.output)
+        fact_text = "\n".join(row["fact"] for row in facts)
+        self.assertIn("I am Jonathan Schemoul", fact_text)
+        self.assertIn("You run in a VM", fact_text)
+        self.assertIn("Your user is a sudoer", fact_text)
 
     async def test_user_current_information_request_can_trigger_web_search(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

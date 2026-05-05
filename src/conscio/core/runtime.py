@@ -260,7 +260,13 @@ class ResponseModule:
         )
         self.last_model_context = assembled.dynamic_context
         response = await self.llm.chat_async(assembled.messages, temperature=0.4, max_tokens=600)
-        return response["content"]
+        content = str(response.get("content") or "").strip()
+        if content:
+            return content
+        return (
+            "I recorded your message, but my inference backend returned an empty response. "
+            "I will retain the facts and continue."
+        )
 
 
 class ToolProposalModule:
@@ -299,6 +305,50 @@ class ToolProposalModule:
                 confidence=0.7,
                 novelty=0.5,
                 urgency=0.5,
+                metadata={"intention": intention},
+            )
+        ]
+
+
+class MemoryProposalModule:
+    name = "memory_proposer"
+
+    async def tick(self, workspace: Workspace, state: SelfState) -> list[WorkspaceEntry]:
+        episode_start = getattr(state, "episode_start", 0.0)
+        user_entries = [
+            e for e in workspace.read(limit=20)
+            if e.source == "input"
+            and e.type == EntryType.OBSERVATION
+            and e.metadata.get("source") == "user"
+            and e.timestamp >= episode_start
+        ]
+        if not user_entries:
+            return []
+        user_entries.sort(key=lambda e: e.timestamp, reverse=True)
+        facts = _extract_declared_facts(user_entries[0].content)
+        if not facts:
+            return []
+        intention = Intention(
+            kind=ActionKind.TOOL,
+            content="Store declared user and agent context facts in semantic memory.",
+            source=self.name,
+            confidence=0.86,
+            expected_observation="facts stored in semantic memory",
+            tool_name="remember_facts",
+            tool_args={"facts": facts, "source": "user"},
+            urgency=0.65,
+            expected_value=0.9,
+        )
+        return [
+            workspace.write(
+                f"Candidate memory action: store {len(facts)} declared facts.",
+                source=self.name,
+                type=EntryType.INTENTION,
+                priority=7,
+                salience=0.75,
+                confidence=intention.confidence,
+                novelty=0.7,
+                urgency=0.65,
                 metadata={"intention": intention},
             )
         ]
@@ -353,6 +403,9 @@ class MemoryConsolidator:
         lower = text.lower()
         if event.source == "user" and any(marker in lower for marker in ("remember", "prefer", "call me", "my name is")):
             await memory.add_fact(f"User stated: {text[:240]}", source="user", confidence="HIGH")
+        if event.source == "user":
+            for fact in _extract_declared_facts(text):
+                await memory.add_fact(fact, source="user", confidence="HIGH")
         if event.source == "user" and result.selected_action == "answer":
             await memory.add_skill(
                 skill=f"answer_{_slug(text or result.output)}",
@@ -421,15 +474,20 @@ class CognitiveRuntime:
             session_id=self.session_id,
             context_provider=context_provider,
         )
-        self.modules = modules or [
+        self.modules = modules or self._default_modules()
+        self.consolidator = MemoryConsolidator(self.context_settings)
+
+    def _default_modules(self) -> list[CognitiveModule]:
+        modules: list[CognitiveModule] = [
             PerceptionModule(),
             MemoryRetrievalModule(self.memory, self.session_id),
             self._response_module,
             ToolProposalModule(),
-            ConstraintMonitorModule(),
-            ReflectionModule(),
         ]
-        self.consolidator = MemoryConsolidator(self.context_settings)
+        if "remember_facts" in self.tools.list_tools():
+            modules.append(MemoryProposalModule())
+        modules.extend([ConstraintMonitorModule(), ReflectionModule()])
+        return modules
 
     async def initialize(self) -> None:
         await self.memory.initialize()
@@ -591,3 +649,71 @@ class CognitiveRuntime:
 def _slug(text: str) -> str:
     value = "".join(ch.lower() if ch.isalnum() else "_" for ch in text[:48]).strip("_")
     return value or "episode"
+
+
+def _extract_declared_facts(text: str) -> list[str]:
+    facts: list[str] = []
+    for sentence in _split_fact_sentences(text):
+        normalized = " ".join(sentence.strip(" \t\r\n-").split())
+        if not normalized:
+            continue
+        lower = normalized.lower()
+        if _is_user_fact(lower):
+            facts.append(f"User identity/context: {normalized[:240]}")
+        elif _is_agent_fact(lower):
+            facts.append(f"Agent self/context: {normalized[:240]}")
+    return _dedupe_preserve_order(facts)
+
+
+def _split_fact_sentences(text: str) -> list[str]:
+    normalized = text.replace("\n", ". ")
+    parts: list[str] = []
+    current: list[str] = []
+    for char in normalized:
+        current.append(char)
+        if char in ".!?;":
+            parts.append("".join(current).strip(" .!?;"))
+            current = []
+    if current:
+        parts.append("".join(current).strip(" .!?;"))
+    return parts
+
+
+def _is_user_fact(lower: str) -> bool:
+    starts = (
+        "i am ",
+        "i'm ",
+        "i’m ",
+        "my name is ",
+        "call me ",
+        "i prefer ",
+        "i like ",
+        "i want ",
+    )
+    return lower.startswith(starts) or " aka " in lower
+
+
+def _is_agent_fact(lower: str) -> bool:
+    starts = (
+        "you are ",
+        "you run ",
+        "you live ",
+        "you have ",
+        "you can ",
+        "your user is ",
+        "your inference is ",
+        "your vm ",
+        "your host ",
+        "your home ",
+    )
+    return lower.startswith(starts)
+
+
+def _dedupe_preserve_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            deduped.append(item)
+    return deduped
