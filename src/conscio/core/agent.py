@@ -5,11 +5,18 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from conscio.core.cognition import (
+    ActionSelector,
+    AttentionController,
+    CognitiveTrace,
+    ConflictMonitor,
+    SelfState,
+)
 from conscio.core.confidence import ConfidenceLevel
 from conscio.core.identity import Identity
 from conscio.core.monologue import Monologue, ThoughtType
 from conscio.core.reflection import Reflection
-from conscio.core.workspace import Workspace
+from conscio.core.workspace import EntryType, Workspace
 from conscio.llm.client import LLMClient
 from conscio.memory.store import MemoryStore
 from conscio.modules.critic import Critic
@@ -28,6 +35,8 @@ class CycleResult:
     tool_results: list[dict] = field(default_factory=list)
     session_id: str = ""
     duration: float = 0.0
+    cognitive_trace: str = ""
+    self_state: dict[str, Any] = field(default_factory=dict)
 
 
 def compose_cycle_output(reflection_output: str, tool_results: list[dict]) -> str:
@@ -84,6 +93,11 @@ class ConsciousAgent:
             self.identity.save()
         self.workspace = Workspace()
         self.monologue = Monologue()
+        self.trace = CognitiveTrace()
+        self.self_state = SelfState(active_goal=self.identity.format_goals())
+        self.attention = AttentionController()
+        self.conflicts = ConflictMonitor()
+        self.action_selector = ActionSelector()
         self.memory = MemoryStore()
         self.tools = ToolRegistry()
         self.tools.load_builtins()
@@ -109,9 +123,15 @@ class ConsciousAgent:
     async def cycle(self, user_input: str, source: str = "user") -> CycleResult:
         """Run one full conscious cycle: OBSERVE → REFLECT → PLAN → ACT → REVIEW."""
         start_time = time.time()
+        self.self_state.active_goal = self.identity.format_goals()
+        self.self_state.cognitive_load = min(1.0, self.workspace.size / 100)
+        self.trace.record("cycle_started", "agent", source=source)
 
         # ── 1. OBSERVE ────────────────────────────────────────────────
         observation = await self.observe(user_input, source=source)
+        self.trace.record("observed_input", "observer", source=source)
+        self._publish_self_state()
+        self.attention.attend(self.workspace, self.self_state, self.trace)
 
         # ── 2. REFLECT ────────────────────────────────────────────────
         workspace_context = self.workspace.format_context()
@@ -123,6 +143,15 @@ class ConsciousAgent:
             goal=goals_text,
             task=user_input,
         )
+        self.self_state.update_from_confidence(reflection_result["confidence"])
+        self.trace.record(
+            "reflection_completed",
+            "reflection",
+            confidence=reflection_result["confidence"],
+            rounds=reflection_result["rounds"],
+        )
+        self._publish_self_state()
+        self.attention.attend(self.workspace, self.self_state, self.trace)
 
         # ── 3. PLAN ───────────────────────────────────────────────────
         tool_descs = self.tools.tool_descriptions()
@@ -131,6 +160,11 @@ class ConsciousAgent:
             context=f"{context}\n\nReflection: {reflection_result['output'][:500]}",
             tool_descriptions=tool_descs,
         )
+        plan_conflicts = self.conflicts.inspect_plan(user_input, plan_result["plan"], self.workspace)
+        if plan_conflicts:
+            self.self_state.conflict_level = min(1.0, self.self_state.conflict_level + 0.35)
+            self.trace.record("conflict_detected", "conflict_monitor", count=len(plan_conflicts))
+        self.attention.attend(self.workspace, self.self_state, self.trace)
 
         # ── 3b. EVALUATE plan confidence ──────────────────────────────
         eval_result = await self.critic.evaluate(
@@ -138,9 +172,17 @@ class ConsciousAgent:
             goal=goals_text,
         )
         confidence = eval_result["confidence"]
+        self.self_state.update_from_confidence(confidence)
+        self.trace.record("plan_evaluated", "critic", confidence=confidence)
+        decision = self.action_selector.decide(
+            self.self_state,
+            confidence,
+            has_conflict=bool(plan_conflicts),
+        )
+        self.trace.record("action_decision", "action_selector", action=decision.action, reason=decision.reason)
 
-        # If LOW confidence, reflect more and re-plan
-        if confidence == ConfidenceLevel.LOW.value:
+        # If confidence or conflict requires it, reflect more and re-plan.
+        if confidence == ConfidenceLevel.LOW.value or decision.action == "reflect":
             deeper_reflection = await self.reflection.reflect(
                 context=context,
                 goal=f"I need a better approach. {goals_text}",
@@ -152,9 +194,25 @@ class ConsciousAgent:
                 context=f"{context}\n\nDeeper reflection: {deeper_reflection['output'][:500]}",
                 tool_descriptions=tool_descs,
             )
+            self.self_state.update_from_confidence(deeper_reflection["confidence"])
+            self.self_state.conflict_level = max(0.0, self.self_state.conflict_level - 0.2)
+            self.trace.record(
+                "replanned_after_reflection",
+                "planner",
+                confidence=deeper_reflection["confidence"],
+            )
+            self._publish_self_state()
+            self.attention.attend(self.workspace, self.self_state, self.trace)
 
         # ── 4. ACT ────────────────────────────────────────────────────
         tool_results = await self.executor.execute(plan_result["actions"])
+        tool_conflicts = self.conflicts.inspect_tool_results(tool_results, self.workspace)
+        if tool_conflicts:
+            self.self_state.conflict_level = min(1.0, self.self_state.conflict_level + 0.25)
+            self.self_state.last_error = tool_conflicts[-1].content
+            self.trace.record("tool_conflict_detected", "conflict_monitor", count=len(tool_conflicts))
+        self._publish_self_state()
+        self.attention.attend(self.workspace, self.self_state, self.trace)
 
         # ── 5. REVIEW ─────────────────────────────────────────────────
         review_prompt = (
@@ -199,6 +257,7 @@ class ConsciousAgent:
         result_output = compose_cycle_output(reflection_result["output"], tool_results)
 
         duration = time.time() - start_time
+        self.trace.record("cycle_completed", "agent", duration=f"{duration:.2f}s")
 
         return CycleResult(
             output=result_output,
@@ -208,4 +267,26 @@ class ConsciousAgent:
             tool_results=tool_results,
             session_id=self.session_id,
             duration=duration,
+            cognitive_trace=self.trace.format(),
+            self_state={
+                "active_goal": self.self_state.active_goal,
+                "uncertainty": self.self_state.uncertainty,
+                "conflict_level": self.self_state.conflict_level,
+                "cognitive_load": self.self_state.cognitive_load,
+                "current_strategy": self.self_state.current_strategy,
+                "last_error": self.self_state.last_error,
+            },
+        )
+
+    def _publish_self_state(self) -> None:
+        self.workspace.write(
+            self.self_state.to_workspace_content(),
+            source="self_model",
+            type=EntryType.SELF_STATE,
+            priority=4,
+            salience=0.45 + min(0.35, self.self_state.uncertainty * 0.35),
+            confidence=1.0 - self.self_state.uncertainty,
+            novelty=0.2,
+            urgency=self.self_state.conflict_level,
+            metadata={"mechanistic": True},
         )

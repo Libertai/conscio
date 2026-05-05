@@ -60,6 +60,9 @@ def _print_result(result) -> None:
     info.add_row("Confidence", result.confidence)
     info.add_row("Rounds", str(result.rounds))
     info.add_row("Duration", f"{result.duration:.2f}s")
+    if result.self_state:
+        info.add_row("Uncertainty", f"{result.self_state.get('uncertainty', 0):.2f}")
+        info.add_row("Conflict", f"{result.self_state.get('conflict_level', 0):.2f}")
     console.print(Panel(info, title="⚡ Cycle Summary", border_style="dim"))
 
     if result.inner_monologue:
@@ -80,6 +83,10 @@ def _print_result(result) -> None:
                 tr.get("output", "")[:120],
             )
         console.print(tool_table)
+
+    if result.cognitive_trace:
+        console.print()
+        console.print(Panel(result.cognitive_trace, title="🧭 Cognitive Trace", border_style="dim"))
 
 
 async def _run_interactive(

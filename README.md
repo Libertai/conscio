@@ -24,9 +24,12 @@ At every step, the agent writes into a visible **inner monologue** (stream of co
 ## Features
 
 - **Global Workspace** — shared blackboard with priority-scored entries, attention mechanism, and subscriber broadcast
+- **Selective Attention** — local workspace entries compete on salience, novelty, urgency, confidence, and conflict before global broadcast
 - **Inner Monologue DAG** — stream of consciousness as a directed acyclic graph of thoughts (observations, reflections, intentions, evaluations, learnings)
+- **Cognitive Trace** — factual mechanism log separated from the model's natural-language self-report
 - **Self-Reflection Loop** — generate → critique → refine with multi-axis evaluation (correctness, completeness, safety, clarity)
 - **Dynamic Confidence** — LOW/MEDIUM/HIGH estimation gates how deeply the agent reflects before acting
+- **Self-Model** — explicit uncertainty, conflict, cognitive load, current strategy, and last-error state
 - **Persistent Identity** — persona, goals, and history stored across sessions in `~/.conscio/identity.json`
 - **SQLite Memory** — episodic, semantic, and procedural memory with FTS5 full-text search
 - **Specialist Modules** — Observer, Planner, Critic, and Executor that compete/cooperate via the workspace
@@ -79,6 +82,7 @@ src/conscio/
 ├── cli.py                      # CLI entry point (run/ask/history/search)
 ├── core/
 │   ├── agent.py                # ConsciousAgent — the cycle orchestrator
+│   ├── cognition.py            # Attention, self-state, conflict monitor, action selection
 │   ├── workspace.py            # Global Workspace (blackboard + broadcast)
 │   ├── monologue.py            # Stream-of-consciousness DAG
 │   ├── reflection.py           # Self-reflection loop (generate→critique→refine)
@@ -118,15 +122,17 @@ src/conscio/
 │               "What do I know?"                              │
 │               "What am I unsure about?"                      │
 │                                                              │
-│  3. PLAN → Planner proposes actions                          │
-│             Critic evaluates against axes                     │
-│             Low confidence → reflect more                    │
-│             Medium confidence → refine once                  │
-│             High confidence → proceed directly               │
+│  3. ATTEND → Salient entries are selected for broadcast       │
+│              Self-state tracks uncertainty/conflict/load      │
 │                                                              │
-│  4. ACT → Executor runs tool calls, writes results           │
+│  4. PLAN → Planner proposes actions                          │
+│             Critic and conflict monitor evaluate them         │
+│             Low confidence/conflict → reflect more           │
+│             High confidence/no conflict → proceed            │
 │                                                              │
-│  5. REVIEW → "Did that work? What did I learn?"             │
+│  5. ACT → Executor runs tool calls, writes results           │
+│                                                              │
+│  6. REVIEW → "Did that work? What did I learn?"             │
 │              Persist to memory                               │
 └──────────────────────────────────────────────────────────────┘
 ```

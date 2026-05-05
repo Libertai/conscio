@@ -202,7 +202,7 @@ follow the fast path; novel/complex tasks trigger deep deliberation.
 | LLM Backend | LibertAI (OpenAI-compatible, `https://api.libertai.io/v1`) |
 | Model | `deepseek-v4-flash` |
 | LLM SDK | `openai >= 1.0` |
-| Persistence | `aiosqlite` with WAL mode |
+| Persistence | stdlib `sqlite3` with WAL mode |
 | CLI | `rich` + `argparse` |
 | Async | `asyncio` throughout |
 | Package manager | `uv` |

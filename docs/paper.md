@@ -209,6 +209,14 @@ default set of axes (correctness, completeness, safety, clarity). If confidence
 is LOW, the loop continues with up to three iterations. If MEDIUM, one
 refinement pass runs. If HIGH, the loop terminates.
 
+**Stage 2b: Attend and update self-state.** The cognitive harness layer
+(`core/cognition.py`) maintains a mechanistic `SelfState` containing active
+goal, uncertainty, conflict level, cognitive load, strategy, and last error.
+Workspace entries begin as local candidates with salience, novelty, urgency,
+confidence, and evidence fields. The AttentionController selects high-scoring
+entries for global broadcast. This separates the factual control trace from
+the LLM's natural-language self-report.
+
 **Stage 3: Plan.** The Planner module (`modules/planner.py`) proposes a
 structured plan with reasoning and specific actions. Actions may name a tool
 (bash, web_search, execute_code) or use the special "reason" tool for direct
@@ -216,9 +224,10 @@ textual responses.
 
 **Stage 4: Evaluate.** The Critic module (`modules/critic.py`) evaluates the
 plan against the same axes used in reflection. If the Critic returns LOW
-confidence, a deeper reflection cycle runs with sharper critique axes, and the
-agent replans. This forms a second-order reflection loop: the agent reflects on
-its reflections.
+confidence, or if the ConflictMonitor detects a constraint or tool conflict, a
+deeper reflection cycle runs with sharper critique axes, and the agent replans.
+This forms a second-order reflection loop: the agent reflects on its
+reflections and on conflicts detected by the harness.
 
 **Stage 5: Act and Review.** The Executor module (`modules/executor.py`) runs
 tool calls specified in the plan. Results are written back to the workspace. A
@@ -303,11 +312,12 @@ base URL.
 
 ### 4.2 Async Execution Model
 
-All LLM calls and database operations run asynchronously via `asyncio`. The
-LLM client exposes sync (`chat`), async (`chat_async`), and streaming
-(`chat_stream`) interfaces. Database operations use `asyncio.to_thread` to
-offload synchronous `sqlite3` calls to a thread pool, avoiding the event loop
-blocking.
+LLM calls run asynchronously via `asyncio`. The LLM client exposes sync
+(`chat`), async (`chat_async`), and streaming (`chat_stream`) interfaces.
+Database operations expose an async API while performing small `sqlite3`
+operations synchronously behind an instance-owned connection and lock. This
+keeps storage deterministic for the CLI and test harness while preserving the
+agent's async public interface.
 
 ### 4.3 CLI Interface
 

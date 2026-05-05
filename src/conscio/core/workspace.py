@@ -15,6 +15,13 @@ class EntryType(str, Enum):
     REFLECTION = "reflection"
     MEMORY = "memory"
     SYSTEM = "system"
+    CONFLICT = "conflict"
+    SELF_STATE = "self_state"
+
+
+class Visibility(str, Enum):
+    LOCAL = "local"
+    GLOBAL = "global"
 
 
 @dataclass
@@ -25,6 +32,14 @@ class WorkspaceEntry:
     priority: int = 0
     timestamp: float = field(default_factory=time.time)
     metadata: dict[str, Any] = field(default_factory=dict)
+    salience: float = 0.0
+    confidence: float = 0.5
+    novelty: float = 0.0
+    urgency: float = 0.0
+    evidence: list[str] = field(default_factory=list)
+    visibility: Visibility = Visibility.LOCAL
+    attended: bool = False
+    broadcast_count: int = 0
 
     def __lt__(self, other: WorkspaceEntry) -> bool:
         return self.timestamp < other.timestamp
@@ -52,6 +67,12 @@ class Workspace:
         type: EntryType = EntryType.OBSERVATION,
         priority: int = 0,
         metadata: dict[str, Any] | None = None,
+        salience: float | None = None,
+        confidence: float = 0.5,
+        novelty: float = 0.0,
+        urgency: float = 0.0,
+        evidence: list[str] | None = None,
+        visibility: Visibility = Visibility.LOCAL,
     ) -> WorkspaceEntry:
         entry = WorkspaceEntry(
             content=content,
@@ -59,6 +80,12 @@ class Workspace:
             type=type,
             priority=priority,
             metadata=metadata or {},
+            salience=salience if salience is not None else max(0.0, min(1.0, priority / 10)),
+            confidence=confidence,
+            novelty=novelty,
+            urgency=urgency,
+            evidence=evidence or [],
+            visibility=visibility,
         )
         self._entries.append(entry)
         if len(self._entries) > self._max_entries:
@@ -66,8 +93,15 @@ class Workspace:
         return entry
 
     def broadcast(self, entry: WorkspaceEntry) -> None:
+        entry.visibility = Visibility.GLOBAL
+        entry.attended = True
+        entry.broadcast_count += 1
         for handler in self._subscribers:
             handler(entry)
+
+    def broadcast_selected(self, entries: list[WorkspaceEntry]) -> None:
+        for entry in entries:
+            self.broadcast(entry)
 
     def write_and_broadcast(
         self,
@@ -76,8 +110,24 @@ class Workspace:
         type: EntryType = EntryType.OBSERVATION,
         priority: int = 0,
         metadata: dict[str, Any] | None = None,
+        salience: float | None = None,
+        confidence: float = 0.5,
+        novelty: float = 0.0,
+        urgency: float = 0.0,
+        evidence: list[str] | None = None,
     ) -> WorkspaceEntry:
-        entry = self.write(content, source, type, priority, metadata)
+        entry = self.write(
+            content,
+            source,
+            type,
+            priority,
+            metadata,
+            salience=salience,
+            confidence=confidence,
+            novelty=novelty,
+            urgency=urgency,
+            evidence=evidence,
+        )
         self.broadcast(entry)
         return entry
 
@@ -123,6 +173,18 @@ class Workspace:
     @property
     def recent(self) -> list[WorkspaceEntry]:
         return sorted(self._entries, key=lambda e: -e.timestamp)[:10]
+
+    @property
+    def global_entries(self) -> list[WorkspaceEntry]:
+        return [e for e in self._entries if e.visibility == Visibility.GLOBAL]
+
+    @property
+    def local_entries(self) -> list[WorkspaceEntry]:
+        return [e for e in self._entries if e.visibility == Visibility.LOCAL]
+
+    def unattended(self, limit: int = 20) -> list[WorkspaceEntry]:
+        entries = [e for e in self._entries if not e.attended]
+        return sorted(entries, key=lambda e: -e.timestamp)[:limit]
 
     @property
     def size(self) -> int:
