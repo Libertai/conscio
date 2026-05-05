@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from conscio.core.cognition import InputEvent
+from conscio.core.workspace import EntryType, Visibility
 from conscio.core.runtime import CognitiveRuntime
 from conscio.eval import run_eval_suite
 from conscio.memory.store import MemoryStore
@@ -103,6 +104,31 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.selected_action, "answer")
         self.assertIn("Answer this normally", result.output)
+
+    async def test_current_answer_survives_stale_attention_pressure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = CognitiveRuntime(
+                llm=None,
+                memory=MemoryStore(db_path=os.path.join(tmp, "attention-pressure.db")),
+            )
+            await runtime.initialize()
+            try:
+                for idx in range(12):
+                    runtime.workspace.write(
+                        f"stale high-priority conflict {idx}",
+                        source="test",
+                        type=EntryType.CONFLICT,
+                        priority=10,
+                        salience=1.0,
+                        urgency=1.0,
+                        visibility=Visibility.GLOBAL,
+                    )
+                result = await runtime.run_episode(InputEvent(content="hello!", source="user"))
+            finally:
+                await runtime.close()
+
+        self.assertEqual(result.selected_action, "answer")
+        self.assertIn("hello!", result.output)
 
     async def test_autonomous_heartbeat_current_context_does_not_trigger_web_search(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

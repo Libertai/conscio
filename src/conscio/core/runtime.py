@@ -71,6 +71,7 @@ class PerceptionModule:
                     evidence=[entry.content[:200]],
                 )
             )
+            entry.attended = True
         return produced
 
 
@@ -255,11 +256,13 @@ class ToolProposalModule:
     name = "tool_proposer"
 
     async def tick(self, workspace: Workspace, state: SelfState) -> list[WorkspaceEntry]:
+        episode_start = getattr(state, "episode_start", 0.0)
         external_observations = [
             e for e in workspace.read(limit=20)
             if e.source == "input"
             and e.type == EntryType.OBSERVATION
             and e.metadata.get("source") not in {"autonomous", "tool", "system"}
+            and e.timestamp >= episode_start
         ]
         text = " ".join(e.content for e in external_observations).lower()
         if "search" not in text and "current" not in text and "latest" not in text:
@@ -486,9 +489,11 @@ class CognitiveRuntime:
 
     def _collect_intentions(self) -> list[Intention]:
         intentions: list[Intention] = []
-        for entry in self.workspace.global_entries:
+        current_episode_start = getattr(self, "_current_episode_start", 0.0)
+        entries = self.workspace.read(limit=100, type_filter={EntryType.INTENTION})
+        for entry in entries:
             candidate = entry.metadata.get("intention")
-            if isinstance(candidate, Intention) and entry.timestamp >= getattr(self, "_current_episode_start", 0.0):
+            if isinstance(candidate, Intention) and entry.timestamp >= current_episode_start:
                 intentions.append(candidate)
         return intentions
 

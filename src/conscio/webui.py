@@ -223,7 +223,14 @@ DASHBOARD_HTML = """<!doctype html>
     textarea, input { width: 100%; border: 1px solid #b9b7b1; border-radius: 6px; padding: 10px; font: inherit; background: #fff; resize: vertical; min-height: 44px; }
     .compose { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: end; }
     .actions { display: flex; flex-wrap: wrap; gap: 8px; }
-    pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; color: #3b3d40; max-height: 280px; overflow: auto; }
+    .episode-list { display: grid; gap: 10px; max-height: 360px; overflow: auto; }
+    .episode { border: 1px solid #e1ded7; border-radius: 7px; padding: 10px; background: #fbfaf7; }
+    .episode-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; margin-bottom: 6px; }
+    .episode-kind { font-weight: 700; font-size: 13px; overflow-wrap: anywhere; }
+    .episode-action { color: #1f6f78; font-size: 12px; font-weight: 700; }
+    .episode-text { font-size: 12px; line-height: 1.4; color: #3b3d40; white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 6px; }
+    .episode-metrics { color: #6f6b63; font-size: 12px; margin-top: 6px; }
+    pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; color: #3b3d40; max-height: 360px; overflow: auto; }
     @media (max-width: 1050px) { main { grid-template-columns: 1fr; } .chat { grid-template-rows: 420px auto; } }
   </style>
 </head>
@@ -279,7 +286,11 @@ DASHBOARD_HTML = """<!doctype html>
         <div id="influences" class="list"></div>
       </div>
       <div class="panel">
-        <h2>Trace</h2>
+        <h2>Internal Reflection</h2>
+        <div id="episodes" class="episode-list"></div>
+      </div>
+      <div class="panel">
+        <h2>Cognitive Trace</h2>
         <pre id="trace"></pre>
       </div>
     </section>
@@ -298,6 +309,18 @@ DASHBOARD_HTML = """<!doctype html>
     }
     function item(title, meta) {
       return `<div class="item"><div class="item-title">${escapeHtml(title)}</div><div class="meta">${escapeHtml(meta)}</div></div>`;
+    }
+    function episodeItem(ep) {
+      const metrics = ep.metrics || {};
+      const meta = `${escapeHtml(ep.source || '')} | ${escapeHtml(ep.event_type || '')} | ticks ${fmt(metrics.ticks)} | attention ${fmt(metrics.attention_selections)} | errors ${fmt(metrics.prediction_errors)}`;
+      return `<div class="episode">
+        <div class="episode-head">
+          <div class="episode-kind">${escapeHtml(ep.input || '')}</div>
+          <div class="episode-action">${escapeHtml(ep.selected_action || '')}</div>
+        </div>
+        <div class="episode-text">${escapeHtml(ep.output || '')}</div>
+        <div class="episode-metrics">${meta}</div>
+      </div>`;
     }
     function escapeHtml(text) {
       return fmt(text).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -320,6 +343,7 @@ DASHBOARD_HTML = """<!doctype html>
       document.getElementById('goal').innerHTML = item(goal.description || 'No active goal', `${goal.source || ''} ${goal.status || ''}`);
       document.getElementById('projects').innerHTML = (data.projects || []).map((p) => item(p.title, `${p.status} | ${p.id.slice(0, 12)}`)).join('') || '<div class="meta">No projects yet.</div>';
       document.getElementById('influences').innerHTML = (data.influences || []).slice(0, 8).map((i) => item(i.content, `${i.kind} | ${i.status} | ${i.appraisal}`)).join('') || '<div class="meta">No influences yet.</div>';
+      document.getElementById('episodes').innerHTML = (data.episodes || []).slice(0, 8).map(episodeItem).join('') || '<div class="meta">No episodes yet.</div>';
       document.getElementById('trace').textContent = data.trace || '';
     }
     document.getElementById('chat').addEventListener('submit', async (event) => {
