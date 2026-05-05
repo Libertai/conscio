@@ -5,7 +5,9 @@ import asyncio
 import sys
 import tempfile
 import time
+from typing import Any
 
+import httpx
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -18,6 +20,7 @@ from conscio.core.cognition import InputEvent
 from conscio.core.runtime import CognitiveRuntime
 from conscio.eval import run_eval_suite
 from conscio.memory.store import MemoryStore
+from conscio.config import load_config, write_default_config
 
 console = Console()
 
@@ -248,9 +251,93 @@ async def _run_eval(suite: str) -> None:
     console.print(table)
 
 
+def _service_headers(api_key: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {api_key}"}
+
+
+async def _client_request(method: str, path: str, *, json_data: dict[str, Any] | None = None) -> Any:
+    cfg = load_config()
+    if not cfg.api_key:
+        raise SystemExit("No API key configured. Run `conscio service init` first.")
+    async with httpx.AsyncClient(base_url=cfg.base_url, timeout=60) as client:
+        response = await client.request(method, path, headers=_service_headers(cfg.api_key), json=json_data)
+        response.raise_for_status()
+        return response.json()
+
+
+async def _service_status() -> None:
+    data = await _client_request("GET", "/status")
+    table = Table(title="Conscio Service")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+    for key in ("running", "paused", "session_id", "uptime", "autonomous", "unsafe_autonomy", "episode_count", "last_error"):
+        table.add_row(key, str(data.get(key, "")))
+    active = data.get("active_goal") or {}
+    if active:
+        table.add_row("active_goal", active.get("description", ""))
+    console.print(table)
+
+
+async def _client_chat(message: str) -> None:
+    data = await _client_request("POST", "/message", json_data={"content": message})
+    console.print(Panel(Markdown(data.get("output", "")), title="Conscio", border_style="green"))
+
+
+async def _client_influence(kind: str, content: str) -> None:
+    data = await _client_request("POST", f"/influence/{kind}", json_data={"content": content})
+    console.print(Panel(str(data), title=f"Influence: {kind}", border_style="green"))
+
+
+async def _client_control(action: str) -> None:
+    data = await _client_request("POST", f"/control/{action}")
+    console.print(data)
+
+
+async def _client_goals() -> None:
+    rows = await _client_request("GET", "/goals")
+    table = Table(title="Goals")
+    table.add_column("ID", style="cyan")
+    table.add_column("Status")
+    table.add_column("Source")
+    table.add_column("Priority")
+    table.add_column("Description")
+    for row in rows:
+        table.add_row(
+            row.get("id", "")[:12],
+            row.get("status", ""),
+            row.get("source", ""),
+            f"{row.get('priority', 0):.2f}",
+            row.get("description", "")[:90],
+        )
+    console.print(table)
+
+
+async def _client_trace() -> None:
+    data = await _client_request("GET", "/trace")
+    console.print(Panel(data.get("trace", ""), title="Cognitive Trace", border_style="dim"))
+
+
+def _service_init() -> None:
+    path = write_default_config()
+    console.print(f"[green]Config ready:[/] {path}")
+    console.print("[dim]Unsafe autonomy is disabled until config.toml sets unsafe_autonomy = true.[/]")
+
+
+def _service_start() -> None:
+    import uvicorn
+
+    from conscio.api import create_app
+
+    cfg = load_config()
+    if cfg.host != "127.0.0.1" and not cfg.api_key:
+        raise SystemExit("Public bind requires service.api_key in config.toml.")
+    app = create_app(config=cfg)
+    uvicorn.run(app, host=cfg.host, port=cfg.port)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="conscio — A consciousness harness for AI agents",
+        description="conscio — a conscious autonomous agent runtime",
     )
     sub = parser.add_subparsers(dest="command", help="Command to run")
 
@@ -277,6 +364,26 @@ def main() -> None:
     eval_p = sub.add_parser("eval", help="Run built-in evaluation suites")
     eval_p.add_argument("--suite", default="smoke", help="Evaluation suite name")
 
+    service_p = sub.add_parser("service", help="Manage the long-running Conscio service")
+    service_sub = service_p.add_subparsers(dest="service_command")
+    service_sub.add_parser("init", help="Create ~/.conscio/config.toml")
+    service_sub.add_parser("start", help="Start the authenticated FastAPI service")
+    service_sub.add_parser("status", help="Show service status")
+    service_sub.add_parser("stop", help="Stop the service")
+
+    chat_p = sub.add_parser("chat", help="Send a message to the running service")
+    chat_p.add_argument("message", nargs="+", help="Message to send")
+    influence_p = sub.add_parser("influence", help="Influence the running service")
+    influence_sub = influence_p.add_subparsers(dest="influence_kind")
+    influence_goal_p = influence_sub.add_parser("goal", help="Submit a goal influence")
+    influence_goal_p.add_argument("content", nargs="+")
+    influence_constraint_p = influence_sub.add_parser("constraint", help="Submit a constraint influence")
+    influence_constraint_p.add_argument("content", nargs="+")
+    sub.add_parser("pause", help="Pause autonomous action")
+    sub.add_parser("resume", help="Resume autonomous action")
+    sub.add_parser("goals", help="Show service goals")
+    sub.add_parser("trace", help="Show recent cognitive trace")
+
     args = parser.parse_args()
 
     if args.command == "run":
@@ -293,6 +400,34 @@ def main() -> None:
         asyncio.run(_run_daemon_dry_run(args.events))
     elif args.command == "eval":
         asyncio.run(_run_eval(args.suite))
+    elif args.command == "service":
+        if args.service_command == "init":
+            _service_init()
+        elif args.service_command == "start":
+            _service_start()
+        elif args.service_command == "status":
+            asyncio.run(_service_status())
+        elif args.service_command == "stop":
+            asyncio.run(_client_control("stop"))
+        else:
+            service_p.print_help()
+            sys.exit(1)
+    elif args.command == "chat":
+        asyncio.run(_client_chat(" ".join(args.message)))
+    elif args.command == "influence":
+        if args.influence_kind in {"goal", "constraint"}:
+            asyncio.run(_client_influence(args.influence_kind, " ".join(args.content)))
+        else:
+            influence_p.print_help()
+            sys.exit(1)
+    elif args.command == "pause":
+        asyncio.run(_client_control("pause"))
+    elif args.command == "resume":
+        asyncio.run(_client_control("resume"))
+    elif args.command == "goals":
+        asyncio.run(_client_goals())
+    elif args.command == "trace":
+        asyncio.run(_client_trace())
     else:
         parser.print_help()
         sys.exit(1)

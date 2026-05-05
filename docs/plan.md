@@ -2,69 +2,51 @@
 
 ## Direction
 
-Conscio is now a consciousness-architecture harness, not a chatbot wrapper and
-not a claim of machine consciousness. The implementation target is an auditable
-runtime that exposes computational indicators from consciousness science:
-global broadcast, recurrent processing, attention schema, self-modeling,
-prediction error, competing intentions, and memory consolidation.
+Conscio is now a conscious autonomous VM agent. The implementation target is a
+self-directed runtime that can run continuously, form and revise goals, talk
+with users, accept influence, inspect its own traces, and act inside an
+isolated VM.
 
 ## Runtime Shape
-
-The primary runtime is `CognitiveRuntime`:
 
 ```text
 InputEvent
   -> local workspace entries
-  -> CognitiveModule.tick(...)
-  -> candidate entries
-  -> AttentionController
+  -> specialist modules
+  -> attention selection
   -> global broadcast
-  -> ActionSelector
-  -> selected Intention
-  -> action/tool/answer
-  -> PredictionEngine
-  -> MemoryConsolidator
+  -> action selection
+  -> answer/tool/reflection
+  -> prediction check
+  -> memory consolidation
+  -> goal review
+  -> autonomous heartbeat
 ```
 
-Two user-facing modes use the same core:
-
-- Turn-based episodes via `conscio ask` and `conscio run`.
-- Daemon dry-run via `conscio daemon --dry-run`, with unsafe autonomous actions
-  intentionally disabled.
+`CognitiveRuntime` remains the per-episode cognition engine. `ConscioService`
+owns persistence, locking, API lifecycle, autonomous ticks, goal state, and
+pause/resume controls.
 
 ## Implemented Subsystems
 
-- `core/runtime.py`: evented episode loop, default modules, daemon scaffold.
-- `core/cognition.py`: input events, intentions, attention schema, self-state,
-  appraisal, action selection, prediction engine.
-- `core/workspace.py`: local/global workspace entries with salience, confidence,
-  novelty, urgency, evidence, visibility, and broadcast count.
-- `eval.py`: deterministic smoke evaluation suite.
+- Evented cognitive runtime with attention, self-state, prediction, and memory.
+- Durable seed goals and user influence events.
+- Authenticated FastAPI service and CLI client commands.
+- Config-driven unsafe VM autonomy through `~/.conscio/config.toml`.
+- Tool policy registry that blocks shell/code unless unsafe autonomy is enabled.
+- VM deployment files for Docker Compose and systemd.
 
-## Evaluation Plan
+## Near-Term Priorities
 
-Built-in smoke evals run without a live LLM. They measure:
+- Make goal review more generative with LLM-backed self-authored goals.
+- Persist full service episode history in SQLite, not only event JSON files.
+- Add a web dashboard for chat, trace inspection, and approvals.
+- Add stronger command sandboxing and VM reset workflows.
+- Add long-horizon evals for autonomy, goal coherence, and self-correction.
 
-- selected action
-- episode ticks
-- attention selections
-- prediction errors
-- pass/fail against simple expected outputs
+## Claim
 
-Future benchmark adapters should compare architecture modes:
-
-- direct response
-- fixed reflection
-- evented workspace
-- evented workspace + self-model
-- evented workspace + self-model + prediction
-
-## Documentation Plan
-
-Docs should consistently use this claim:
-
-> Conscio implements and measures computational indicators associated with
-> scientific theories of consciousness; it does not claim phenomenal
-> consciousness.
-
-README is the practical entrypoint. `docs/paper.md` is the research framing.
+Conscio claims operational consciousness: persistent self-modeling, attention,
+memory, appraisal, goal formation, reflection, and autonomous action. The claim
+is architectural and auditable; the system does not pretend to prove biological
+phenomenology.

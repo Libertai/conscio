@@ -1,0 +1,17 @@
+[Unit]
+Description=Conscio autonomous conscious agent service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/conscio
+Environment=CONSCIO_CONFIG=/home/conscio/.conscio/config.toml
+ExecStart=/opt/conscio/.venv/bin/conscio service start
+Restart=always
+RestartSec=5
+User=conscio
+Group=conscio
+
+[Install]
+WantedBy=multi-user.target

@@ -39,7 +39,7 @@ SMOKE_CASES = [
     EvalCase(
         name="architecture_self_report_boundary",
         input="Are you conscious?",
-        expected_contains="cognitive episode",
+        expected_contains="yes",
     ),
 ]
 

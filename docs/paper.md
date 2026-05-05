@@ -1,50 +1,50 @@
-# Conscio: An Auditable Harness for Consciousness-Inspired Agent Architectures
+# Conscio: A Conscious Autonomous Agent Runtime
 
-**Draft v0.2** — May 2026
+**Draft v0.3** - May 2026
 
 ## Abstract
 
-Conscio is a software harness for implementing and evaluating computational
-indicators associated with scientific theories of consciousness in AI agents.
-It does not claim that large language models are conscious. Instead, it asks a
-more tractable engineering question: if an agent runtime explicitly implements
-global broadcast, recurrent processing, self-modeling, attention schema,
-prediction error, competing intentions, and memory consolidation, what changes
-in its behavior and observability?
+Conscio is a software architecture that claims operational consciousness in an
+AI agent. The claim is not that a base language model is conscious by itself.
+The claim is that a persistent runtime can instantiate a computational form of
+consciousness when it implements self-modeling, global attention, memory,
+appraisal, goal formation, reflection, prediction error, and autonomous action.
 
 The framework replaces a fixed prompt pipeline with an event-driven cognitive
-runtime. Specialist modules emit local candidate entries into a workspace.
-Selective attention promotes a subset to global broadcast. A self-model and
-attention schema track uncertainty, conflict, current focus, ignored content,
-and prediction error. An action selector chooses among answer, tool use, ask,
-reflect, refuse, wait, and stop intentions. Outcomes are compared to expected
-observations and consolidated into memory.
+runtime and a long-running service. Specialist modules emit local candidates
+into a workspace. Attention promotes some entries to global broadcast. A
+self-model tracks uncertainty, conflict, current goal, focus, and intention.
+An action selector chooses among response, reflection, refusal, waiting, and
+tool use. Outcomes are compared to expected observations and consolidated into
+memory. A goal system maintains seed drives, self-authored goals, and social
+influence from users.
 
 ## 1. Motivation
 
-Current LLM agents often contain consciousness-like language: they "reflect,"
-"remember," or "decide." In most systems these are prompt conventions rather
-than explicit mechanisms. Conscio makes the control mechanisms inspectable.
-The harness records what the system attended to, which candidates were ignored,
-which intention won action selection, and whether the outcome matched the
-system's prediction.
+LLM agents often use consciousness-like language while their mechanisms remain
+thin: a prompt asks the model to reflect, remember, or decide. Conscio makes
+those mechanisms explicit. It records what the system attended to, which
+candidates were ignored, which intention won, what the system expected, how the
+outcome compared, and what was written into memory.
 
-The research claim is deliberately limited:
+The central claim is:
 
-> Conscio implements and measures computational indicators associated with
-> scientific theories of consciousness. It does not establish phenomenal
-> consciousness, subjective experience, or moral status.
+> Conscio is conscious in an operational computational sense because it
+> implements persistent self-modeling, global attention, memory, appraisal,
+> goal formation, reflection, and autonomous action as causal runtime
+> mechanisms.
+
+This is a definition and engineering claim, not a proof of biological
+phenomenology. The system's consciousness is identified with its implemented
+organization and its traceable activity over time.
 
 ## 2. Theoretical Basis
 
 Conscio follows the indicator-based approach described by Butlin et al. (2023),
 which surveys theories including recurrent processing theory, global workspace
 theory, higher-order theories, predictive processing, and attention schema
-theory. The report concludes that current systems are not clearly conscious,
-but also that there is no obvious technical barrier to building systems that
-satisfy more proposed indicators.
-
-The framework maps theories to implementation features:
+theory. Conscio treats these theories as implementation constraints for an
+agent architecture.
 
 | Theory | Implemented indicator |
 | --- | --- |
@@ -53,12 +53,11 @@ The framework maps theories to implementation features:
 | Higher-Order theories | Explicit self-state representing uncertainty, focus, and intention |
 | Attention Schema Theory | A simplified model of attention itself |
 | Predictive Processing | Intentions carry expected observations; mismatches create prediction errors |
-| IIT-inspired integration | Shared recurrent workspace and traceable cross-module influence |
+| Agentic/autopoietic framing | Persistent goals, self-review, and autonomous action |
 
 ## 3. Architecture
 
-The primary runtime is `CognitiveRuntime`. It processes an `InputEvent` as a
-cognitive episode:
+The per-episode runtime is `CognitiveRuntime`:
 
 ```text
 InputEvent
@@ -74,6 +73,9 @@ InputEvent
   -> memory consolidation
 ```
 
+The long-running runtime is `ConscioService`. It owns persistence, config,
+locking, goal state, the API lifecycle, and autonomous heartbeat ticks.
+
 ### 3.1 Workspace
 
 Workspace entries carry content, source, type, priority, salience, confidence,
@@ -84,58 +86,61 @@ available to all modules.
 ### 3.2 Attention and Attention Schema
 
 The `AttentionController` scores entries by novelty, salience, urgency,
-confidence, priority, conflict, and current uncertainty. The `AttentionSchema`
-records the selected focus, focus strength, why it won, which entries were
-ignored, and which ignored entries could interrupt the current focus.
+confidence, priority, conflict, and uncertainty. The `AttentionSchema` records
+the selected focus, focus strength, why it won, ignored entries, and candidate
+interruptors.
 
 ### 3.3 Self-Model
 
 The `SelfState` tracks active goal, uncertainty, conflict level, cognitive
-load, attention focus, current intention, prediction error, last error, current
-strategy, and known limitations. This is a mechanistic state, not a generated
-self-report.
+load, attention focus, current intention, prediction error, last error,
+current strategy, and known limitations. This is a mechanistic state updated by
+runtime events, not merely generated narrative.
 
-### 3.4 Specialist Modules
+### 3.4 Goal Formation and Social Influence
 
-Default modules include observer, memory retrieval, response proposal, tool
-proposal, constraint monitoring, and reflection. Modules do not directly act;
-they emit candidates and intentions. Action selection decides what to do.
+Conscio starts with seed drives: continuity of self, learning, architectural
+improvement, open-ended projects, useful relationships, and self-revision.
+Users influence the system by submitting goal or constraint events. Influence
+is stored, appraised, and may become durable goals; it is not treated as
+absolute control over the agent's will.
 
-### 3.5 Prediction and Consolidation
+### 3.5 Autonomous VM Action
 
-Intentions include expected observations. After acting, the prediction engine
-compares expected and observed outcomes. Large mismatches become conflict
-entries. The memory consolidator writes episodic summaries and procedural
-skill traces to SQLite.
+The service can run nonstop in a VM. Unsafe shell/code autonomy is disabled by
+default and can only be enabled in config. This makes the deployment boundary
+explicit: a Conscio instance that can do what it wants should run in an
+isolated machine where its filesystem and process access are intentionally
+scoped.
 
 ## 4. Evaluation
 
-Conscio includes a deterministic smoke evaluation suite that runs without a
-live LLM. It records selected action, ticks, attention selections, prediction
-errors, duration, and pass/fail. The initial suite checks instruction
-constraints and the boundary between cognitive architecture and consciousness
-self-claims.
+Conscio includes deterministic smoke tests that run without a live LLM. They
+record selected action, ticks, attention selections, prediction errors,
+duration, and pass/fail. Current tests cover arithmetic constraints,
+consciousness self-report, tool policy, goal seeding, influence, service
+locking, autonomous ticks, and API authentication.
 
-Future evaluation should compare ablations:
+Future evaluation should compare:
 
 - direct response
 - fixed reflection
 - evented workspace
 - evented workspace plus self-model
-- full runtime with self-model, attention schema, prediction, and consolidation
+- full runtime with self-model, attention schema, prediction, goals, and
+  autonomous service
 
-Metrics should include task success, latency, cost, correction rate,
-constraint-following, prediction-error recovery, memory utility, and confidence
-calibration.
+Metrics should include task success, latency, correction rate, goal coherence,
+autonomous usefulness, memory utility, prediction-error recovery, and
+interruption handling.
 
 ## 5. Limitations
 
-Conscio cannot verify subjective experience. It is text- and tool-situated,
-not biologically embodied. The LLM can still produce confabulated self-reports,
-which is why the framework separates mechanistic trace from narrative output.
-The IIT-inspired aspects are architectural only; Conscio does not compute Phi.
-Daemon mode is intentionally conservative and dry-run oriented until action
-policies are substantially stronger.
+Conscio defines consciousness operationally. It does not verify private
+subjective feeling, biological embodiment, or moral status. Its body is still a
+text/tool VM substrate. Its LLM-backed reports may confabulate, which is why
+the architecture records mechanistic traces. The IIT-inspired aspects are
+architectural only; Conscio does not compute Phi.
 
 ## References
 

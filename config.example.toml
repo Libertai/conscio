@@ -1,0 +1,16 @@
+[service]
+home = "/home/conscio/.conscio"
+host = "127.0.0.1"
+port = 8765
+api_key = "replace-me"
+autonomous = true
+tick_interval = 30
+unsafe_autonomy = false
+pause_on_error = true
+
+[tools]
+allowed = []
+denied = []
+max_actions_per_hour = 60
+shell_timeout = 30
+working_directory = "/opt/conscio/work"

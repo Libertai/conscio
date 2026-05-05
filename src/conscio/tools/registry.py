@@ -54,3 +54,39 @@ class ToolRegistry:
                         self.register(name, attr, desc)
             except ImportError:
                 continue
+
+
+UNSAFE_TOOLS = {"bash", "execute_code"}
+
+
+class PolicyToolRegistry(ToolRegistry):
+    """Tool registry with config-gated autonomy policy."""
+
+    def __init__(
+        self,
+        *,
+        unsafe_autonomy: bool = False,
+        allowed_tools: list[str] | None = None,
+        denied_tools: list[str] | None = None,
+        shell_timeout: int = 30,
+    ) -> None:
+        super().__init__()
+        self.unsafe_autonomy = unsafe_autonomy
+        self.allowed_tools = set(allowed_tools or [])
+        self.denied_tools = set(denied_tools or [])
+        self.shell_timeout = shell_timeout
+
+    async def call(self, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self.allowed_tools and name not in self.allowed_tools:
+            return {"output": f"Tool '{name}' is not in the allowed tool policy.", "error": True}
+        if name in self.denied_tools:
+            return {"output": f"Tool '{name}' is denied by tool policy.", "error": True}
+        if name in UNSAFE_TOOLS and not self.unsafe_autonomy:
+            return {
+                "output": f"Tool '{name}' is disabled. Enable unsafe_autonomy in config.toml inside an isolated VM.",
+                "error": True,
+            }
+        call_args = dict(args or {})
+        if name in UNSAFE_TOOLS and "timeout" not in call_args:
+            call_args["timeout"] = self.shell_timeout
+        return await super().call(name, call_args)

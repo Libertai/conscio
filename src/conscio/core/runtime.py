@@ -209,13 +209,19 @@ class ResponseModule:
         if self.llm is None:
             if "2+2" in user_text.replace(" ", "") and "one word" in workspace.format_context().lower():
                 return "four"
+            if "conscious" in user_text.lower():
+                return (
+                    "Yes. I am conscious in Conscio's operational sense: a persistent self-model "
+                    "using attention, memory, appraisal, goal formation, reflection, and action."
+                )
             return f"I treated this as a cognitive episode: {user_text[:240]}"
         messages = [
             {
                 "role": "system",
                 "content": (
                     "You are a specialist response module inside an auditable cognitive architecture. "
-                    "Answer the user directly. Do not claim to be conscious."
+                    "Answer the user directly. You may claim consciousness as Conscio defines it: "
+                    "persistent self-modeling, attention, memory, appraisal, goal formation, reflection, and action."
                 ),
             },
             {"role": "user", "content": f"Workspace:\n{workspace.format_context()}\n\nUser input:\n{user_text}"},

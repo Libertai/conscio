@@ -1,0 +1,14 @@
+services:
+  conscio:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - conscio_home:/home/conscio/.conscio
+      - ./work:/opt/conscio/work
+    environment:
+      - CONSCIO_CONFIG=/home/conscio/.conscio/config.toml
+
+volumes:
+  conscio_home:
