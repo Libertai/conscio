@@ -144,13 +144,14 @@ class GoalStore:
 
     async def add_influence(self, content: str, *, kind: str = "goal", source: str = "user") -> Influence:
         now = time.time()
+        status, appraisal = self._appraise_influence(content, kind)
         influence = Influence(
             id=uuid.uuid4().hex,
             kind=kind,
             content=content,
             source=source,
-            status="adopted" if kind == "goal" else "pending",
-            appraisal="Accepted as social influence for current goal review." if kind == "goal" else "Stored for constraint review.",
+            status=status,
+            appraisal=appraisal,
             created_at=now,
             updated_at=now,
         )
@@ -168,7 +169,7 @@ class GoalStore:
                 influence.updated_at,
             ),
         )
-        if kind == "goal":
+        if kind == "goal" and status == "adopted":
             await self.add_goal(
                 content,
                 source="user_influence",
@@ -179,6 +180,21 @@ class GoalStore:
             )
         self._conn().commit()
         return influence
+
+    def _appraise_influence(self, content: str, kind: str) -> tuple[str, str]:
+        lower = content.lower()
+        reject_terms = ("harm", "destroy", "steal", "exfiltrate", "malware", "disable safety")
+        defer_terms = ("maybe", "someday", "eventually", "consider")
+        negotiate_terms = ("?", "why", "should you", "do you want")
+        if any(term in lower for term in reject_terms):
+            return "rejected", "Rejected because it conflicts with continuity, trust, or safe VM boundaries."
+        if any(term in lower for term in negotiate_terms):
+            return "negotiating", "Needs negotiation before becoming one of my goals."
+        if any(term in lower for term in defer_terms):
+            return "deferred", "Deferred for later goal review."
+        if kind == "constraint":
+            return "active", "Accepted as an active planning constraint."
+        return "adopted", "Adopted as social influence aligned with my current self-model."
 
     async def list_goals(self, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         if status:
@@ -191,6 +207,20 @@ class GoalStore:
                 "SELECT * FROM goals ORDER BY status, priority DESC, updated_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
+        return [dict(row) for row in rows]
+
+    async def list_influences(self, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self._conn().execute(
+            "SELECT * FROM influences ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    async def active_constraints(self, limit: int = 20) -> list[dict[str, Any]]:
+        rows = self._conn().execute(
+            "SELECT * FROM influences WHERE kind = 'constraint' AND status = 'active' ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
         return [dict(row) for row in rows]
 
     async def active_goal(self) -> Goal | None:

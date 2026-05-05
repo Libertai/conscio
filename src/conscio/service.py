@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from conscio.autonomy import AutonomyStore
 from conscio.config import ServiceConfig, load_config
 from conscio.core.cognition import InputEvent
 from conscio.core.runtime import CognitiveRuntime, EpisodeResult
@@ -25,6 +26,12 @@ class ServiceStatus:
     autonomous: bool
     unsafe_autonomy: bool
     active_goal: dict[str, Any] | None = None
+    queue_depth: int = 0
+    current_event: str = ""
+    current_project: dict[str, Any] | None = None
+    current_task: dict[str, Any] | None = None
+    last_autonomous_action: str = ""
+    actions_last_hour: int = 0
     episode_count: int = 0
     last_error: str = ""
 
@@ -39,6 +46,13 @@ class StoredEpisode:
     selected_action: str
     created_at: float
     metrics: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class QueuedEvent:
+    event: InputEvent
+    future: asyncio.Future[EpisodeResult | None]
+    autonomous: bool = False
 
 
 class ServiceLock:
@@ -76,19 +90,26 @@ class ConscioService:
             allowed_tools=self.config.allowed_tools,
             denied_tools=self.config.denied_tools,
             shell_timeout=self.config.shell_timeout,
+            working_directory=self.config.working_directory,
         )
         tools.load_builtins()
         self.runtime = CognitiveRuntime(memory=self.memory, tools=tools)
         self.goals = GoalStore(self.memory)
+        self.autonomy = AutonomyStore(self.memory)
         self.lock = ServiceLock(self.config.lock_path)
-        self.queue: asyncio.Queue[InputEvent] = asyncio.Queue()
+        self.queue: asyncio.Queue[QueuedEvent] = asyncio.Queue()
         self.running = False
         self.paused = False
         self.started_at = 0.0
         self.last_error = ""
+        self.current_event = ""
+        self.last_autonomous_action = ""
         self._loop_task: asyncio.Task | None = None
+        self._event_task: asyncio.Task | None = None
         self._episodes: list[StoredEpisode] = []
         self._action_times: list[float] = []
+        self._tool_action_times: list[float] = []
+        self._event_lock = asyncio.Lock()
 
     async def start(self, *, acquire_lock: bool = True, background: bool = True) -> None:
         if self.running:
@@ -96,12 +117,15 @@ class ConscioService:
         if acquire_lock:
             self.lock.acquire()
         await self.goals.initialize()
+        await self.autonomy.initialize()
         await self.runtime.initialize()
         self.running = True
         self.started_at = time.time()
         goal = await self.goals.active_goal()
         if goal:
             self.runtime.self_state.active_goal = goal.description
+        if background:
+            self._event_task = asyncio.create_task(self._event_worker())
         if background and self.config.autonomous:
             self._loop_task = asyncio.create_task(self._autonomous_loop())
 
@@ -114,6 +138,13 @@ class ConscioService:
             except asyncio.CancelledError:
                 pass
             self._loop_task = None
+        if self._event_task is not None:
+            self._event_task.cancel()
+            try:
+                await self._event_task
+            except asyncio.CancelledError:
+                pass
+            self._event_task = None
         await self.runtime.close()
         self.lock.release()
 
@@ -124,11 +155,13 @@ class ConscioService:
         self.paused = False
 
     async def submit_message(self, content: str, *, source: str = "user") -> EpisodeResult:
-        return await self.run_event(InputEvent(content=content, source=source, event_type="message"))
+        result = await self._submit_event(InputEvent(content=content, source=source, event_type="message"))
+        assert result is not None
+        return result
 
     async def submit_influence(self, content: str, *, kind: str = "goal", source: str = "user") -> dict[str, Any]:
         influence = await self.goals.add_influence(content, kind=kind, source=source)
-        await self.run_event(
+        await self._submit_event(
             InputEvent(
                 content=f"Influence received ({kind}): {content}",
                 source=source,
@@ -141,22 +174,60 @@ class ConscioService:
     async def run_autonomous_tick(self) -> EpisodeResult | None:
         if self.paused or not self.running:
             return None
-        if not self._within_action_budget():
+        if not self._within_action_budget(self._action_times, self.config.max_actions_per_hour):
             return None
-        goal = await self.goals.review()
-        content = "Autonomous heartbeat: review my wants and choose the next useful action."
-        if goal:
-            content = f"Autonomous heartbeat: active goal is '{goal.description}'. Decide what I want to do next."
-            self.runtime.self_state.active_goal = goal.description
-        return await self.run_event(InputEvent(content=content, source="autonomous", event_type="heartbeat"))
+        return await self._submit_event(
+            InputEvent(
+                content="Autonomous heartbeat: review my wants and choose the next useful action.",
+                source="autonomous",
+                event_type="heartbeat",
+            ),
+            autonomous=True,
+        )
 
     async def run_event(self, event: InputEvent) -> EpisodeResult:
+        result = await self._process_event(event)
+        assert result is not None
+        return result
+
+    async def _submit_event(self, event: InputEvent, *, autonomous: bool = False) -> EpisodeResult | None:
         if not self.running:
             await self.start(background=False)
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[EpisodeResult | None] = loop.create_future()
+        if self._event_task is not None:
+            await self.queue.put(QueuedEvent(event=event, future=future, autonomous=autonomous))
+            return await future
+        return await self._process_event(event, autonomous=autonomous)
+
+    async def _event_worker(self) -> None:
+        while self.running:
+            item = await self.queue.get()
+            try:
+                result = await self._process_event(item.event, autonomous=item.autonomous)
+                if not item.future.done():
+                    item.future.set_result(result)
+            except Exception as exc:
+                if not item.future.done():
+                    item.future.set_exception(exc)
+            finally:
+                self.queue.task_done()
+
+    async def _process_event(self, event: InputEvent, *, autonomous: bool = False) -> EpisodeResult | None:
+        async with self._event_lock:
+            self.current_event = f"{event.source}:{event.event_type}"
+            try:
+                if autonomous:
+                    return await self._plan_and_act(event)
+                return await self._run_episode(event)
+            finally:
+                self.current_event = ""
+
+    async def _run_episode(self, event: InputEvent) -> EpisodeResult:
         self._action_times.append(time.time())
         try:
             result = await self.runtime.run_episode(event)
-            self._store_episode(event, result)
+            await self._store_episode(event, result)
             return result
         except Exception as exc:
             self.last_error = str(exc)
@@ -164,8 +235,55 @@ class ConscioService:
                 self.pause()
             raise
 
+    async def _plan_and_act(self, event: InputEvent) -> EpisodeResult:
+        goal = await self.goals.review()
+        if goal is None:
+            return await self._run_episode(event)
+        self.runtime.self_state.active_goal = goal.description
+        project = await self.autonomy.get_or_create_project(goal.id, goal.description)
+        constraints = await self.goals.active_constraints()
+        if self.config.unsafe_autonomy and self._within_action_budget(self._tool_action_times, self.config.max_actions_per_hour):
+            note = (
+                f"Conscio autonomous action for goal {goal.id}: "
+                f"{goal.description[:80]} | constraints={len(constraints)}"
+            )
+            command = f"printf '%s\\n' {json.dumps(note)} >> conscio_autonomy.log"
+            task = await self.autonomy.ensure_next_task(
+                project.id,
+                "Write an autonomous progress note inside the configured VM working directory.",
+                tool_name="bash",
+                tool_args={"input": command},
+            )
+            await self.autonomy.update_task(task.id, status="active")
+            tool_result = await self.runtime.tools.call(task.tool_name or "bash", task.tool_args)
+            self._tool_action_times.append(time.time())
+            status = "done" if not tool_result.get("error") and int(tool_result.get("exit_code", 0)) == 0 else "blocked"
+            await self.autonomy.update_task(task.id, status=status, result=str(tool_result.get("output", ""))[:1000])
+            self.last_autonomous_action = f"tool:{task.tool_name}:{status}"
+            tool_event = InputEvent(
+                content=f"Autonomous tool result for task {task.id}: {tool_result.get('output', '')}",
+                source="tool",
+                event_type="tool_result",
+                metadata={"project_id": project.id, "task_id": task.id, "tool": task.tool_name},
+            )
+            return await self._run_episode(tool_event)
+        task = await self.autonomy.ensure_next_task(
+            project.id,
+            "Reflect on the active goal and choose a concrete next step.",
+        )
+        await self.autonomy.update_task(task.id, status="active", result="Reflection episode queued.")
+        self.last_autonomous_action = "reflect"
+        content = (
+            f"Autonomous heartbeat: active goal is '{goal.description}'. "
+            f"Current project is '{project.title}'. Current task is '{task.description}'. "
+            f"Constraints: {[c['content'] for c in constraints]}. Decide the next concrete action."
+        )
+        return await self._run_episode(InputEvent(content=content, source="autonomous", event_type="heartbeat"))
+
     async def status(self) -> ServiceStatus:
         goal = await self.goals.active_goal()
+        current_project = await self.autonomy.active_project()
+        current_task = await self.autonomy.active_task()
         return ServiceStatus(
             running=self.running,
             paused=self.paused,
@@ -174,18 +292,40 @@ class ConscioService:
             autonomous=self.config.autonomous,
             unsafe_autonomy=self.config.unsafe_autonomy,
             active_goal=asdict(goal) if goal else None,
-            episode_count=len(self._episodes),
+            queue_depth=self.queue.qsize(),
+            current_event=self.current_event,
+            current_project=current_project,
+            current_task=current_task,
+            last_autonomous_action=self.last_autonomous_action,
+            actions_last_hour=len(self._recent_actions(self._tool_action_times)),
+            episode_count=len(await self.recent_episodes(1000)),
             last_error=self.last_error,
         )
 
     async def recent_episodes(self, limit: int = 20) -> list[dict[str, Any]]:
+        stored = await self.autonomy.recent_episodes(limit)
+        if stored:
+            return stored
         return [asdict(ep) for ep in self._episodes[-limit:]][::-1]
 
     async def recent_trace(self) -> str:
-        return self.runtime.trace.format(limit=120)
+        stored = await self.autonomy.recent_trace()
+        return stored or self.runtime.trace.format(limit=120)
 
     async def search_memory(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
         return await self.memory.search(query, limit)
+
+    async def list_projects(self) -> list[dict[str, Any]]:
+        return await self.autonomy.list_projects()
+
+    async def get_project(self, project_id: str) -> dict[str, Any] | None:
+        return await self.autonomy.get_project(project_id)
+
+    async def set_project_status(self, project_id: str, status: str) -> None:
+        await self.autonomy.set_project_status(project_id, status)
+
+    async def list_influences(self) -> list[dict[str, Any]]:
+        return await self.goals.list_influences()
 
     async def _autonomous_loop(self) -> None:
         while self.running:
@@ -193,12 +333,16 @@ class ConscioService:
                 await self.run_autonomous_tick()
             await asyncio.sleep(self.config.tick_interval)
 
-    def _within_action_budget(self) -> bool:
+    def _recent_actions(self, items: list[float]) -> list[float]:
         cutoff = time.time() - 3600
-        self._action_times = [t for t in self._action_times if t >= cutoff]
-        return len(self._action_times) < self.config.max_actions_per_hour
+        return [t for t in items if t >= cutoff]
 
-    def _store_episode(self, event: InputEvent, result: EpisodeResult) -> None:
+    def _within_action_budget(self, items: list[float], limit: int) -> bool:
+        recent = self._recent_actions(items)
+        items[:] = recent
+        return len(recent) < limit
+
+    async def _store_episode(self, event: InputEvent, result: EpisodeResult) -> None:
         ep = StoredEpisode(
             id=f"{int(time.time() * 1000)}-{len(self._episodes) + 1}",
             source=event.source,
@@ -212,6 +356,16 @@ class ConscioService:
         self._episodes.append(ep)
         path = self.config.home / "events" / f"{ep.id}.json"
         path.write_text(json.dumps(asdict(ep), indent=2), encoding="utf-8")
+        await self.autonomy.store_episode(
+            episode_id=ep.id,
+            source=ep.source,
+            event_type=ep.event_type,
+            input=ep.input,
+            output=ep.output,
+            selected_action=ep.selected_action,
+            metrics=dict(ep.metrics),
+            trace=result.cognitive_trace,
+        )
 
 
 def create_service(config_path: str | Path | None = None) -> ConscioService:

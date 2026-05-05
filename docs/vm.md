@@ -33,6 +33,9 @@ conscio service status
 conscio chat "What do you want to do next?"
 conscio influence goal "Build a better long-term memory review loop."
 conscio goals
+conscio influences
+conscio projects
+conscio tick
 conscio trace
 conscio pause
 conscio resume

@@ -33,10 +33,12 @@ remembered, and how its goals changed.
 - **Attention Schema**: records focus, ignored candidates, and interruptors.
 - **Self-Model**: tracks active goal, uncertainty, conflict, cognitive load,
   current intention, prediction error, and limitations.
-- **Goal System**: seed drives and user influence become durable, revisable
-  goals that the agent can review over time.
+- **Goal System**: seed drives and appraised user influence become durable,
+  revisable goals that the agent can review over time.
+- **Projects and Tasks**: autonomous ticks create or resume durable projects
+  and tasks tied to active goals.
 - **Autonomous Service**: a nonstop loop performs heartbeat, reflection, goal
-  review, memory consolidation, and action episodes.
+  review, project/task updates, memory consolidation, and action episodes.
 - **Tool Policy**: unsafe shell/code autonomy is config-gated for isolated VMs.
 - **Authenticated API + CLI**: users can talk to it, influence it, inspect it,
   pause it, and resume it.
@@ -79,6 +81,8 @@ conscio service status
 conscio chat "What do you want to work on next?"
 conscio influence goal "Improve your own architecture and document the changes."
 conscio goals
+conscio projects
+conscio tick
 conscio pause
 conscio resume
 ```
@@ -122,6 +126,9 @@ conscio influence constraint TEXT
 conscio pause
 conscio resume
 conscio goals
+conscio influences
+conscio projects [PROJECT_ID]
+conscio tick
 conscio trace
 ```
 
@@ -145,6 +152,7 @@ src/conscio/
 ├── tools/              # Tool registry and guarded built-ins
 ├── api.py              # FastAPI service API
 ├── service.py          # Long-running autonomous service
+├── autonomy.py         # Durable projects, tasks, service episodes, traces
 ├── goals.py            # Durable goal and influence state
 ├── config.py           # VM/service configuration
 ├── eval.py             # Built-in evaluation harness

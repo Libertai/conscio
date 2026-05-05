@@ -86,6 +86,38 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
     async def goals(status: str | None = None) -> list[dict[str, Any]]:
         return await svc.goals.list_goals(status=status)
 
+    @app.get("/influences", dependencies=[Depends(require_auth)])
+    async def influences() -> list[dict[str, Any]]:
+        return await svc.list_influences()
+
+    @app.get("/projects", dependencies=[Depends(require_auth)])
+    async def projects() -> list[dict[str, Any]]:
+        return await svc.list_projects()
+
+    @app.get("/projects/{project_id}", dependencies=[Depends(require_auth)])
+    async def project(project_id: str) -> dict[str, Any]:
+        found = await svc.get_project(project_id)
+        if found is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        return found
+
+    @app.post("/projects/{project_id}/pause", dependencies=[Depends(require_auth)])
+    async def pause_project(project_id: str) -> dict[str, str]:
+        await svc.set_project_status(project_id, "paused")
+        return {"status": "paused"}
+
+    @app.post("/projects/{project_id}/resume", dependencies=[Depends(require_auth)])
+    async def resume_project(project_id: str) -> dict[str, str]:
+        await svc.set_project_status(project_id, "active")
+        return {"status": "active"}
+
+    @app.post("/autonomy/tick", dependencies=[Depends(require_auth)])
+    async def autonomy_tick() -> dict[str, Any]:
+        result = await svc.run_autonomous_tick()
+        if result is None:
+            return {"output": "", "selected_action": "wait"}
+        return {"output": result.output, "selected_action": result.selected_action}
+
     @app.get("/episodes", dependencies=[Depends(require_auth)])
     async def episodes(limit: int = Query(default=20, ge=1, le=100)) -> list[dict[str, Any]]:
         return await svc.recent_episodes(limit)

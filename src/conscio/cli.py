@@ -270,7 +270,20 @@ async def _service_status() -> None:
     table = Table(title="Conscio Service")
     table.add_column("Field", style="cyan")
     table.add_column("Value")
-    for key in ("running", "paused", "session_id", "uptime", "autonomous", "unsafe_autonomy", "episode_count", "last_error"):
+    for key in (
+        "running",
+        "paused",
+        "session_id",
+        "uptime",
+        "autonomous",
+        "unsafe_autonomy",
+        "queue_depth",
+        "current_event",
+        "last_autonomous_action",
+        "actions_last_hour",
+        "episode_count",
+        "last_error",
+    ):
         table.add_row(key, str(data.get(key, "")))
     active = data.get("active_goal") or {}
     if active:
@@ -310,6 +323,51 @@ async def _client_goals() -> None:
             row.get("description", "")[:90],
         )
     console.print(table)
+
+
+async def _client_influences() -> None:
+    rows = await _client_request("GET", "/influences")
+    table = Table(title="Influences")
+    table.add_column("ID", style="cyan")
+    table.add_column("Kind")
+    table.add_column("Status")
+    table.add_column("Content")
+    table.add_column("Appraisal")
+    for row in rows:
+        table.add_row(
+            row.get("id", "")[:12],
+            row.get("kind", ""),
+            row.get("status", ""),
+            row.get("content", "")[:60],
+            row.get("appraisal", "")[:80],
+        )
+    console.print(table)
+
+
+async def _client_projects(project_id: str | None = None) -> None:
+    if project_id:
+        project = await _client_request("GET", f"/projects/{project_id}")
+        console.print(Panel(str(project), title=f"Project {project_id[:12]}", border_style="green"))
+        return
+    rows = await _client_request("GET", "/projects")
+    table = Table(title="Projects")
+    table.add_column("ID", style="cyan")
+    table.add_column("Goal", style="dim")
+    table.add_column("Status")
+    table.add_column("Title")
+    for row in rows:
+        table.add_row(
+            row.get("id", "")[:12],
+            row.get("goal_id", "")[:12],
+            row.get("status", ""),
+            row.get("title", "")[:90],
+        )
+    console.print(table)
+
+
+async def _client_tick() -> None:
+    data = await _client_request("POST", "/autonomy/tick")
+    console.print(Panel(Markdown(data.get("output", "")), title=f"Autonomy: {data.get('selected_action', '')}", border_style="green"))
 
 
 async def _client_trace() -> None:
@@ -382,6 +440,10 @@ def main() -> None:
     sub.add_parser("pause", help="Pause autonomous action")
     sub.add_parser("resume", help="Resume autonomous action")
     sub.add_parser("goals", help="Show service goals")
+    sub.add_parser("influences", help="Show service influences")
+    projects_p = sub.add_parser("projects", help="Show service projects")
+    projects_p.add_argument("project_id", nargs="?", default=None)
+    sub.add_parser("tick", help="Run one autonomous service tick")
     sub.add_parser("trace", help="Show recent cognitive trace")
 
     args = parser.parse_args()
@@ -426,6 +488,12 @@ def main() -> None:
         asyncio.run(_client_control("resume"))
     elif args.command == "goals":
         asyncio.run(_client_goals())
+    elif args.command == "influences":
+        asyncio.run(_client_influences())
+    elif args.command == "projects":
+        asyncio.run(_client_projects(args.project_id))
+    elif args.command == "tick":
+        asyncio.run(_client_tick())
     elif args.command == "trace":
         asyncio.run(_client_trace())
     else:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 
@@ -8,6 +9,7 @@ async def bash(
     command: str | None = None,
     timeout: int = 30,
     input: str | None = None,
+    cwd: str | None = None,
 ) -> dict[str, Any]:
     """Execute a bash command and return output."""
     command = command if command is not None else input
@@ -18,6 +20,7 @@ async def bash(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=str(Path(cwd).expanduser()) if cwd else None,
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         output = stdout.decode("utf-8", errors="replace")

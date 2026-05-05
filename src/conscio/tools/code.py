@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+from pathlib import Path
 from typing import Any
 
 
@@ -9,6 +10,7 @@ async def execute_code(
     code: str | None = None,
     timeout: int = 30,
     input: str | None = None,
+    cwd: str | None = None,
 ) -> dict[str, Any]:
     """Execute a Python code snippet and return the output."""
     code = code if code is not None else input
@@ -24,6 +26,7 @@ async def execute_code(
             path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=str(Path(cwd).expanduser()) if cwd else None,
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         out = stdout.decode("utf-8", errors="replace")

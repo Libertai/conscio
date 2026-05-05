@@ -4,6 +4,7 @@ import importlib
 import inspect
 import pkgutil
 from typing import Any, Callable, Coroutine
+from pathlib import Path
 
 TOOL_FN = Callable[..., Coroutine[Any, Any, dict[str, Any]]]
 
@@ -69,12 +70,14 @@ class PolicyToolRegistry(ToolRegistry):
         allowed_tools: list[str] | None = None,
         denied_tools: list[str] | None = None,
         shell_timeout: int = 30,
+        working_directory: str | Path | None = None,
     ) -> None:
         super().__init__()
         self.unsafe_autonomy = unsafe_autonomy
         self.allowed_tools = set(allowed_tools or [])
         self.denied_tools = set(denied_tools or [])
         self.shell_timeout = shell_timeout
+        self.working_directory = Path(working_directory).expanduser() if working_directory else None
 
     async def call(self, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
         if self.allowed_tools and name not in self.allowed_tools:
@@ -89,4 +92,7 @@ class PolicyToolRegistry(ToolRegistry):
         call_args = dict(args or {})
         if name in UNSAFE_TOOLS and "timeout" not in call_args:
             call_args["timeout"] = self.shell_timeout
+        if name in UNSAFE_TOOLS and self.working_directory is not None:
+            self.working_directory.mkdir(parents=True, exist_ok=True)
+            call_args["cwd"] = str(self.working_directory)
         return await super().call(name, call_args)

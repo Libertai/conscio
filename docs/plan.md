@@ -31,15 +31,18 @@ pause/resume controls.
 
 - Evented cognitive runtime with attention, self-state, prediction, and memory.
 - Durable seed goals and user influence events.
+- Appraised influence states: adopted, rejected, deferred, negotiating, active.
+- Durable projects, tasks, service episodes, and service traces in SQLite.
 - Authenticated FastAPI service and CLI client commands.
 - Config-driven unsafe VM autonomy through `~/.conscio/config.toml`.
 - Tool policy registry that blocks shell/code unless unsafe autonomy is enabled.
+- Serialized service event execution around user messages, influence, and ticks.
 - VM deployment files for Docker Compose and systemd.
 
 ## Near-Term Priorities
 
 - Make goal review more generative with LLM-backed self-authored goals.
-- Persist full service episode history in SQLite, not only event JSON files.
+- Add LLM-backed structured planning beyond the deterministic fallback planner.
 - Add a web dashboard for chat, trace inspection, and approvals.
 - Add stronger command sandboxing and VM reset workflows.
 - Add long-horizon evals for autonomy, goal coherence, and self-correction.

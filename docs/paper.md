@@ -74,7 +74,8 @@ InputEvent
 ```
 
 The long-running runtime is `ConscioService`. It owns persistence, config,
-locking, goal state, the API lifecycle, and autonomous heartbeat ticks.
+locking, goal state, durable projects/tasks, the API lifecycle, and autonomous
+heartbeat ticks.
 
 ### 3.1 Workspace
 
@@ -102,12 +103,14 @@ runtime events, not merely generated narrative.
 Conscio starts with seed drives: continuity of self, learning, architectural
 improvement, open-ended projects, useful relationships, and self-revision.
 Users influence the system by submitting goal or constraint events. Influence
-is stored, appraised, and may become durable goals; it is not treated as
-absolute control over the agent's will.
+is stored and appraised as adopted, rejected, deferred, negotiating, or active;
+it is not treated as absolute control over the agent's will.
 
 ### 3.5 Autonomous VM Action
 
-The service can run nonstop in a VM. Unsafe shell/code autonomy is disabled by
+The service can run nonstop in a VM. Autonomous ticks select an active goal,
+create or resume a durable project, create or resume a task, and either reflect
+or execute a permitted tool action. Unsafe shell/code autonomy is disabled by
 default and can only be enabled in config. This makes the deployment boundary
 explicit: a Conscio instance that can do what it wants should run in an
 isolated machine where its filesystem and process access are intentionally
@@ -119,7 +122,8 @@ Conscio includes deterministic smoke tests that run without a live LLM. They
 record selected action, ticks, attention selections, prediction errors,
 duration, and pass/fail. Current tests cover arithmetic constraints,
 consciousness self-report, tool policy, goal seeding, influence, service
-locking, autonomous ticks, and API authentication.
+locking, autonomous ticks, project/task persistence, influence appraisal,
+working-directory enforcement, and API authentication.
 
 Future evaluation should compare:
 
