@@ -1,6 +1,7 @@
 # Conscio: An Operational Architecture for Auditable Machine Consciousness
 
 **Draft v1.0**  
+Jonathan Schemoul, LibertAI  
 May 2026
 
 ## Abstract
