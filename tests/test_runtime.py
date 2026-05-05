@@ -49,6 +49,48 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(results), 1)
         self.assertIn(results[0].selected_action, {"answer", "wait"})
 
+    async def test_autonomous_heartbeat_current_context_does_not_trigger_web_search(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = CognitiveRuntime(
+                llm=None,
+                memory=MemoryStore(db_path=os.path.join(tmp, "autonomous.db")),
+            )
+            await runtime.initialize()
+            try:
+                result = await runtime.run_episode(
+                    InputEvent(
+                        content=(
+                            "Autonomous heartbeat: active goal is 'Preserve continuity'. "
+                            "Current project is 'Autonomous pursuit'. Current task is "
+                            "'Reflect on the active goal and choose a concrete next step'."
+                        ),
+                        source="autonomous",
+                        event_type="heartbeat",
+                    )
+                )
+            finally:
+                await runtime.close()
+
+        self.assertNotEqual(result.selected_action, "tool")
+        self.assertEqual(result.metrics.tool_calls, 0)
+
+    async def test_user_current_information_request_can_trigger_web_search(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = CognitiveRuntime(
+                llm=None,
+                memory=MemoryStore(db_path=os.path.join(tmp, "current.db")),
+            )
+            await runtime.initialize()
+            try:
+                result = await runtime.run_episode(
+                    InputEvent(content="Search for the latest project status.", source="user")
+                )
+            finally:
+                await runtime.close()
+
+        self.assertEqual(result.selected_action, "tool")
+        self.assertEqual(result.metrics.tool_calls, 1)
+
 
 class EvalTests(unittest.IsolatedAsyncioTestCase):
     async def test_smoke_eval_runs(self) -> None:

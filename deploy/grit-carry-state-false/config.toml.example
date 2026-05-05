@@ -1,0 +1,20 @@
+[service]
+home = "/home/conscio/.conscio"
+host = "127.0.0.1"
+port = 8765
+client_url = "https://grit-carry-state-false.2n6.me"
+api_key = "replace-with-generated-api-key"
+web_password = "replace-with-generated-web-password"
+web_secure_cookies = true
+allow_insecure_public_bind = false
+autonomous = true
+tick_interval = 30
+unsafe_autonomy = false
+pause_on_error = true
+
+[tools]
+allowed = []
+denied = []
+max_actions_per_hour = 60
+shell_timeout = 30
+working_directory = "/opt/conscio/work"

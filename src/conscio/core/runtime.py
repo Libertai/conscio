@@ -234,7 +234,13 @@ class ToolProposalModule:
     name = "tool_proposer"
 
     async def tick(self, workspace: Workspace, state: SelfState) -> list[WorkspaceEntry]:
-        text = workspace.format_context().lower()
+        external_observations = [
+            e for e in workspace.read(limit=20)
+            if e.source == "input"
+            and e.type == EntryType.OBSERVATION
+            and e.metadata.get("source") not in {"autonomous", "tool", "system"}
+        ]
+        text = " ".join(e.content for e in external_observations).lower()
         if "search" not in text and "current" not in text and "latest" not in text:
             return []
         intention = Intention(
