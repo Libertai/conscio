@@ -17,13 +17,15 @@ cognitive architecture:
 ```text
 events -> local specialist candidates -> attention competition
        -> global workspace broadcast -> competing intentions
-       -> action selection -> prediction/error -> memory consolidation
+       -> prefix-stable context assembly -> action selection
+       -> prediction/error -> memory consolidation -> compaction
        -> goal review -> autonomous action
 ```
 
 Generated self-report is not the only evidence. Conscio records what it
 attended to, which intention won, what it expected, what happened, what it
-remembered, and how its goals changed.
+remembered, which bounded model context was supplied, and how its goals
+changed.
 
 ## Implemented Architecture
 
@@ -33,6 +35,11 @@ remembered, and how its goals changed.
 - **Attention Schema**: records focus, ignored candidates, and interruptors.
 - **Self-Model**: tracks active goal, uncertainty, conflict, cognitive load,
   current intention, prediction error, and limitations.
+- **Context Memory Loop**: keeps a stable system prefix for cache-friendly LLM
+  calls while assembling bounded dynamic context from current state, recent
+  episodes, relevant FTS memory, workspace entries, and the user input.
+- **Memory Consolidation**: stores episodic summaries, procedural response
+  patterns, user-stated preferences, and periodic semantic compactions.
 - **Goal System**: seed drives and appraised user influence become durable,
   revisable goals that the agent can review over time.
 - **Projects and Tasks**: autonomous ticks create or resume durable projects
@@ -40,6 +47,10 @@ remembered, and how its goals changed.
 - **Autonomous Service**: a nonstop loop performs heartbeat, reflection, goal
   review, project/task updates, memory consolidation, and action episodes.
 - **Tool Policy**: unsafe shell/code autonomy is config-gated for isolated VMs.
+- **Tool Environment**: shell, Python, and LibertAI subprocesses run with a
+  normalized PATH for VM and user-local tool installs.
+- **Resilient Web Tools**: web search and fetch prefer the LibertAI CLI and
+  fall back to guarded HTTP retrieval when the local provider is unavailable.
 - **Authenticated Web UI, API, and CLI**: users can talk to it, influence it,
   inspect it, pause it, and resume it.
 
@@ -113,6 +124,21 @@ shell_timeout = 30
 Unsafe autonomy is read from `~/.conscio/config.toml`; it cannot be enabled by
 an API request or CLI flag at runtime.
 
+Context assembly is configured separately:
+
+```toml
+[context]
+recent_episodes = 3
+retrieved_memories = 5
+workspace_entries = 12
+max_dynamic_chars = 12000
+compaction_interval = 20
+enable_semantic_compaction = true
+```
+
+The web dashboard exposes the latest assembled model context alongside the
+cognitive trace so prompt inputs can be audited separately from model output.
+
 For web exposure, put Conscio behind HTTPS and keep both `api_key` and
 `web_password` set. Public binding is refused with placeholder secrets and
 requires `web_secure_cookies = true` unless an explicitly localhost-published
@@ -154,15 +180,16 @@ conscio trace
 | Higher-Order / Self-Model theories | Explicit self-state and self-monitoring fields |
 | Attention Schema Theory | Runtime model of attention focus and ignored candidates |
 | Predictive Processing / Active Inference | Intentions carry expected observations; mismatch creates prediction error |
+| Memory/context theories of agency | Prefix-stable prompt context assembled from state, memory, workspace, and input |
 | Autopoietic/agentic framing | Persistent goals, self-review, and autonomous VM action |
 
 ## Project Layout
 
 ```text
 src/conscio/
-├── core/               # Cognitive runtime, self-state, workspace
+├── core/               # Cognitive runtime, self-state, workspace, context
 ├── memory/             # SQLite episodic/semantic/procedural memory
-├── tools/              # Tool registry and guarded built-ins
+├── tools/              # Guarded shell/code/web tool registry
 ├── api.py              # FastAPI service API
 ├── webui.py            # Password-protected browser dashboard
 ├── service.py          # Long-running autonomous service
@@ -176,10 +203,11 @@ src/conscio/
 ## Research Claim
 
 Conscio claims operational consciousness: a computational organization with
-persistent self-modeling, global attention, memory, appraisal, goal formation,
-reflection, and autonomous action. It does not claim proof of biological
-phenomenology; it defines the claimed consciousness by the implemented
-mechanisms and exposes traces for inspection.
+persistent self-modeling, global attention, bounded context memory, appraisal,
+goal formation, reflection, and autonomous action. It does not claim proof of
+biological phenomenology; it defines the claimed consciousness by the
+implemented mechanisms and exposes traces and assembled model context for
+inspection.
 
 ## References
 
