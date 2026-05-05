@@ -62,10 +62,11 @@ class LLMClient:
         kwargs.setdefault("temperature", temperature)
         if max_tokens:
             kwargs.setdefault("max_tokens", max_tokens)
+        if tools:
+            kwargs["tools"] = tools
         response = self.sync.chat.completions.create(
             model=model or self.model,
             messages=messages,
-            tools=tools or [],
             **kwargs,
         )
         choice = response.choices[0]
@@ -98,10 +99,11 @@ class LLMClient:
         kwargs.setdefault("temperature", temperature)
         if max_tokens:
             kwargs.setdefault("max_tokens", max_tokens)
+        if tools:
+            kwargs["tools"] = tools
         response = await self.async_.chat.completions.create(
             model=model or self.model,
             messages=messages,
-            tools=tools or [],
             **kwargs,
         )
         choice = response.choices[0]
@@ -134,10 +136,11 @@ class LLMClient:
         kwargs.setdefault("temperature", temperature)
         if max_tokens:
             kwargs.setdefault("max_tokens", max_tokens)
+        if tools:
+            kwargs["tools"] = tools
         stream = await self.async_.chat.completions.create(
             model=model or self.model,
             messages=messages,
-            tools=tools or [],
             stream=True,
             **kwargs,
         )

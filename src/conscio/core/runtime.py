@@ -184,8 +184,18 @@ class ResponseModule:
         self._ran = True
         user_entries = [
             e for e in workspace.read(limit=20)
-            if e.source in {"input", "observer"} and e.type == EntryType.OBSERVATION
+            if e.source == "input"
+            and e.type == EntryType.OBSERVATION
+            and e.metadata.get("source") not in {"autonomous", "tool", "system"}
+            and e.timestamp >= getattr(self, "_current_episode_start", 0.0)
         ]
+        if not user_entries:
+            user_entries = [
+                e for e in workspace.read(limit=20)
+                if e.source == "input"
+                and e.type == EntryType.OBSERVATION
+                and e.timestamp >= getattr(self, "_current_episode_start", 0.0)
+            ]
         user_entries.sort(key=lambda e: e.timestamp, reverse=True)
         user_text = user_entries[0].content if user_entries else ""
         answer = await self._answer(user_text, workspace)

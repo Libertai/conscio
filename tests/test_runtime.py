@@ -66,6 +66,28 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.selected_action, "answer")
         self.assertIn("Second message", second.output)
 
+    async def test_response_prefers_current_user_input_over_autonomous_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = CognitiveRuntime(
+                llm=None,
+                memory=MemoryStore(db_path=os.path.join(tmp, "current-user.db")),
+            )
+            await runtime.initialize()
+            try:
+                await runtime.run_episode(
+                    InputEvent(
+                        content="Autonomous heartbeat: current task is reflection.",
+                        source="autonomous",
+                        event_type="heartbeat",
+                    )
+                )
+                result = await runtime.run_episode(InputEvent(content="Second user message", source="user"))
+            finally:
+                await runtime.close()
+
+        self.assertEqual(result.selected_action, "answer")
+        self.assertIn("Second user message", result.output)
+
     async def test_autonomous_heartbeat_current_context_does_not_trigger_web_search(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime = CognitiveRuntime(
