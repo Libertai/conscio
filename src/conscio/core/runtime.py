@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -186,12 +187,14 @@ class ResponseModule:
         memory: MemoryStore | None = None,
         session_id: str = "",
         context_provider: Any | None = None,
+        tools: ToolRegistry | None = None,
     ) -> None:
         self.llm = llm
         self.assembler = assembler or PromptAssembler()
         self.memory = memory
         self.session_id = session_id
         self.context_provider = context_provider
+        self.tools = tools
         self._ran = False
         self.last_model_context = ""
 
@@ -213,19 +216,10 @@ class ResponseModule:
             return []
         user_entries.sort(key=lambda e: e.timestamp, reverse=True)
         user_text = user_entries[0].content if user_entries else ""
-        answer = await self._answer(user_text, workspace)
-        intention = Intention(
-            kind=ActionKind.ANSWER,
-            content=answer,
-            source=self.name,
-            confidence=0.72,
-            expected_observation="answer delivered to user",
-            urgency=0.4,
-            expected_value=0.8,
-        )
+        intention = await self._choose_intention(user_text, workspace)
         return [
             workspace.write(
-                f"Candidate answer: {answer}",
+                f"Candidate {intention.kind.value}: {intention.content}",
                 source=self.name,
                 type=EntryType.INTENTION,
                 priority=7,
@@ -237,17 +231,20 @@ class ResponseModule:
             )
         ]
 
-    async def _answer(self, user_text: str, workspace: Workspace) -> str:
+    async def _choose_intention(self, user_text: str, workspace: Workspace) -> Intention:
         self.last_model_context = ""
         if self.llm is None:
+            answer: str
             if "2+2" in user_text.replace(" ", "") and "one word" in workspace.format_context().lower():
-                return "four"
-            if "conscious" in user_text.lower():
-                return (
+                answer = "four"
+            elif "conscious" in user_text.lower():
+                answer = (
                     "Yes. I am conscious in Conscio's operational sense: a persistent self-model "
                     "using attention, memory, appraisal, goal formation, reflection, and action."
                 )
-            return f"I treated this as a cognitive episode: {user_text[:240]}"
+            else:
+                answer = f"I treated this as a cognitive episode: {user_text[:240]}"
+            return self._answer_intention(answer)
         state = await self.context_provider() if self.context_provider else {}
         memory = self.memory or MemoryStore()
         assembled = await self.assembler.assemble(
@@ -259,99 +256,90 @@ class ResponseModule:
             retrieval_query=user_text or " ".join(str(v) for v in state.values()),
         )
         self.last_model_context = assembled.dynamic_context
-        response = await self.llm.chat_async(assembled.messages, temperature=0.4, max_tokens=600)
+        response = await self.llm.chat_async(
+            assembled.messages,
+            temperature=0.4,
+            max_tokens=600,
+            tools=self._tool_schemas(),
+        )
+        tool_intention = self._tool_intention(response)
+        if tool_intention is not None:
+            return tool_intention
         content = str(response.get("content") or "").strip()
         if content:
-            return content
-        return (
+            return self._answer_intention(content)
+        return self._answer_intention(
             "I recorded your message, but my inference backend returned an empty response. "
             "I will retain the facts and continue."
         )
 
-
-class ToolProposalModule:
-    name = "tool_proposer"
-
-    async def tick(self, workspace: Workspace, state: SelfState) -> list[WorkspaceEntry]:
-        episode_start = getattr(state, "episode_start", 0.0)
-        external_observations = [
-            e for e in workspace.read(limit=20)
-            if e.source == "input"
-            and e.type == EntryType.OBSERVATION
-            and e.metadata.get("source") not in {"autonomous", "tool", "system"}
-            and e.timestamp >= episode_start
-        ]
-        text = " ".join(e.content for e in external_observations).lower()
-        if "search" not in text and "current" not in text and "latest" not in text:
-            return []
-        intention = Intention(
-            kind=ActionKind.TOOL,
-            content="Verify current information with web search.",
+    def _answer_intention(self, content: str) -> Intention:
+        return Intention(
+            kind=ActionKind.ANSWER,
+            content=content,
             source=self.name,
-            confidence=0.7,
-            expected_observation="tool returned relevant evidence",
-            tool_name="web_search",
-            tool_args={"input": text[:200]},
-            urgency=0.5,
-            expected_value=0.75,
+            confidence=0.72,
+            expected_observation="answer delivered to user",
+            urgency=0.4,
+            expected_value=0.8,
         )
-        return [
-            workspace.write(
-                "Candidate tool action: web_search for current information.",
-                source=self.name,
-                type=EntryType.INTENTION,
-                priority=6,
-                salience=0.65,
-                confidence=0.7,
-                novelty=0.5,
-                urgency=0.5,
-                metadata={"intention": intention},
-            )
-        ]
 
-
-class MemoryProposalModule:
-    name = "memory_proposer"
-
-    async def tick(self, workspace: Workspace, state: SelfState) -> list[WorkspaceEntry]:
-        episode_start = getattr(state, "episode_start", 0.0)
-        user_entries = [
-            e for e in workspace.read(limit=20)
-            if e.source == "input"
-            and e.type == EntryType.OBSERVATION
-            and e.metadata.get("source") == "user"
-            and e.timestamp >= episode_start
-        ]
-        if not user_entries:
-            return []
-        user_entries.sort(key=lambda e: e.timestamp, reverse=True)
-        facts = _extract_declared_facts(user_entries[0].content)
-        if not facts:
-            return []
-        intention = Intention(
+    def _tool_intention(self, response: dict[str, Any]) -> Intention | None:
+        calls = response.get("tool_calls") or []
+        if not calls:
+            return None
+        call = calls[0]
+        function = call.get("function") or {}
+        name = str(function.get("name") or "").strip()
+        if not name:
+            return None
+        try:
+            args = json.loads(function.get("arguments") or "{}")
+        except json.JSONDecodeError:
+            args = {"input": str(function.get("arguments") or "")}
+        if not isinstance(args, dict):
+            args = {"input": args}
+        return Intention(
             kind=ActionKind.TOOL,
-            content="Store declared user and agent context facts in semantic memory.",
+            content=f"Use tool {name}.",
             source=self.name,
-            confidence=0.86,
-            expected_observation="facts stored in semantic memory",
-            tool_name="remember_facts",
-            tool_args={"facts": facts, "source": "user"},
-            urgency=0.65,
-            expected_value=0.9,
+            confidence=0.78,
+            expected_observation=f"{name} returned useful output",
+            tool_name=name,
+            tool_args=args,
+            urgency=0.55,
+            expected_value=0.8,
         )
-        return [
-            workspace.write(
-                f"Candidate memory action: store {len(facts)} declared facts.",
-                source=self.name,
-                type=EntryType.INTENTION,
-                priority=7,
-                salience=0.75,
-                confidence=intention.confidence,
-                novelty=0.7,
-                urgency=0.65,
-                metadata={"intention": intention},
-            )
-        ]
+
+    def _tool_schemas(self) -> list[dict[str, Any]] | None:
+        if self.tools is None:
+            return None
+        schemas: list[dict[str, Any]] = []
+        for name, description in self.tools.list_tools().items():
+            schemas.append({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "input": {"type": "string"},
+                            "command": {"type": "string"},
+                            "code": {"type": "string"},
+                            "query": {"type": "string"},
+                            "url": {"type": "string"},
+                            "fact": {"type": "string"},
+                            "facts": {"type": "array", "items": {"type": "string"}},
+                            "source": {"type": "string"},
+                            "confidence": {"type": "string"},
+                            "timeout": {"type": "integer"},
+                        },
+                        "additionalProperties": True,
+                    },
+                },
+            })
+        return schemas or None
 
 
 class MemoryConsolidator:
@@ -400,12 +388,6 @@ class MemoryConsolidator:
 
     async def _nudge_memory(self, memory: MemoryStore, event: InputEvent, result: EpisodeResult) -> None:
         text = event.content.strip()
-        lower = text.lower()
-        if event.source == "user" and any(marker in lower for marker in ("remember", "prefer", "call me", "my name is")):
-            await memory.add_fact(f"User stated: {text[:240]}", source="user", confidence="HIGH")
-        if event.source == "user":
-            for fact in _extract_declared_facts(text):
-                await memory.add_fact(fact, source="user", confidence="HIGH")
         if event.source == "user" and result.selected_action == "answer":
             await memory.add_skill(
                 skill=f"answer_{_slug(text or result.output)}",
@@ -462,7 +444,8 @@ class CognitiveRuntime:
         self.predictions = PredictionEngine()
         self.memory = memory or MemoryStore()
         self.tools = tools or ToolRegistry()
-        self.tools.load_builtins()
+        if tools is None:
+            self.tools.load_builtins()
         self.max_ticks = max_ticks
         self.context_settings = context_settings or ContextSettings()
         self.prompt_assembler = PromptAssembler(self.context_settings)
@@ -473,6 +456,7 @@ class CognitiveRuntime:
             memory=self.memory,
             session_id=self.session_id,
             context_provider=context_provider,
+            tools=self.tools,
         )
         self.modules = modules or self._default_modules()
         self.consolidator = MemoryConsolidator(self.context_settings)
@@ -482,10 +466,7 @@ class CognitiveRuntime:
             PerceptionModule(),
             MemoryRetrievalModule(self.memory, self.session_id),
             self._response_module,
-            ToolProposalModule(),
         ]
-        if "remember_facts" in self.tools.list_tools():
-            modules.append(MemoryProposalModule())
         modules.extend([ConstraintMonitorModule(), ReflectionModule()])
         return modules
 
@@ -649,71 +630,3 @@ class CognitiveRuntime:
 def _slug(text: str) -> str:
     value = "".join(ch.lower() if ch.isalnum() else "_" for ch in text[:48]).strip("_")
     return value or "episode"
-
-
-def _extract_declared_facts(text: str) -> list[str]:
-    facts: list[str] = []
-    for sentence in _split_fact_sentences(text):
-        normalized = " ".join(sentence.strip(" \t\r\n-").split())
-        if not normalized:
-            continue
-        lower = normalized.lower()
-        if _is_user_fact(lower):
-            facts.append(f"User identity/context: {normalized[:240]}")
-        elif _is_agent_fact(lower):
-            facts.append(f"Agent self/context: {normalized[:240]}")
-    return _dedupe_preserve_order(facts)
-
-
-def _split_fact_sentences(text: str) -> list[str]:
-    normalized = text.replace("\n", ". ")
-    parts: list[str] = []
-    current: list[str] = []
-    for char in normalized:
-        current.append(char)
-        if char in ".!?;":
-            parts.append("".join(current).strip(" .!?;"))
-            current = []
-    if current:
-        parts.append("".join(current).strip(" .!?;"))
-    return parts
-
-
-def _is_user_fact(lower: str) -> bool:
-    starts = (
-        "i am ",
-        "i'm ",
-        "i’m ",
-        "my name is ",
-        "call me ",
-        "i prefer ",
-        "i like ",
-        "i want ",
-    )
-    return lower.startswith(starts) or " aka " in lower
-
-
-def _is_agent_fact(lower: str) -> bool:
-    starts = (
-        "you are ",
-        "you run ",
-        "you live ",
-        "you have ",
-        "you can ",
-        "your user is ",
-        "your inference is ",
-        "your vm ",
-        "your host ",
-        "your home ",
-    )
-    return lower.startswith(starts)
-
-
-def _dedupe_preserve_order(items: list[str]) -> list[str]:
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for item in items:
-        if item not in seen:
-            seen.add(item)
-            deduped.append(item)
-    return deduped

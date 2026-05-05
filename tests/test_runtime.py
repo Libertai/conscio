@@ -16,15 +16,37 @@ from conscio.tools import ToolRegistry
 class FakeLLM:
     def __init__(self) -> None:
         self.calls: list[list[dict]] = []
+        self.kwargs: list[dict] = []
 
     async def chat_async(self, messages: list[dict], **kwargs) -> dict:
         self.calls.append(messages)
+        self.kwargs.append(kwargs)
         return {"content": "fake response"}
 
 
 class EmptyLLM:
     async def chat_async(self, messages: list[dict], **kwargs) -> dict:
         return {"content": ""}
+
+
+class ToolCallLLM:
+    def __init__(self, name: str, arguments: str) -> None:
+        self.name = name
+        self.arguments = arguments
+        self.kwargs: list[dict] = []
+
+    async def chat_async(self, messages: list[dict], **kwargs) -> dict:
+        self.kwargs.append(kwargs)
+        return {
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": self.name, "arguments": self.arguments},
+                }
+            ],
+        }
 
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -274,7 +296,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.selected_action, "wait")
         self.assertEqual(result.output, "Internal observation recorded; no user-facing response needed.")
 
-    async def test_memory_consolidation_creates_facts_and_skills(self) -> None:
+    async def test_memory_consolidation_creates_skills(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime = CognitiveRuntime(
                 llm=None,
@@ -285,12 +307,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             try:
                 await runtime.run_episode(InputEvent(content="Remember that I prefer concise answers.", source="user"))
                 await runtime.run_episode(InputEvent(content="hello!", source="user"))
-                facts = await runtime.memory.recent_facts()
                 skills = await runtime.memory.list_skills()
             finally:
                 await runtime.close()
 
-        self.assertTrue(any("prefer concise answers" in fact["fact"] for fact in facts))
         self.assertTrue(any(skill["skill"].startswith("answer_") for skill in skills))
 
     async def test_semantic_fact_reindex_does_not_duplicate_fts_rows(self) -> None:
@@ -307,10 +327,14 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         semantic_rows = [row for row in rows if row["memory_type"] == "semantic"]
         self.assertEqual(len(semantic_rows), 1)
 
-    async def test_declared_self_context_uses_memory_tool_when_available(self) -> None:
+    async def test_llm_can_choose_memory_tool_when_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             memory = MemoryStore(db_path=os.path.join(tmp, "memory-tool.db"))
             tools = ToolRegistry()
+            llm = ToolCallLLM(
+                "remember_facts",
+                '{"facts": ["Agent self/context: You run in a VM"], "source": "user"}',
+            )
 
             async def remember_facts(facts: list[str], source: str = "user") -> dict:
                 for fact in facts:
@@ -318,44 +342,47 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 return {"output": f"Stored {len(facts)} fact(s) in semantic memory.", "error": False}
 
             tools.register("remember_facts", remember_facts, "Store facts.")
-            runtime = CognitiveRuntime(llm=None, memory=memory, tools=tools)
+            runtime = CognitiveRuntime(llm=llm, memory=memory, tools=tools)  # type: ignore[arg-type]
             await runtime.initialize()
             try:
                 result = await runtime.run_episode(
-                    InputEvent(
-                        content=(
-                            "I am Jonathan Schemoul. You run in a VM. "
-                            "Your user is a sudoer on your VM."
-                        ),
-                        source="user",
-                    )
+                    InputEvent(content="Remember: you run in a VM.", source="user")
                 )
                 facts = await memory.recent_facts(10)
             finally:
                 await runtime.close()
 
         self.assertEqual(result.selected_action, "tool")
-        self.assertIn("Stored 3 fact", result.output)
+        self.assertIn("Stored 1 fact", result.output)
+        self.assertIn("tools", llm.kwargs[0])
         fact_text = "\n".join(row["fact"] for row in facts)
-        self.assertIn("I am Jonathan Schemoul", fact_text)
         self.assertIn("You run in a VM", fact_text)
-        self.assertIn("Your user is a sudoer", fact_text)
 
-    async def test_user_current_information_request_can_trigger_web_search(self) -> None:
+    async def test_llm_can_choose_bash_tool_when_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            tools = ToolRegistry()
+            llm = ToolCallLLM("bash", '{"input": "whoami && pwd"}')
+
+            async def bash(input: str) -> dict:
+                self.assertEqual(input, "whoami && pwd")
+                return {"output": "conscio\n/opt/conscio/work", "exit_code": 0}
+
+            tools.register("bash", bash, "Execute shell commands.")
             runtime = CognitiveRuntime(
-                llm=None,
-                memory=MemoryStore(db_path=os.path.join(tmp, "current.db")),
-            )
+                llm=llm,  # type: ignore[arg-type]
+                memory=MemoryStore(db_path=os.path.join(tmp, "bash-tool.db")),
+                tools=tools,
+            ) 
             await runtime.initialize()
             try:
                 result = await runtime.run_episode(
-                    InputEvent(content="Search for the latest project status.", source="user")
+                    InputEvent(content="Poke around in your terminal.", source="user")
                 )
             finally:
                 await runtime.close()
 
         self.assertEqual(result.selected_action, "tool")
+        self.assertIn("/opt/conscio/work", result.output)
         self.assertEqual(result.metrics.tool_calls, 1)
 
 
