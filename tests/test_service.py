@@ -83,6 +83,28 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.llm_api_key, "test-llm-key")
         self.assertEqual(cfg.llm_model, "test-model")
 
+    def test_context_config_loads_from_dedicated_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(
+                "[context]\n"
+                "recent_episodes = 2\n"
+                "retrieved_memories = 4\n"
+                "workspace_entries = 6\n"
+                "max_dynamic_chars = 7000\n"
+                "compaction_interval = 10\n"
+                "enable_semantic_compaction = false\n",
+                encoding="utf-8",
+            )
+            cfg = load_config(path)
+
+        self.assertEqual(cfg.context_recent_episodes, 2)
+        self.assertEqual(cfg.context_retrieved_memories, 4)
+        self.assertEqual(cfg.context_workspace_entries, 6)
+        self.assertEqual(cfg.context_max_dynamic_chars, 7000)
+        self.assertEqual(cfg.context_compaction_interval, 10)
+        self.assertFalse(cfg.context_enable_semantic_compaction)
+
 
 class ToolPolicyTests(unittest.IsolatedAsyncioTestCase):
     async def test_unsafe_tool_is_blocked_without_config_policy(self) -> None:
@@ -386,7 +408,13 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bad_login.status_code, 401)
         self.assertEqual(login.status_code, 200)
         self.assertEqual(snapshot.status_code, 200)
+        payload = snapshot.json()
+        self.assertIn("model_context", payload)
+        self.assertIn("facts", payload)
+        self.assertIn("skills", payload)
         self.assertIn("Conscio", dashboard.text)
+        self.assertIn("Model Context", dashboard.text)
+        self.assertIn("Memory", dashboard.text)
 
     async def test_web_logout_revokes_session(self) -> None:
         try:

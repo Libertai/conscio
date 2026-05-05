@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 
+from conscio.core.context import ContextSettings, PromptAssembler
 from conscio.core.cognition import InputEvent
 from conscio.core.workspace import EntryType, Visibility
 from conscio.core.runtime import CognitiveRuntime
@@ -11,7 +12,61 @@ from conscio.eval import run_eval_suite
 from conscio.memory.store import MemoryStore
 
 
+class FakeLLM:
+    def __init__(self) -> None:
+        self.calls: list[list[dict]] = []
+
+    async def chat_async(self, messages: list[dict], **kwargs) -> dict:
+        self.calls.append(messages)
+        return {"content": "fake response"}
+
+
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_prompt_assembler_keeps_stable_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(db_path=os.path.join(tmp, "prompt.db"))
+            await memory.initialize()
+            await memory.create_session("s1")
+            assembler = PromptAssembler(ContextSettings(max_dynamic_chars=2000))
+            workspace = CognitiveRuntime(memory=memory, session_id="s1").workspace
+            first = await assembler.assemble(
+                user_input="hello",
+                workspace=workspace,
+                memory=memory,
+                session_id="s1",
+                state={"active_goal": {"description": "Preserve continuity"}},
+            )
+            second = await assembler.assemble(
+                user_input="what now?",
+                workspace=workspace,
+                memory=memory,
+                session_id="s1",
+                state={"active_goal": {"description": "Preserve continuity"}},
+            )
+            await memory.close()
+
+        self.assertEqual(first.messages[0], second.messages[0])
+        self.assertIn("USER_INPUT\nhello", first.dynamic_context)
+        self.assertIn("USER_INPUT\nwhat now?", second.dynamic_context)
+
+    async def test_llm_response_uses_assembled_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = FakeLLM()
+            runtime = CognitiveRuntime(
+                llm=fake,  # type: ignore[arg-type]
+                memory=MemoryStore(db_path=os.path.join(tmp, "llm.db")),
+                context_settings=ContextSettings(max_dynamic_chars=2000),
+            )
+            await runtime.initialize()
+            try:
+                result = await runtime.run_episode(InputEvent(content="hello", source="user"))
+            finally:
+                await runtime.close()
+
+        self.assertEqual(result.output, "fake response")
+        self.assertIn("USER_INPUT\nhello", result.model_context)
+        self.assertEqual(fake.calls[0][0], fake.calls[-1][0])
+
     async def test_evented_episode_returns_trace_and_attention_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime = CognitiveRuntime(
@@ -154,6 +209,25 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotEqual(result.selected_action, "tool")
         self.assertEqual(result.metrics.tool_calls, 0)
+
+    async def test_memory_consolidation_creates_facts_and_skills(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = CognitiveRuntime(
+                llm=None,
+                memory=MemoryStore(db_path=os.path.join(tmp, "memory.db")),
+                context_settings=ContextSettings(compaction_interval=2),
+            )
+            await runtime.initialize()
+            try:
+                await runtime.run_episode(InputEvent(content="Remember that I prefer concise answers.", source="user"))
+                await runtime.run_episode(InputEvent(content="hello!", source="user"))
+                facts = await runtime.memory.recent_facts()
+                skills = await runtime.memory.list_skills()
+            finally:
+                await runtime.close()
+
+        self.assertTrue(any("prefer concise answers" in fact["fact"] for fact in facts))
+        self.assertTrue(any(skill["skill"].startswith("answer_") for skill in skills))
 
     async def test_user_current_information_request_can_trigger_web_search(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

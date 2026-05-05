@@ -159,6 +159,13 @@ class MemoryStore:
             (session_id, limit),
         )
 
+    async def count_episodes(self, session_id: str) -> int:
+        rows = self._fetchall(
+            "SELECT COUNT(*) AS count FROM episodic WHERE session_id = ?",
+            (session_id,),
+        )
+        return int(rows[0]["count"]) if rows else 0
+
     # ── Semantic Memory ──────────────────────────────────────────
 
     async def add_fact(self, fact: str, source: str = "", confidence: str = "MEDIUM") -> None:
@@ -182,6 +189,13 @@ class MemoryStore:
             "SELECT fact, source, confidence, created_at FROM semantic "
             "WHERE fact LIKE ? ORDER BY updated_at DESC LIMIT ?",
             (f"%{query}%", limit),
+        )
+
+    async def recent_facts(self, limit: int = 10) -> list[dict]:
+        return self._fetchall(
+            "SELECT fact, source, confidence, created_at, updated_at FROM semantic "
+            "ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
         )
 
     # ── Procedural Memory ────────────────────────────────────────

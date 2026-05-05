@@ -101,6 +101,9 @@ def create_web_router(service: ConscioService) -> APIRouter:
             "influences": await service.list_influences(),
             "episodes": await service.recent_episodes(10),
             "trace": await service.recent_trace(),
+            "model_context": service.latest_model_context,
+            "facts": await service.recent_facts(10),
+            "skills": await service.list_skills(),
         }
 
     @router.post("/ui/api/message", include_in_schema=False)
@@ -286,8 +289,16 @@ DASHBOARD_HTML = """<!doctype html>
         <div id="influences" class="list"></div>
       </div>
       <div class="panel">
+        <h2>Memory</h2>
+        <div id="memory" class="list"></div>
+      </div>
+      <div class="panel">
         <h2>Internal Reflection</h2>
         <div id="episodes" class="episode-list"></div>
+      </div>
+      <div class="panel">
+        <h2>Model Context</h2>
+        <pre id="modelContext"></pre>
       </div>
       <div class="panel">
         <h2>Cognitive Trace</h2>
@@ -343,7 +354,11 @@ DASHBOARD_HTML = """<!doctype html>
       document.getElementById('goal').innerHTML = item(goal.description || 'No active goal', `${goal.source || ''} ${goal.status || ''}`);
       document.getElementById('projects').innerHTML = (data.projects || []).map((p) => item(p.title, `${p.status} | ${p.id.slice(0, 12)}`)).join('') || '<div class="meta">No projects yet.</div>';
       document.getElementById('influences').innerHTML = (data.influences || []).slice(0, 8).map((i) => item(i.content, `${i.kind} | ${i.status} | ${i.appraisal}`)).join('') || '<div class="meta">No influences yet.</div>';
+      const facts = (data.facts || []).slice(0, 5).map((f) => item(f.fact, `fact | ${f.confidence || ''}`));
+      const skills = (data.skills || []).slice(0, 5).map((s) => item(s.skill, `skill | used ${s.use_count || 0}`));
+      document.getElementById('memory').innerHTML = facts.concat(skills).join('') || '<div class="meta">No memory yet.</div>';
       document.getElementById('episodes').innerHTML = (data.episodes || []).slice(0, 8).map(episodeItem).join('') || '<div class="meta">No episodes yet.</div>';
+      document.getElementById('modelContext').textContent = data.model_context || '';
       document.getElementById('trace').textContent = data.trace || '';
     }
     document.getElementById('chat').addEventListener('submit', async (event) => {

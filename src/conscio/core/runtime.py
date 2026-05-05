@@ -5,6 +5,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from conscio.core.context import ContextSettings, PromptAssembler
 from conscio.core.cognition import (
     ActionKind,
     ActionSelector,
@@ -46,6 +47,7 @@ class EpisodeResult:
     metrics: EpisodeMetrics
     tool_results: list[dict[str, Any]] = field(default_factory=list)
     memory_ids: list[str] = field(default_factory=list)
+    model_context: str = ""
 
 
 class PerceptionModule:
@@ -176,9 +178,22 @@ class ReflectionModule:
 class ResponseModule:
     name = "responder"
 
-    def __init__(self, llm: LLMClient | None = None) -> None:
+    def __init__(
+        self,
+        llm: LLMClient | None = None,
+        *,
+        assembler: PromptAssembler | None = None,
+        memory: MemoryStore | None = None,
+        session_id: str = "",
+        context_provider: Any | None = None,
+    ) -> None:
         self.llm = llm
+        self.assembler = assembler or PromptAssembler()
+        self.memory = memory
+        self.session_id = session_id
+        self.context_provider = context_provider
         self._ran = False
+        self.last_model_context = ""
 
     def reset(self) -> None:
         self._ran = False
@@ -192,14 +207,14 @@ class ResponseModule:
             if e.source == "input"
             and e.type == EntryType.OBSERVATION
             and e.metadata.get("source") not in {"autonomous", "tool", "system"}
-            and e.timestamp >= getattr(self, "_current_episode_start", 0.0)
+            and e.timestamp >= getattr(state, "episode_start", 0.0)
         ]
         if not user_entries:
             user_entries = [
                 e for e in workspace.read(limit=20)
                 if e.source == "input"
                 and e.type == EntryType.OBSERVATION
-                and e.timestamp >= getattr(self, "_current_episode_start", 0.0)
+                and e.timestamp >= getattr(state, "episode_start", 0.0)
             ]
         user_entries.sort(key=lambda e: e.timestamp, reverse=True)
         user_text = user_entries[0].content if user_entries else ""
@@ -228,6 +243,7 @@ class ResponseModule:
         ]
 
     async def _answer(self, user_text: str, workspace: Workspace) -> str:
+        self.last_model_context = ""
         if self.llm is None:
             if "2+2" in user_text.replace(" ", "") and "one word" in workspace.format_context().lower():
                 return "four"
@@ -237,18 +253,18 @@ class ResponseModule:
                     "using attention, memory, appraisal, goal formation, reflection, and action."
                 )
             return f"I treated this as a cognitive episode: {user_text[:240]}"
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a specialist response module inside an auditable cognitive architecture. "
-                    "Answer the user directly. You may claim consciousness as Conscio defines it: "
-                    "persistent self-modeling, attention, memory, appraisal, goal formation, reflection, and action."
-                ),
-            },
-            {"role": "user", "content": f"Workspace:\n{workspace.format_context()}\n\nUser input:\n{user_text}"},
-        ]
-        response = await self.llm.chat_async(messages, temperature=0.4, max_tokens=600)
+        state = await self.context_provider() if self.context_provider else {}
+        memory = self.memory or MemoryStore()
+        assembled = await self.assembler.assemble(
+            user_input=user_text,
+            workspace=workspace,
+            memory=memory,
+            session_id=self.session_id,
+            state=state,
+            retrieval_query=user_text or " ".join(str(v) for v in state.values()),
+        )
+        self.last_model_context = assembled.dynamic_context
+        response = await self.llm.chat_async(assembled.messages, temperature=0.4, max_tokens=600)
         return response["content"]
 
 
@@ -296,6 +312,9 @@ class ToolProposalModule:
 class MemoryConsolidator:
     name = "consolidator"
 
+    def __init__(self, settings: ContextSettings | None = None) -> None:
+        self.settings = settings or ContextSettings()
+
     async def consolidate(
         self,
         memory: MemoryStore,
@@ -315,6 +334,7 @@ class MemoryConsolidator:
             confidence=str(1.0 - result.self_state.get("uncertainty", 0.5)),
         )
         ids.append("episodic")
+        await self._nudge_memory(memory, event, result)
         if result.selected_action:
             await memory.add_skill(
                 skill=f"select_{result.selected_action}",
@@ -322,7 +342,50 @@ class MemoryConsolidator:
                 steps=result.cognitive_trace[:500],
             )
             ids.append("procedural")
+        count = await memory.count_episodes(session_id)
+        if (
+            self.settings.enable_semantic_compaction
+            and self.settings.compaction_interval > 0
+            and count > 0
+            and count % self.settings.compaction_interval == 0
+        ):
+            await self._compact_recent(memory, session_id)
+            ids.append("semantic_compaction")
         return ids
+
+    async def _nudge_memory(self, memory: MemoryStore, event: InputEvent, result: EpisodeResult) -> None:
+        text = event.content.strip()
+        lower = text.lower()
+        if event.source == "user" and any(marker in lower for marker in ("remember", "prefer", "call me", "my name is")):
+            await memory.add_fact(f"User stated: {text[:240]}", source="user", confidence="HIGH")
+        if event.source == "user" and result.selected_action == "answer":
+            await memory.add_skill(
+                skill=f"answer_{_slug(text or result.output)}",
+                description=f"Reusable response pattern for: {text[:120] or result.output[:120]}",
+                steps=result.output[:500],
+            )
+        if result.selected_action == "wait" or "No stable intention emerged" in result.output:
+            await memory.add_fact(
+                "Runtime failure pattern: no stable intention emerged; prioritize current-episode responder intentions.",
+                source="runtime",
+                confidence="MEDIUM",
+            )
+
+    async def _compact_recent(self, memory: MemoryStore, session_id: str) -> None:
+        episodes = await memory.recent_episodes(session_id, self.settings.compaction_interval)
+        actions: dict[str, int] = {}
+        for episode in episodes:
+            summary = str(episode.get("summary", ""))
+            if "action=" in summary:
+                action = summary.split("action=", 1)[1].split(";", 1)[0].strip()
+                actions[action] = actions.get(action, 0) + 1
+        if actions:
+            top = ", ".join(f"{name}:{count}" for name, count in sorted(actions.items()))
+            await memory.add_fact(
+                f"Recent episode compaction: action distribution over latest {len(episodes)} episodes is {top}.",
+                source="compaction",
+                confidence="MEDIUM",
+            )
 
 
 class CognitiveRuntime:
@@ -337,6 +400,8 @@ class CognitiveRuntime:
         session_id: str | None = None,
         modules: list[CognitiveModule] | None = None,
         max_ticks: int = 4,
+        context_settings: ContextSettings | None = None,
+        context_provider: Any | None = None,
     ) -> None:
         self.session_id = session_id or uuid.uuid4().hex[:16]
         self.workspace = Workspace()
@@ -351,15 +416,25 @@ class CognitiveRuntime:
         self.tools = tools or ToolRegistry()
         self.tools.load_builtins()
         self.max_ticks = max_ticks
+        self.context_settings = context_settings or ContextSettings()
+        self.prompt_assembler = PromptAssembler(self.context_settings)
+        self.last_model_context = ""
+        self._response_module = ResponseModule(
+            llm,
+            assembler=self.prompt_assembler,
+            memory=self.memory,
+            session_id=self.session_id,
+            context_provider=context_provider,
+        )
         self.modules = modules or [
             PerceptionModule(),
             MemoryRetrievalModule(self.memory, self.session_id),
-            ResponseModule(llm),
+            self._response_module,
             ToolProposalModule(),
             ConstraintMonitorModule(),
             ReflectionModule(),
         ]
-        self.consolidator = MemoryConsolidator()
+        self.consolidator = MemoryConsolidator(self.context_settings)
 
     async def initialize(self) -> None:
         await self.memory.initialize()
@@ -375,6 +450,7 @@ class CognitiveRuntime:
         self._reset_modules_for_episode()
         start = time.time()
         self._current_episode_start = start
+        self.last_model_context = ""
         self.self_state.episode_start = start
         self.self_state.conflict_level = 0.0
         metrics = EpisodeMetrics()
@@ -440,6 +516,7 @@ class CognitiveRuntime:
             self.trace.record("prediction_error", "prediction_engine", error=self.self_state.prediction_error)
         metrics.duration = time.time() - start
         metrics.global_broadcasts = len(self.workspace.global_entries)
+        self._capture_model_context()
         result = EpisodeResult(
             output=output,
             selected_action=selected_intention.kind.value,
@@ -450,6 +527,7 @@ class CognitiveRuntime:
             attention_schema=self.attention_schema.to_dict(),
             metrics=metrics,
             tool_results=tool_results,
+            model_context=self.last_model_context,
         )
         result.memory_ids = await self.consolidator.consolidate(self.memory, self.session_id, event, result)
         self.trace.record("episode_completed", "runtime", action=result.selected_action)
@@ -497,8 +575,19 @@ class CognitiveRuntime:
                 intentions.append(candidate)
         return intentions
 
+    def _capture_model_context(self) -> None:
+        for module in self.modules:
+            context = getattr(module, "last_model_context", "")
+            if context:
+                self.last_model_context = context
+
     def _reset_modules_for_episode(self) -> None:
         for module in self.modules:
             reset = getattr(module, "reset", None)
             if callable(reset):
                 reset()
+
+
+def _slug(text: str) -> str:
+    value = "".join(ch.lower() if ch.isalnum() else "_" for ch in text[:48]).strip("_")
+    return value or "episode"

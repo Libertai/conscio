@@ -17,6 +17,14 @@ base_url = ""
 api_key = ""
 model = "deepseek-v4-flash"
 
+[context]
+recent_episodes = 3
+retrieved_memories = 5
+workspace_entries = 12
+max_dynamic_chars = 12000
+compaction_interval = 20
+enable_semantic_compaction = true
+
 [tools]
 allowed = []
 denied = []

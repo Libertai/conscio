@@ -10,6 +10,7 @@ from typing import Any
 
 from conscio.autonomy import AutonomyStore
 from conscio.config import ServiceConfig, load_config
+from conscio.core.context import ContextSettings
 from conscio.core.cognition import InputEvent
 from conscio.core.runtime import CognitiveRuntime, EpisodeResult
 from conscio.goals import GoalStore
@@ -121,7 +122,21 @@ class ConscioService:
                 api_key=self.config.llm_api_key,
                 model=self.config.llm_model,
             )
-        self.runtime = CognitiveRuntime(memory=self.memory, tools=tools, llm=llm)
+        context_settings = ContextSettings(
+            recent_episodes=self.config.context_recent_episodes,
+            retrieved_memories=self.config.context_retrieved_memories,
+            workspace_entries=self.config.context_workspace_entries,
+            max_dynamic_chars=self.config.context_max_dynamic_chars,
+            compaction_interval=self.config.context_compaction_interval,
+            enable_semantic_compaction=self.config.context_enable_semantic_compaction,
+        )
+        self.runtime = CognitiveRuntime(
+            memory=self.memory,
+            tools=tools,
+            llm=llm,
+            context_settings=context_settings,
+            context_provider=self._context_state,
+        )
         self.goals = GoalStore(self.memory)
         self.autonomy = AutonomyStore(self.memory)
         self.lock = ServiceLock(self.config.lock_path)
@@ -132,6 +147,7 @@ class ConscioService:
         self.last_error = ""
         self.current_event = ""
         self.last_autonomous_action = ""
+        self.latest_model_context = ""
         self._loop_task: asyncio.Task | None = None
         self._event_task: asyncio.Task | None = None
         self._current_queue_item: QueuedEvent | None = None
@@ -280,6 +296,7 @@ class ConscioService:
     async def _run_episode(self, event: InputEvent) -> EpisodeResult:
         try:
             result = await self.runtime.run_episode(event)
+            self.latest_model_context = result.model_context
             await self._store_episode(event, result)
             return result
         except Exception as exc:
@@ -378,6 +395,12 @@ class ConscioService:
     async def search_memory(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
         return await self.memory.search(query, limit)
 
+    async def recent_facts(self, limit: int = 10) -> list[dict[str, Any]]:
+        return await self.memory.recent_facts(limit)
+
+    async def list_skills(self) -> list[dict[str, Any]]:
+        return await self.memory.list_skills()
+
     async def list_projects(self) -> list[dict[str, Any]]:
         return await self.autonomy.list_projects()
 
@@ -431,6 +454,17 @@ class ConscioService:
             metrics=dict(ep.metrics),
             trace=result.cognitive_trace,
         )
+
+    async def _context_state(self) -> dict[str, Any]:
+        goal = await self.goals.active_goal()
+        return {
+            "active_goal": asdict(goal) if goal else None,
+            "current_project": await self.autonomy.active_project(),
+            "current_task": await self.autonomy.active_task(),
+            "paused": self.paused,
+            "autonomous": self.config.autonomous,
+            "last_autonomous_action": self.last_autonomous_action,
+        }
 
 
 def create_service(config_path: str | Path | None = None) -> ConscioService:

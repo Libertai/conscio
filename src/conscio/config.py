@@ -28,6 +28,12 @@ class ServiceConfig:
     llm_base_url: str = ""
     llm_api_key: str = ""
     llm_model: str = "deepseek-v4-flash"
+    context_recent_episodes: int = 3
+    context_retrieved_memories: int = 5
+    context_workspace_entries: int = 12
+    context_max_dynamic_chars: int = 12000
+    context_compaction_interval: int = 20
+    context_enable_semantic_compaction: bool = True
     allowed_tools: list[str] = field(default_factory=list)
     denied_tools: list[str] = field(default_factory=list)
     max_actions_per_hour: int = 60
@@ -90,6 +96,7 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
             raw = tomllib.load(f)
     service = raw.get("service", raw)
     llm = raw.get("llm", {})
+    context = raw.get("context", {})
     tools = raw.get("tools", {})
 
     cfg = ServiceConfig(
@@ -127,6 +134,12 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
             or os.environ.get("LIBERTAI_MODEL")
             or "deepseek-v4-flash"
         ),
+        context_recent_episodes=int(context.get("recent_episodes", 3)),
+        context_retrieved_memories=int(context.get("retrieved_memories", 5)),
+        context_workspace_entries=int(context.get("workspace_entries", 12)),
+        context_max_dynamic_chars=int(context.get("max_dynamic_chars", 12000)),
+        context_compaction_interval=int(context.get("compaction_interval", 20)),
+        context_enable_semantic_compaction=bool(context.get("enable_semantic_compaction", True)),
         allowed_tools=_as_str_list(tools.get("allowed")),
         denied_tools=_as_str_list(tools.get("denied")),
         max_actions_per_hour=int(tools.get("max_actions_per_hour", 60)),
@@ -162,6 +175,14 @@ pause_on_error = true
 base_url = ""
 api_key = ""
 model = "deepseek-v4-flash"
+
+[context]
+recent_episodes = 3
+retrieved_memories = 5
+workspace_entries = 12
+max_dynamic_chars = 12000
+compaction_interval = 20
+enable_semantic_compaction = true
 
 [tools]
 allowed = []
