@@ -81,26 +81,22 @@ class AutonomyStore:
     def __init__(self, memory: MemoryStore) -> None:
         self.memory = memory
 
-    def _conn(self) -> sqlite3.Connection:
-        return self.memory._conn()
-
     async def initialize(self) -> None:
         await self.memory.initialize()
-        self._conn().executescript(AUTONOMY_SCHEMA)
-        self._conn().commit()
+        self.memory.executescript(AUTONOMY_SCHEMA)
 
     async def get_or_create_project(self, goal_id: str, goal_description: str) -> Project | None:
-        row = self._conn().execute(
+        row = self.memory.fetchone(
             "SELECT * FROM projects WHERE goal_id = ? AND status = 'active' "
             "ORDER BY updated_at DESC LIMIT 1",
             (goal_id,),
-        ).fetchone()
+        )
         if row:
-            return Project(**dict(row))
-        paused = self._conn().execute(
+            return Project(**row)
+        paused = self.memory.fetchone(
             "SELECT * FROM projects WHERE goal_id = ? AND status = 'paused' ORDER BY updated_at DESC LIMIT 1",
             (goal_id,),
-        ).fetchone()
+        )
         if paused:
             return None
         now = time.time()
@@ -112,12 +108,11 @@ class AutonomyStore:
             created_at=now,
             updated_at=now,
         )
-        self._conn().execute(
+        self.memory.execute(
             "INSERT INTO projects (id, goal_id, title, status, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (project.id, project.goal_id, project.title, project.status, project.created_at, project.updated_at),
         )
-        self._conn().commit()
         return project
 
     async def ensure_next_task(
@@ -128,26 +123,37 @@ class AutonomyStore:
         tool_name: str | None = None,
         tool_args: dict[str, Any] | None = None,
     ) -> Task:
-        row = self._conn().execute(
+        row = self.memory.fetchone(
             "SELECT * FROM tasks WHERE project_id = ? AND status IN ('pending', 'active') "
             "ORDER BY created_at LIMIT 1",
             (project_id,),
-        ).fetchone()
+        )
         if row:
             return self._task_from_row(row)
+        return await self.add_task(project_id, description, tool_name=tool_name, tool_args=tool_args)
+
+    async def add_task(
+        self,
+        project_id: str,
+        description: str,
+        *,
+        tool_name: str | None = None,
+        tool_args: dict[str, Any] | None = None,
+        status: str = "pending",
+    ) -> Task:
         now = time.time()
         task = Task(
             id=uuid.uuid4().hex,
             project_id=project_id,
             description=description,
-            status="pending",
+            status=status,
             tool_name=tool_name,
             tool_args=tool_args or {},
             result="",
             created_at=now,
             updated_at=now,
         )
-        self._conn().execute(
+        self.memory.execute(
             "INSERT INTO tasks (id, project_id, description, status, tool_name, tool_args, result, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
@@ -162,73 +168,73 @@ class AutonomyStore:
                 task.updated_at,
             ),
         )
-        self._conn().commit()
         return task
 
     async def update_task(self, task_id: str, *, status: str, result: str = "") -> None:
-        self._conn().execute(
+        self.memory.execute(
             "UPDATE tasks SET status = ?, result = ?, updated_at = ? WHERE id = ?",
             (status, result, time.time(), task_id),
         )
-        self._conn().commit()
+
+    async def get_task(self, task_id: str) -> Task | None:
+        row = self.memory.fetchone("SELECT * FROM tasks WHERE id = ?", (task_id,))
+        return self._task_from_row(row) if row else None
 
     async def list_projects(self, limit: int = 50) -> list[dict[str, Any]]:
-        rows = self._conn().execute(
+        return self.memory.fetchall(
             "SELECT * FROM projects ORDER BY updated_at DESC LIMIT ?",
             (limit,),
-        ).fetchall()
-        return [dict(row) for row in rows]
+        )
 
     async def get_project(self, project_id: str) -> dict[str, Any] | None:
-        row = self._conn().execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-        if not row:
+        project = self.memory.fetchone("SELECT * FROM projects WHERE id = ?", (project_id,))
+        if not project:
             return None
-        project = dict(row)
         project["tasks"] = await self.list_tasks(project_id)
         return project
 
     async def list_tasks(self, project_id: str) -> list[dict[str, Any]]:
-        rows = self._conn().execute(
+        rows = self.memory.fetchall(
             "SELECT * FROM tasks WHERE project_id = ? ORDER BY created_at",
             (project_id,),
-        ).fetchall()
+        )
         return [asdict(self._task_from_row(row)) for row in rows]
 
     async def active_project(self) -> dict[str, Any] | None:
-        row = self._conn().execute(
+        return self.memory.fetchone(
             "SELECT * FROM projects WHERE status = 'active' ORDER BY updated_at DESC LIMIT 1"
-        ).fetchone()
-        return dict(row) if row else None
+        )
 
     async def active_task(self) -> dict[str, Any] | None:
-        row = self._conn().execute(
+        row = self.memory.fetchone(
             "SELECT tasks.* FROM tasks "
             "JOIN projects ON projects.id = tasks.project_id "
             "WHERE tasks.status IN ('pending', 'active') AND projects.status = 'active' "
             "ORDER BY tasks.updated_at DESC LIMIT 1"
-        ).fetchone()
+        )
         return asdict(self._task_from_row(row)) if row else None
 
     async def set_project_status(self, project_id: str, status: str) -> bool:
-        cursor = self._conn().execute(
-            "UPDATE projects SET status = ?, updated_at = ? WHERE id = ?",
-            (status, time.time(), project_id),
-        )
-        self._conn().commit()
-        return cursor.rowcount > 0
+        # Use transaction to capture the rowcount under the lock.
+        rowcount = self.memory.transaction([
+            (
+                "UPDATE projects SET status = ?, updated_at = ? WHERE id = ?",
+                (status, time.time(), project_id),
+            ),
+        ])
+        return rowcount > 0
 
     async def record_action(self, kind: str) -> None:
-        self._conn().execute(
+        self.memory.execute(
             "INSERT INTO action_events (kind, created_at) VALUES (?, ?)",
             (kind, time.time()),
         )
-        self._conn().commit()
 
     async def count_recent_actions(self, kind: str, seconds: int = 3600) -> int:
-        row = self._conn().execute(
+        row = self.memory.fetchone(
             "SELECT COUNT(*) AS count FROM action_events WHERE kind = ? AND created_at >= ?",
             (kind, time.time() - seconds),
-        ).fetchone()
+        )
         return int(row["count"]) if row else 0
 
     async def store_episode(
@@ -244,38 +250,46 @@ class AutonomyStore:
         trace: str,
     ) -> None:
         now = time.time()
-        self._conn().execute(
-            "INSERT OR REPLACE INTO service_episodes "
-            "(id, source, event_type, input, output, selected_action, metrics, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (episode_id, source, event_type, input, output, selected_action, json.dumps(metrics), now),
-        )
-        self._conn().execute(
+        self.memory.transaction([
+            (
+                "INSERT OR REPLACE INTO service_episodes "
+                "(id, source, event_type, input, output, selected_action, metrics, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (episode_id, source, event_type, input, output, selected_action, json.dumps(metrics), now),
+            ),
+            (
+                "INSERT INTO service_traces (episode_id, content, created_at) VALUES (?, ?, ?)",
+                (episode_id, trace, now),
+            ),
+        ])
+
+    async def note_progress(self, episode_id: str | None, content: str) -> None:
+        """Append a free-form progress note to service_traces (used by note_progress meta-tool)."""
+        self.memory.execute(
             "INSERT INTO service_traces (episode_id, content, created_at) VALUES (?, ?, ?)",
-            (episode_id, trace, now),
+            (episode_id, content, time.time()),
         )
-        self._conn().commit()
 
     async def recent_episodes(self, limit: int = 20) -> list[dict[str, Any]]:
-        rows = self._conn().execute(
+        rows = self.memory.fetchall(
             "SELECT * FROM service_episodes ORDER BY created_at DESC LIMIT ?",
             (limit,),
-        ).fetchall()
+        )
         return [self._episode_from_row(row) for row in rows]
 
     async def recent_trace(self, limit: int = 20) -> str:
-        rows = self._conn().execute(
+        rows = self.memory.fetchall(
             "SELECT content FROM service_traces ORDER BY created_at DESC LIMIT ?",
             (limit,),
-        ).fetchall()
+        )
         return "\n\n".join(row["content"] for row in reversed(rows))
 
-    def _task_from_row(self, row: sqlite3.Row) -> Task:
+    def _task_from_row(self, row: dict | sqlite3.Row) -> Task:
         data = dict(row)
         data["tool_args"] = json.loads(data.get("tool_args") or "{}")
         return Task(**data)
 
-    def _episode_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+    def _episode_from_row(self, row: dict | sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
         data["metrics"] = json.loads(data.get("metrics") or "{}")
         return data

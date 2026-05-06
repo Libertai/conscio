@@ -13,6 +13,8 @@ from conscio.service import ConscioService
 
 
 SESSION_COOKIE = "conscio_web_session"
+MAX_SESSIONS = 10000
+MAX_LOGIN_FAILURE_TRACKERS = 10000
 
 
 class LoginRequest(BaseModel):
@@ -27,11 +29,46 @@ def _session_token(service: ConscioService) -> str:
     return secrets.token_urlsafe(32)
 
 
+def _sweep_sessions(sessions: dict[str, float], now: float, max_size: int = MAX_SESSIONS) -> None:
+    """Drop expired entries; if still oversized, drop earliest-expiring keys to fit cap."""
+    expired = [token for token, expires in sessions.items() if expires < now]
+    for token in expired:
+        sessions.pop(token, None)
+    if len(sessions) > max_size:
+        # Sort by expiry ascending; trim from the front.
+        ordered = sorted(sessions.items(), key=lambda item: item[1])
+        for token, _ in ordered[: len(sessions) - max_size]:
+            sessions.pop(token, None)
+
+
+def _sweep_login_failures(
+    failures: dict[str, list[float]], now: float, window: float = 300.0,
+    max_size: int = MAX_LOGIN_FAILURE_TRACKERS,
+) -> None:
+    """Drop tracker buckets that no longer hold any in-window failures; cap total size."""
+    cutoff = now - window
+    empty: list[str] = []
+    for client, times in failures.items():
+        in_window = [t for t in times if t >= cutoff]
+        if in_window:
+            failures[client] = in_window
+        else:
+            empty.append(client)
+    for client in empty:
+        failures.pop(client, None)
+    if len(failures) > max_size:
+        ordered = sorted(failures.items(), key=lambda item: max(item[1]) if item[1] else 0.0)
+        for client, _ in ordered[: len(failures) - max_size]:
+            failures.pop(client, None)
+
+
 def _require_web_auth(service: ConscioService, sessions: dict[str, float], cookie: str | None) -> None:
     if not service.config.web_password:
         raise HTTPException(status_code=500, detail="web_password is not configured")
+    now = time.time()
+    _sweep_sessions(sessions, now)
     expires_at = sessions.get(cookie or "")
-    if not expires_at or expires_at < time.time():
+    if not expires_at or expires_at < now:
         if cookie:
             sessions.pop(cookie, None)
         raise HTTPException(status_code=401, detail="not authenticated")
@@ -54,18 +91,21 @@ def create_web_router(service: ConscioService) -> APIRouter:
     async def login(req: LoginRequest, request: Request, response: Response) -> dict[str, bool]:
         if not service.config.web_password:
             raise HTTPException(status_code=500, detail="web_password is not configured")
+        now = time.time()
+        _sweep_login_failures(login_failures, now)
+        _sweep_sessions(sessions, now)
         client = request.client.host if request.client else "unknown"
-        recent = [t for t in login_failures.get(client, []) if t >= time.time() - 300]
+        recent = [t for t in login_failures.get(client, []) if t >= now - 300]
         if len(recent) >= 8:
             login_failures[client] = recent
             raise HTTPException(status_code=429, detail="too many login attempts")
         if not hmac.compare_digest(req.password, service.config.web_password):
-            recent.append(time.time())
+            recent.append(now)
             login_failures[client] = recent
             raise HTTPException(status_code=401, detail="invalid password")
         login_failures.pop(client, None)
         token = _session_token(service)
-        sessions[token] = time.time() + (60 * 60 * 24 * 14)
+        sessions[token] = now + (60 * 60 * 24 * 14)
         response.set_cookie(
             SESSION_COOKIE,
             token,

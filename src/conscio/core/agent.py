@@ -24,25 +24,6 @@ class CycleResult:
     workspace_trace: str = ""
 
 
-def compose_cycle_output(reflection_output: str, tool_results: list[dict]) -> str:
-    """Choose the user-visible answer after planning and execution."""
-    actual_tool_calls = [r for r in tool_results if r.get("tool") not in ("reason", "reasoning")]
-    reasoning_outputs = [
-        r.get("output", "")
-        for r in tool_results
-        if r.get("tool") in ("reason", "reasoning") and r.get("output")
-    ]
-    result_output = reasoning_outputs[-1] if reasoning_outputs else reflection_output
-    if actual_tool_calls:
-        combined = [result_output]
-        for r in actual_tool_calls:
-            out = r.get("output", "")
-            if out and len(out) > 10:
-                combined.append(f"\n[{r['tool']}]: {out[:500]}")
-        result_output = "\n".join(combined)
-    return result_output
-
-
 class ConsciousAgent:
     """Compatibility wrapper around the evented cognitive runtime."""
 
@@ -62,7 +43,6 @@ class ConsciousAgent:
         self.session_id = self.runtime.session_id
         self.workspace = self.runtime.workspace
         self.memory = self.runtime.memory
-        self.identity = _RuntimeIdentityProxy(name=name, persona=persona)
 
     async def initialize(self) -> None:
         await self.runtime.initialize()
@@ -78,17 +58,6 @@ class ConsciousAgent:
     async def cycle(self, user_input: str, source: str = "user") -> CycleResult:
         result = await self.runtime.run_episode(InputEvent(content=user_input, source=source))
         return _cycle_result_from_episode(result)
-
-
-class _RuntimeIdentityProxy:
-    """Small CLI compatibility shim while identity moves into the runtime."""
-
-    def __init__(self, name: str, persona: str) -> None:
-        self.name = name
-        self.persona = persona
-
-    def save(self) -> None:
-        return None
 
 
 def _cycle_result_from_episode(result: EpisodeResult) -> CycleResult:

@@ -4,7 +4,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from conscio.core.workspace import EntryType, Workspace, WorkspaceEntry
 
@@ -151,13 +151,35 @@ class ActionKind(str, Enum):
     STOP = "stop"
 
 
+PredicateKind = Literal[
+    "answer_delivered",
+    "tool_succeeded",
+    "tool_output_contains",
+    "task_status",
+    "goal_proposed",
+    "none",
+]
+
+
+@dataclass
+class PredictionPredicate:
+    """Typed expectation about the observation an Intention will produce.
+
+    Replaces the legacy free-text expected_observation string, which produced
+    spurious word-overlap mismatches on most episodes.
+    """
+
+    kind: PredicateKind = "none"
+    args: dict[str, Any] = field(default_factory=dict)
+
+
 @dataclass
 class Intention:
     kind: ActionKind
     content: str
     source: str
     confidence: float = 0.5
-    expected_observation: str = ""
+    expected_observation: PredictionPredicate | None = None
     tool_name: str | None = None
     tool_args: dict[str, Any] = field(default_factory=dict)
     risk: float = 0.0
@@ -347,7 +369,7 @@ class ActionSelector:
 
 
 class PredictionEngine:
-    """Tracks action expectations and emits prediction-error entries."""
+    """Evaluates structural prediction predicates and emits a CONFLICT entry on failure."""
 
     def evaluate(
         self,
@@ -355,17 +377,15 @@ class PredictionEngine:
         observed: str,
         workspace: Workspace,
     ) -> WorkspaceEntry | None:
-        expected = intention.expected_observation.strip().lower()
-        if not expected:
+        predicate = intention.expected_observation
+        if predicate is None or predicate.kind == "none":
             return None
-        observed_lower = observed.lower()
-        expected_terms = {t for t in expected.split() if len(t) > 3}
-        overlap = len(expected_terms & set(observed_lower.split())) / max(1, len(expected_terms))
-        error = 1.0 - overlap
-        if error < 0.6:
+        passed = self._check(predicate, observed, intention, workspace)
+        if passed:
             return None
+        summary = f"observed '{observed[:160]}'"
         return workspace.write(
-            f"Prediction error after {intention.kind.value}: expected '{intention.expected_observation}', observed '{observed[:200]}'.",
+            f"Prediction failed for {intention.kind.value} ({predicate.kind}): {summary}.",
             source="prediction_engine",
             type=EntryType.CONFLICT,
             priority=8,
@@ -373,5 +393,39 @@ class PredictionEngine:
             confidence=0.8,
             novelty=0.8,
             urgency=0.7,
-            metadata={"prediction_error": error},
+            metadata={"prediction_error": 1.0, "predicate": predicate.kind},
         )
+
+    def _check(
+        self,
+        predicate: PredictionPredicate,
+        observed: str,
+        intention: Intention,
+        workspace: Workspace,
+    ) -> bool:
+        kind = predicate.kind
+        if kind == "answer_delivered":
+            return bool(observed and observed.strip())
+        if kind == "tool_output_contains":
+            needle = str(predicate.args.get("needle", "")).lower()
+            return bool(needle) and needle in observed.lower()
+        if kind == "tool_succeeded":
+            tool_name = str(predicate.args.get("tool", intention.tool_name or ""))
+            for entry in reversed(workspace.read(limit=100, type_filter={EntryType.OBSERVATION})):
+                if entry.source != "tool":
+                    continue
+                if tool_name and entry.metadata.get("tool") != tool_name:
+                    continue
+                result = entry.metadata.get("result")
+                if not isinstance(result, dict):
+                    continue
+                error = bool(result.get("error"))
+                exit_code = result.get("exit_code", 0)
+                return not error and (exit_code in (0, None))
+            return False
+        if kind == "goal_proposed":
+            return "propose_subgoal" in observed.lower() or "goal" in observed.lower()
+        if kind == "task_status":
+            target = str(predicate.args.get("status", "")).lower()
+            return target in observed.lower() if target else True
+        return True

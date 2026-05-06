@@ -6,8 +6,35 @@ from pathlib import Path
 from typing import Any
 
 from conscio.tools.env import resolve_tool, tool_env
+from conscio.tools.registry import tool
 
 
+@tool(
+    name="execute_code",
+    description="Execute Python code and return its output. Use for calculations, data processing, and scripting.",
+    schema={
+        "type": "object",
+        "properties": {
+            "code": {
+                "type": "string",
+                "description": "Python source to execute.",
+            },
+            "timeout": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 600,
+                "default": 30,
+                "description": "Timeout in seconds.",
+            },
+            "cwd": {
+                "type": "string",
+                "description": "Working directory; ignored if policy enforces working_directory.",
+            },
+        },
+        "required": ["code"],
+        "additionalProperties": False,
+    },
+)
 async def execute_code(
     code: str | None = None,
     timeout: int = 30,
@@ -53,5 +80,3 @@ async def execute_code(
             pass
 
 
-execute_code._tool_name = "execute_code"
-execute_code._tool_description = "Execute Python code and return its output. Use for calculations, data processing, and scripting."

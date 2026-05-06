@@ -302,11 +302,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.output, "Internal observation recorded; no user-facing response needed.")
         self.assertNotIn("I treated this as a cognitive episode", result.output)
 
-    async def test_autonomous_heartbeat_does_not_become_chat_answer(self) -> None:
+    async def test_autonomous_heartbeat_when_llm_is_offline(self) -> None:
+        # With no LLM configured, autonomous heartbeats still cleanly resolve
+        # to WAIT — but with a clearer trace note so offline mode is diagnosable.
         with tempfile.TemporaryDirectory() as tmp:
             runtime = CognitiveRuntime(
                 llm=None,
-                memory=MemoryStore(db_path=os.path.join(tmp, "heartbeat-internal.db")),
+                memory=MemoryStore(db_path=os.path.join(tmp, "heartbeat-offline.db")),
             )
             await runtime.initialize()
             try:
@@ -321,7 +323,91 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await runtime.close()
 
         self.assertEqual(result.selected_action, "wait")
-        self.assertEqual(result.output, "Internal observation recorded; no user-facing response needed.")
+        self.assertIn("no LLM is configured", result.output)
+        self.assertEqual(result.metrics.tool_calls, 0)
+
+    async def test_autonomous_heartbeat_invokes_registered_tool_with_llm(self) -> None:
+        # When an LLM is configured, autonomous heartbeats call exactly the tool
+        # the LLM picks — replacing the old hardcoded heartbeat path.
+        with tempfile.TemporaryDirectory() as tmp:
+            tools = ToolRegistry()
+            llm = IterativeLLM([
+                tool_call("note_progress", '{"content": "checked in: still working on the goal"}'),
+                {"content": "Logged a progress note."},
+            ])
+            calls: list[dict] = []
+
+            async def note_progress(content: str = "") -> dict:
+                calls.append({"content": content})
+                return {"output": "Progress note recorded.", "error": False}
+
+            tools.register("note_progress", note_progress, "Record a progress note.")
+            runtime = CognitiveRuntime(
+                llm=llm,  # type: ignore[arg-type]
+                memory=MemoryStore(db_path=os.path.join(tmp, "auto-tool.db")),
+                tools=tools,
+            )
+            await runtime.initialize()
+            try:
+                result = await runtime.run_episode(
+                    InputEvent(
+                        content="Autonomous heartbeat: pursue the active goal.",
+                        source="autonomous",
+                        event_type="heartbeat",
+                    )
+                )
+            finally:
+                await runtime.close()
+
+        self.assertEqual(result.selected_action, "answer")
+        self.assertEqual(len(calls), 1)
+        self.assertIn("checked in", calls[0]["content"])
+        self.assertEqual(result.metrics.tool_calls, 1)
+        self.assertIn("Tool note_progress returned", result.workspace_trace)
+
+    async def test_user_message_after_autonomous_heartbeat_keeps_chat_clean(self) -> None:
+        # Regression: a heartbeat that triggered tool calls must not leak its
+        # output into the answer to a subsequent user message.
+        with tempfile.TemporaryDirectory() as tmp:
+            tools = ToolRegistry()
+            llm = IterativeLLM([
+                tool_call("note_progress", '{"content": "autonomous step"}'),
+                {"content": "Heartbeat complete."},
+                # Subsequent user-chat episode receives no LLM stub responses;
+                # ResponseModule falls back to the deterministic offline path.
+            ])
+
+            async def note_progress(content: str = "") -> dict:
+                return {"output": "ok", "error": False}
+
+            tools.register("note_progress", note_progress, "Record a progress note.")
+            runtime = CognitiveRuntime(
+                llm=None,  # user-chat path uses deterministic offline answers
+                memory=MemoryStore(db_path=os.path.join(tmp, "bleed.db")),
+                tools=tools,
+            )
+            # Inject the stub LLM only on the autonomous module so the user
+            # path stays deterministic and easy to assert on.
+            runtime._autonomous_module.llm = llm
+            await runtime.initialize()
+            try:
+                heartbeat = await runtime.run_episode(
+                    InputEvent(
+                        content="Autonomous heartbeat",
+                        source="autonomous",
+                        event_type="heartbeat",
+                    )
+                )
+                user = await runtime.run_episode(
+                    InputEvent(content="hello!", source="user")
+                )
+            finally:
+                await runtime.close()
+
+        self.assertEqual(heartbeat.selected_action, "answer")
+        self.assertEqual(user.selected_action, "answer")
+        self.assertNotIn("Heartbeat complete", user.output)
+        self.assertNotIn("autonomous step", user.output)
 
     async def test_memory_consolidation_creates_skills(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

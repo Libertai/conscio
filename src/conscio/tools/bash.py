@@ -5,8 +5,35 @@ from pathlib import Path
 from typing import Any
 
 from conscio.tools.env import tool_env
+from conscio.tools.registry import tool
 
 
+@tool(
+    name="bash",
+    description="Execute a bash/shell command and return its output.",
+    schema={
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "description": "Shell command to execute.",
+            },
+            "timeout": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 600,
+                "default": 30,
+                "description": "Timeout in seconds.",
+            },
+            "cwd": {
+                "type": "string",
+                "description": "Working directory; ignored if policy enforces working_directory.",
+            },
+        },
+        "required": ["command"],
+        "additionalProperties": False,
+    },
+)
 async def bash(
     command: str | None = None,
     timeout: int = 30,
@@ -43,5 +70,3 @@ async def bash(
         return {"output": f"Error: {e}", "exit_code": -1}
 
 
-bash._tool_name = "bash"
-bash._tool_description = "Execute a bash/shell command and return its output"

@@ -2,17 +2,95 @@ from __future__ import annotations
 
 import asyncio
 import html
+import ipaddress
+import socket
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import parse_qs, quote_plus, unquote, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 
 import httpx
 
 from conscio.tools.env import resolve_tool, tool_env
+from conscio.tools.registry import tool
 
 
 _HTTP_TIMEOUT = 20
 _FETCH_LIMIT_CHARS = 8000
+_MAX_REDIRECTS = 5
+
+_BLOCKED_HOSTS = {
+    "localhost",
+    "metadata",
+    "metadata.google.internal",
+    "metadata.azure.com",
+    "metadata.aws",
+}
+_BLOCKED_HOST_SUFFIXES = (".localhost", ".local", ".internal")
+
+
+def _resolve_host(host: str, port: int) -> list[str]:
+    """Resolve a hostname to a list of IP strings. Indirected for test patching."""
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return []
+    return [info[4][0] for info in infos]
+
+
+def _is_unsafe_address(ip_str: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return True
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _validate_url_basic(url: str) -> tuple[bool, str]:
+    """Cheap URL validation: scheme, hostname, blocklist, literal-IP. No DNS."""
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return False, "Only http and https URLs can be fetched."
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False, "URL is missing a hostname."
+    if host in _BLOCKED_HOSTS or any(host.endswith(suffix) for suffix in _BLOCKED_HOST_SUFFIXES):
+        return False, f"Host '{host}' is blocked."
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return True, ""
+    if _is_unsafe_address(str(ip)):
+        return False, f"IP {host} is blocked (private/loopback/link-local/reserved)."
+    return True, ""
+
+
+def _validate_url_full(url: str) -> tuple[bool, str]:
+    """Full validation including DNS resolution; rejects hosts resolving to private addresses."""
+    ok, reason = _validate_url_basic(url)
+    if not ok:
+        return False, reason
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    try:
+        ipaddress.ip_address(host)
+        return True, ""
+    except ValueError:
+        pass
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    addresses = _resolve_host(host, port)
+    if not addresses:
+        return False, f"DNS resolution failed for host '{host}'."
+    for address in addresses:
+        if _is_unsafe_address(address):
+            return False, f"Host '{host}' resolves to blocked address {address}."
+    return True, ""
 
 
 class _DuckDuckGoParser(HTMLParser):
@@ -175,10 +253,23 @@ async def _http_get(url: str) -> str:
     headers = {
         "User-Agent": "Mozilla/5.0 (compatible; Conscio/0.1; +https://github.com/Libertai/consciousness)"
     }
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=True, headers=headers) as client:
-        response = await client.get(url)
-        response.raise_for_status()
-        return response.text
+    current = url
+    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=False, headers=headers) as client:
+        for _ in range(_MAX_REDIRECTS + 1):
+            ok, reason = _validate_url_full(current)
+            if not ok:
+                raise ValueError(reason)
+            response = await client.get(current)
+            if response.is_redirect:
+                location = response.headers.get("location")
+                if not location:
+                    response.raise_for_status()
+                    return response.text
+                current = urljoin(current, location)
+                continue
+            response.raise_for_status()
+            return response.text
+    raise ValueError(f"Too many redirects fetching {url}.")
 
 
 def _collapse_ws(text: str) -> str:
@@ -240,10 +331,6 @@ async def _fallback_search(query: str, max_results: int) -> dict[str, Any]:
     return {"output": "No search results found. " + " | ".join(errors), "error": False}
 
 
-def _validate_url(url: str) -> bool:
-    return urlparse(url).scheme in {"http", "https"}
-
-
 def _extract_text(page: str) -> tuple[str, str]:
     parser = _TextExtractor()
     parser.feed(page)
@@ -252,9 +339,13 @@ def _extract_text(page: str) -> tuple[str, str]:
 
 
 async def _fallback_fetch(url: str) -> dict[str, Any]:
-    if not _validate_url(url):
-        return {"output": "Only http and https URLs can be fetched.", "error": True}
-    page = await _http_get(url)
+    ok, reason = _validate_url_basic(url)
+    if not ok:
+        return {"output": reason, "error": True}
+    try:
+        page = await _http_get(url)
+    except ValueError as exc:
+        return {"output": str(exc), "error": True}
     title, text = _extract_text(page)
     if not text:
         return {"output": "No content fetched.", "error": False}
@@ -262,6 +353,27 @@ async def _fallback_fetch(url: str) -> dict[str, Any]:
     return {"output": (header + text[:_FETCH_LIMIT_CHARS]).strip(), "error": False}
 
 
+@tool(
+    name="web_search",
+    description="Search the web for current information using LibertAI search with HTTP fallback.",
+    schema={
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Search query.",
+            },
+            "max_results": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20,
+                "default": 5,
+            },
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+)
 async def web_search(
     query: str | None = None,
     max_results: int = 5,
@@ -292,6 +404,21 @@ async def web_search(
         return {"output": f"Search error: {e}", "error": True}
 
 
+@tool(
+    name="web_fetch",
+    description="Fetch and summarize the content of a URL.",
+    schema={
+        "type": "object",
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": "Absolute http(s) URL to fetch.",
+            },
+        },
+        "required": ["url"],
+        "additionalProperties": False,
+    },
+)
 async def web_fetch(
     url: str | None = None,
     input: str | None = None,
@@ -300,6 +427,9 @@ async def web_fetch(
     url = url if url is not None else input
     if not url:
         return {"output": "No URL provided.", "error": True}
+    ok, reason = _validate_url_basic(url)
+    if not ok:
+        return {"output": reason, "error": True}
     try:
         ok, output = await _run_libertai("fetch", url)
         if ok and not output.strip():
@@ -321,8 +451,3 @@ async def web_fetch(
         return {"output": f"Fetch error: {e}", "error": True}
 
 
-web_search._tool_name = "web_search"
-web_search._tool_description = "Search the web for current information using LibertAI search with HTTP fallback."
-
-web_fetch._tool_name = "web_fetch"
-web_fetch._tool_description = "Fetch and summarize the content of a URL."

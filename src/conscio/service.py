@@ -115,7 +115,7 @@ class ConscioService:
             working_directory=self.config.working_directory,
         )
         tools.load_builtins()
-        self._register_memory_tools(tools)
+        self._register_self_tools(tools)
         llm = None
         if self.config.llm_base_url:
             llm = LLMClient(
@@ -139,8 +139,12 @@ class ConscioService:
             context_provider=self._context_state,
             max_tool_rounds=self.config.model_tool_rounds,
         )
+        self.runtime._autonomous_module.context_provider = self._autonomous_context_state
+        self.runtime._autonomous_module.on_tool_observation = self._on_autonomous_tool_observation
         self.goals = GoalStore(self.memory)
         self.autonomy = AutonomyStore(self.memory)
+        self._tick_count = 0
+        self._goal_review_interval = 10
         self.lock = ServiceLock(self.config.lock_path)
         self.queue: asyncio.Queue[QueuedEvent] = asyncio.Queue()
         self.running = False
@@ -157,7 +161,7 @@ class ConscioService:
         self._autonomous_action_times: list[float] = []
         self._event_lock = asyncio.Lock()
 
-    def _register_memory_tools(self, tools: PolicyToolRegistry) -> None:
+    def _register_self_tools(self, tools: PolicyToolRegistry) -> None:
         async def remember_fact(
             fact: str | None = None,
             facts: list[str] | None = None,
@@ -193,20 +197,174 @@ class ConscioService:
             lines = [f"- {row['fact']} ({row.get('confidence', '')})" for row in rows]
             return {"output": "\n".join(lines), "error": False, "results": rows}
 
+        async def set_task_status(
+            task_id: str,
+            status: str,
+            result: str = "",
+        ) -> dict[str, Any]:
+            allowed = {"pending", "active", "done", "blocked"}
+            if status not in allowed:
+                return {"output": f"Invalid status '{status}'. Use one of: {sorted(allowed)}.", "error": True}
+            task = await self.autonomy.get_task(task_id)
+            if task is None:
+                return {"output": f"Unknown task_id '{task_id}'.", "error": True}
+            await self.autonomy.update_task(task_id, status=status, result=result[:1000])
+            await self.autonomy.record_action("self_management")
+            return {"output": f"Task {task_id} -> {status}.", "error": False}
+
+        async def add_task(
+            project_id: str,
+            description: str,
+            tool_name: str | None = None,
+            tool_args: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            project = await self.autonomy.get_project(project_id)
+            if project is None:
+                return {"output": f"Unknown project_id '{project_id}'.", "error": True}
+            task = await self.autonomy.add_task(
+                project_id, description, tool_name=tool_name, tool_args=tool_args or {}
+            )
+            await self.autonomy.record_action("self_management")
+            return {"output": f"Added task {task.id}: {description[:200]}.", "error": False, "task_id": task.id}
+
+        async def note_progress(
+            project_id: str | None = None,
+            content: str = "",
+        ) -> dict[str, Any]:
+            text = content.strip()
+            if not text:
+                return {"output": "No content provided.", "error": True}
+            note = f"[project={project_id or 'none'}] {text[:1500]}"
+            await self.autonomy.note_progress(None, note)
+            await self.memory.add_episode(
+                session_id=self.runtime.session_id,
+                summary=f"autonomous note: {text[:160]}",
+                outcome=text[:240],
+                confidence="HIGH",
+            )
+            await self.autonomy.record_action("self_management")
+            return {"output": "Progress note recorded.", "error": False}
+
+        async def propose_subgoal(
+            description: str,
+            rationale: str = "",
+        ) -> dict[str, Any]:
+            text = description.strip()
+            if not text:
+                return {"output": "No description provided.", "error": True}
+            goal = await self.goals.add_goal(
+                text[:500],
+                source="self_proposed",
+                priority=0.5,
+                confidence=0.5,
+                appraisal_weight=0.5,
+                review_notes=rationale[:500],
+            )
+            await self.autonomy.record_action("self_management")
+            return {"output": f"Proposed new goal {goal.id}: {text[:200]}.", "error": False, "goal_id": goal.id}
+
         tools.register(
             "remember_fact",
             remember_fact,
             "Store one semantic fact in long-term memory.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "fact": {"type": "string"},
+                    "source": {"type": "string", "default": "agent"},
+                    "confidence": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"], "default": "HIGH"},
+                },
+                "required": ["fact"],
+                "additionalProperties": False,
+            },
         )
         tools.register(
             "remember_facts",
             remember_fact,
             "Store one or more semantic facts in long-term memory.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "facts": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                    "source": {"type": "string", "default": "agent"},
+                    "confidence": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"], "default": "HIGH"},
+                },
+                "required": ["facts"],
+                "additionalProperties": False,
+            },
         )
         tools.register(
             "search_memory",
             search_memory,
             "Search semantic long-term memory facts.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        )
+        tools.register(
+            "set_task_status",
+            set_task_status,
+            "Mark a task pending/active/done/blocked. Use done when the task is complete; blocked only after attempting it.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "status": {"type": "string", "enum": ["pending", "active", "done", "blocked"]},
+                    "result": {"type": "string", "description": "Short result/note to attach to the task."},
+                },
+                "required": ["task_id", "status"],
+                "additionalProperties": False,
+            },
+        )
+        tools.register(
+            "add_task",
+            add_task,
+            "Add a new task to a project. Use to break work into concrete next steps.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string"},
+                    "description": {"type": "string"},
+                    "tool_name": {"type": "string", "description": "Optional preferred tool to invoke."},
+                    "tool_args": {"type": "object", "description": "Optional preferred args for tool_name."},
+                },
+                "required": ["project_id", "description"],
+                "additionalProperties": False,
+            },
+        )
+        tools.register(
+            "note_progress",
+            note_progress,
+            "Record a free-form progress note in the autonomous trace and episodic memory.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["content"],
+                "additionalProperties": False,
+            },
+        )
+        tools.register(
+            "propose_subgoal",
+            propose_subgoal,
+            "Propose a new self-authored goal. Will be reviewed in the next goal-review cycle.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string"},
+                    "rationale": {"type": "string"},
+                },
+                "required": ["description"],
+                "additionalProperties": False,
+            },
         )
 
     async def start(self, *, acquire_lock: bool = True, background: bool = True) -> None:
@@ -278,6 +436,10 @@ class ConscioService:
         if self.paused or not self.running:
             return None
         if not self._within_action_budget(self._autonomous_action_times, self.config.max_actions_per_hour):
+            return None
+        persistent_tool_actions = await self.autonomy.count_recent_actions("tool")
+        if persistent_tool_actions >= self.config.max_actions_per_hour:
+            self.last_autonomous_action = "wait:budget_exhausted"
             return None
         self._autonomous_action_times.append(time.time())
         return await self._submit_event(
@@ -374,45 +536,75 @@ class ConscioService:
                     event_type="project_paused",
                 )
             )
-        constraints = await self.goals.active_constraints()
-        recent_tool_actions = await self.autonomy.count_recent_actions("tool")
-        if self.config.unsafe_autonomy and recent_tool_actions < self.config.max_actions_per_hour:
-            note = (
-                f"Conscio autonomous action for goal {goal.id}: "
-                f"{goal.description[:80]} | constraints={len(constraints)}"
-            )
-            command = f"printf '%s\\n' {json.dumps(note)} | tee -a conscio_autonomy.log"
-            task = await self.autonomy.ensure_next_task(
-                project.id,
-                "Write an autonomous progress note inside the configured VM working directory.",
-                tool_name="bash",
-                tool_args={"input": command},
-            )
-            await self.autonomy.update_task(task.id, status="active")
-            tool_result = await self.runtime.tools.call(task.tool_name or "bash", task.tool_args)
-            await self.autonomy.record_action("tool")
-            status = "done" if not tool_result.get("error") and int(tool_result.get("exit_code", 0)) == 0 else "blocked"
-            await self.autonomy.update_task(task.id, status=status, result=str(tool_result.get("output", ""))[:1000])
-            self.last_autonomous_action = f"tool:{task.tool_name}:{status}"
-            tool_event = InputEvent(
-                content=f"Autonomous tool result for task {task.id}: {tool_result.get('output', '')}",
-                source="tool",
-                event_type="tool_result",
-                metadata={"project_id": project.id, "task_id": task.id, "tool": task.tool_name},
-            )
-            return await self._run_episode(tool_event)
-        task = await self.autonomy.ensure_next_task(
+        await self.autonomy.ensure_next_task(
             project.id,
-            "Reflect on the active goal and choose a concrete next step.",
+            "Make concrete progress on the active goal.",
         )
-        await self.autonomy.update_task(task.id, status="active", result="Reflection episode queued.")
-        self.last_autonomous_action = "reflect"
-        content = (
-            f"Autonomous heartbeat: active goal is '{goal.description}'. "
-            f"Current project is '{project.title}'. Current task is '{task.description}'. "
-            f"Constraints: {[c['content'] for c in constraints]}. Decide the next concrete action."
-        )
-        return await self._run_episode(InputEvent(content=content, source="autonomous", event_type="heartbeat"))
+        result = await self._run_episode(event)
+        requests = self.runtime._autonomous_module.last_tool_requests
+        if requests:
+            self.last_autonomous_action = f"tool:{requests[-1].name}"
+        else:
+            self.last_autonomous_action = "wait:no_action"
+        self._tick_count += 1
+        if (
+            self.runtime._autonomous_module.llm is not None
+            and self._goal_review_interval > 0
+            and self._tick_count % self._goal_review_interval == 0
+        ):
+            try:
+                await self.goals.review_with_llm(
+                    self.runtime._autonomous_module.llm,
+                    recent_episodes=await self.autonomy.recent_episodes(15),
+                    recent_influences=await self.goals.list_influences(15),
+                )
+            except Exception as exc:  # noqa: BLE001 — review is best-effort
+                self.last_error = f"goal_review_failed: {exc}"
+        return result
+
+    async def _autonomous_context_state(self) -> dict[str, Any]:
+        goal_obj = await self.goals.active_goal()
+        goal = asdict(goal_obj) if goal_obj else {}
+        project = await self.autonomy.active_project() or {}
+        active_task = await self.autonomy.active_task()
+        pending: list[dict[str, Any]] = []
+        recently_completed: list[dict[str, Any]] = []
+        if project:
+            tasks = await self.autonomy.list_tasks(project["id"])
+            pending = [t for t in tasks if t["status"] == "pending"]
+            recently_completed = [t for t in tasks if t["status"] in {"done", "blocked"}][-3:]
+        constraints = await self.goals.active_constraints()
+        recent_episodes = await self.autonomy.recent_episodes(5)
+        relevant_memory: list[dict[str, Any]] = []
+        if goal:
+            try:
+                relevant_memory = await self.memory.search_facts(
+                    str(goal.get("description", ""))[:120], limit=5
+                )
+            except Exception:  # noqa: BLE001 — search is best-effort
+                relevant_memory = []
+        recent_tool_actions = await self.autonomy.count_recent_actions("tool")
+        budget_remaining = max(0, self.config.max_actions_per_hour - recent_tool_actions)
+        return {
+            "active_goal": goal,
+            "current_project": project,
+            "current_task": active_task,
+            "tasks": {"pending": pending, "recently_completed": recently_completed},
+            "recent_episodes": recent_episodes,
+            "relevant_memory": relevant_memory,
+            "constraints": constraints,
+            "budget_remaining": budget_remaining,
+            "budget_limit": self.config.max_actions_per_hour,
+            "last_autonomous_action": self.last_autonomous_action,
+        }
+
+    async def _on_autonomous_tool_observation(self, request: Any, result: dict[str, Any]) -> None:
+        """Hook fired by the autonomous ToolLoop after each tool call. Records a tool action
+        for the per-hour persistent budget. Self-management tools record themselves."""
+        name = getattr(request, "name", "")
+        if name in {"set_task_status", "add_task", "note_progress", "propose_subgoal"}:
+            return
+        await self.autonomy.record_action("tool")
 
     async def status(self) -> ServiceStatus:
         goal = await self.goals.active_goal()

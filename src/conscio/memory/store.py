@@ -95,21 +95,40 @@ class MemoryStore:
             self._conn_obj = None
             conn.close()
 
-    def _fetchall(self, sql: str, params: tuple = ()) -> list[dict]:
+    def fetchall(self, sql: str, params: tuple = ()) -> list[dict]:
         with self._lock:
             cursor = self._conn().execute(sql, params)
             return [dict(r) for r in cursor.fetchall()]
 
-    def _execute(self, sql: str, params: tuple = ()) -> None:
+    def fetchone(self, sql: str, params: tuple = ()) -> dict | None:
+        rows = self.fetchall(sql, params)
+        return rows[0] if rows else None
+
+    def execute(self, sql: str, params: tuple = ()) -> None:
         with self._lock:
             self._conn().execute(sql, params)
             self._conn().commit()
 
-    def _execute_many(self, items: list[tuple[str, tuple]]) -> None:
+    def executescript(self, sql: str) -> None:
         with self._lock:
-            for sql, params in items:
-                self._conn().execute(sql, params)
+            self._conn().executescript(sql)
             self._conn().commit()
+
+    def transaction(self, items: list[tuple[str, tuple]]) -> int:
+        """Execute multiple statements in a single locked commit. Returns rowcount of last statement."""
+        with self._lock:
+            conn = self._conn()
+            last_rowcount = 0
+            for sql, params in items:
+                cursor = conn.execute(sql, params)
+                last_rowcount = cursor.rowcount
+            conn.commit()
+            return last_rowcount
+
+    # Legacy aliases — internal callers in store.py used _-prefixed names.
+    _fetchall = fetchall
+    _execute = execute
+    _execute_many = transaction
 
     # ── Sessions ─────────────────────────────────────────────────
 

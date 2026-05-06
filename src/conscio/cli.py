@@ -133,13 +133,6 @@ async def _run_interactive(
                 for ep in episodes:
                     console.print(f"[dim]- {ep['summary'][:100]}[/]")
                 continue
-            if user_input.strip().lower().startswith("/persona "):
-                new_persona = user_input.strip()[9:]
-                agent.persona = new_persona
-                agent.identity.persona = new_persona
-                agent.identity.save()
-                console.print(f"[green]Persona updated to: {new_persona}[/]")
-                continue
             console.print("[dim]Thinking...[/]")
             try:
                 result = await agent.cycle(user_input)

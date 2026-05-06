@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import time
 import uuid
-import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,8 +17,11 @@ from conscio.core.cognition import (
     InputEvent,
     Intention,
     PredictionEngine,
+    PredictionPredicate,
     SelfState,
 )
+from conscio.core.autonomy_module import AutonomousActionModule, AutonomousPromptAssembler
+from conscio.core.tool_loop import ToolLoop, ToolLoopResult, ToolRequest
 from conscio.core.workspace import EntryType, Workspace, WorkspaceEntry
 from conscio.llm.client import LLMClient
 from conscio.memory.store import MemoryStore
@@ -49,12 +51,6 @@ class EpisodeResult:
     tool_results: list[dict[str, Any]] = field(default_factory=list)
     memory_ids: list[str] = field(default_factory=list)
     model_context: str = ""
-
-
-@dataclass
-class ToolRequest:
-    name: str
-    args: dict[str, Any]
 
 
 class PerceptionModule:
@@ -174,7 +170,7 @@ class ReflectionModule:
                         content=f"Resolve conflict: {latest.content}",
                         source=self.name,
                         confidence=0.8,
-                        expected_observation="conflict reduced",
+                        expected_observation=PredictionPredicate(kind="none"),
                         urgency=latest.urgency,
                     )
                 },
@@ -269,14 +265,17 @@ class ResponseModule:
         self.last_model_context = assembled.dynamic_context
         messages = list(assembled.messages)
         tool_schemas = self._tool_schemas()
-        if self.tools is not None and tool_schemas:
-            final = await self._run_tool_loop(messages, workspace, tool_schemas)
-            if final is not None:
-                return final
-        response = await self.llm.chat_async(messages, temperature=0.4, max_tokens=600, tools=tool_schemas)
-        content = str(response.get("content") or "").strip()
-        if content:
-            return self._answer_intention(content)
+        loop = ToolLoop(
+            llm=self.llm,
+            tools=self.tools,
+            max_rounds=self.max_tool_rounds,
+            temperature=0.4,
+            max_tokens=600,
+        )
+        result = await loop.run(messages, workspace, tool_schemas)
+        self.last_tool_requests.extend(result.tool_requests)
+        if result.final_text:
+            return self._answer_intention(result.final_text)
         return self._answer_intention(
             "I recorded your message, but my inference backend returned an empty response. "
             "I will retain the facts and continue."
@@ -288,147 +287,28 @@ class ResponseModule:
             content=content,
             source=self.name,
             confidence=0.72,
-            expected_observation="answer delivered to user",
+            expected_observation=PredictionPredicate(kind="answer_delivered"),
             urgency=0.4,
             expected_value=0.8,
         )
 
-    async def _run_tool_loop(
-        self,
-        messages: list[dict[str, Any]],
-        workspace: Workspace,
-        tool_schemas: list[dict[str, Any]],
-    ) -> Intention | None:
-        for _ in range(self.max_tool_rounds):
-            response = await self.llm.chat_async(
-                messages,
-                temperature=0.4,
-                max_tokens=600,
-                tools=tool_schemas,
-            )
-            tool_request = self._tool_request(response)
-            if tool_request is None:
-                content = str(response.get("content") or "").strip()
-                if content:
-                    return self._answer_intention(content)
-                return None
-            self.last_tool_requests.append(tool_request)
-            output = await self._execute_model_tool(tool_request, workspace)
-            messages.append(self._assistant_tool_call_message(response, tool_request))
-            messages.append({
-                "role": "tool",
-                "tool_call_id": self._tool_call_id(response),
-                "name": tool_request.name,
-                "content": output[:8000],
-            })
-        messages.append({
-            "role": "user",
-            "content": (
-                "Tool-use limit reached for this turn. Stop calling tools and provide a concise final answer "
-                "using the tool observations above."
-            ),
-        })
-        response = await self.llm.chat_async(messages, temperature=0.4, max_tokens=600)
-        content = str(response.get("content") or "").strip()
-        if content:
-            return self._answer_intention(content)
-        observations = [entry.content for entry in self._tool_observations(workspace)]
-        fallback = observations[-1] if observations else "Tool-use limit reached before a final answer."
-        return self._answer_intention(fallback)
-
-    async def _execute_model_tool(self, request: ToolRequest, workspace: Workspace) -> str:
-        if self.tools is None:
-            return "Tool registry is unavailable."
-        result = await self.tools.call(request.name, request.args)
-        output = str(result.get("output", ""))
-        workspace.write(
-            f"Tool {request.name} returned: {output[:1000]}",
-            source="tool",
-            type=EntryType.OBSERVATION,
-            priority=6,
-            salience=0.72,
-            confidence=0.9 if not result.get("error") else 0.35,
-            novelty=0.75,
-            urgency=0.45,
-            metadata={"source": "tool", "event_type": "tool_result", "tool": request.name, "result": result},
-        )
-        return output or "(no output)"
-
-    def _assistant_tool_call_message(self, response: dict[str, Any], request: ToolRequest) -> dict[str, Any]:
-        calls = response.get("tool_calls") or []
-        if calls:
-            return {"role": "assistant", "content": response.get("content") or "", "tool_calls": calls}
-        return {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-1",
-                    "type": "function",
-                    "function": {"name": request.name, "arguments": json.dumps(request.args)},
-                }
-            ],
-        }
-
-    def _tool_call_id(self, response: dict[str, Any]) -> str:
-        calls = response.get("tool_calls") or []
-        if calls and calls[0].get("id"):
-            return str(calls[0]["id"])
-        return "call-1"
-
-    def _tool_observations(self, workspace: Workspace) -> list[WorkspaceEntry]:
-        return [
-            entry
-            for entry in workspace.read(limit=100, type_filter={EntryType.OBSERVATION})
-            if entry.source == "tool"
-        ]
-
-    def _tool_request(self, response: dict[str, Any]) -> ToolRequest | None:
-        calls = response.get("tool_calls") or []
-        if not calls:
-            return None
-        call = calls[0]
-        function = call.get("function") or {}
-        name = str(function.get("name") or "").strip()
-        if not name:
-            return None
-        try:
-            args = json.loads(function.get("arguments") or "{}")
-        except json.JSONDecodeError:
-            args = {"input": str(function.get("arguments") or "")}
-        if not isinstance(args, dict):
-            args = {"input": args}
-        return ToolRequest(name=name, args=args)
-
     def _tool_schemas(self) -> list[dict[str, Any]] | None:
         if self.tools is None:
             return None
-        schemas: list[dict[str, Any]] = []
-        for name, description in self.tools.list_tools().items():
-            schemas.append({
+        descriptions = self.tools.list_tools()
+        schemas = self.tools.tool_schemas()
+        out = [
+            {
                 "type": "function",
                 "function": {
                     "name": name,
-                    "description": description,
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "input": {"type": "string"},
-                            "command": {"type": "string"},
-                            "code": {"type": "string"},
-                            "query": {"type": "string"},
-                            "url": {"type": "string"},
-                            "fact": {"type": "string"},
-                            "facts": {"type": "array", "items": {"type": "string"}},
-                            "source": {"type": "string"},
-                            "confidence": {"type": "string"},
-                            "timeout": {"type": "integer"},
-                        },
-                        "additionalProperties": True,
-                    },
+                    "description": descriptions.get(name, ""),
+                    "parameters": schemas.get(name, {"type": "object", "properties": {}, "additionalProperties": True}),
                 },
-            })
-        return schemas or None
+            }
+            for name in descriptions
+        ]
+        return out or None
 
 
 class MemoryConsolidator:
@@ -549,6 +429,18 @@ class CognitiveRuntime:
             tools=self.tools,
             max_tool_rounds=max_tool_rounds,
         )
+        self.autonomous_assembler = AutonomousPromptAssembler(
+            max_dynamic_chars=self.context_settings.max_dynamic_chars,
+        )
+        self._autonomous_module = AutonomousActionModule(
+            llm=llm,
+            tools=self.tools,
+            memory=self.memory,
+            session_id=self.session_id,
+            assembler=self.autonomous_assembler,
+            context_provider=context_provider,
+            max_tool_rounds=max_tool_rounds,
+        )
         self.modules = modules or self._default_modules()
         self.consolidator = MemoryConsolidator(self.context_settings)
 
@@ -557,6 +449,7 @@ class CognitiveRuntime:
             PerceptionModule(),
             MemoryRetrievalModule(self.memory, self.session_id),
             self._response_module,
+            self._autonomous_module,
         ]
         modules.extend([ConstraintMonitorModule(), ReflectionModule()])
         return modules
@@ -639,7 +532,10 @@ class CognitiveRuntime:
             tool_result = await self.tools.call(selected_intention.tool_name, selected_intention.tool_args)
             tool_results.append({"tool": selected_intention.tool_name, **tool_result})
             output = str(tool_result.get("output", output))
-        for request in self._response_module.last_tool_requests:
+        all_requests = list(self._response_module.last_tool_requests) + list(
+            getattr(self._autonomous_module, "last_tool_requests", [])
+        )
+        for request in all_requests:
             metrics.tool_calls += 1
             result = self._latest_tool_result(request.name)
             if result is not None:

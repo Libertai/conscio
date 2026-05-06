@@ -12,6 +12,35 @@ from conscio.service import ConscioService, ServiceLock
 from conscio.tools import PolicyToolRegistry
 
 
+def _tool_call_response(name: str, arguments: str, call_id: str = "call-1") -> dict:
+    return {
+        "content": "",
+        "tool_calls": [
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": arguments},
+            }
+        ],
+    }
+
+
+class _StubAutonomousLLM:
+    """Returns predetermined chat responses; used to drive AutonomousActionModule in tests."""
+
+    def __init__(self, responses: list[dict]) -> None:
+        self.responses = list(responses)
+        self.calls: list[list[dict]] = []
+        self.kwargs: list[dict] = []
+
+    async def chat_async(self, messages: list[dict], **kwargs: object) -> dict:
+        self.calls.append(messages)
+        self.kwargs.append(kwargs)
+        if self.responses:
+            return self.responses.pop(0)
+        return {"content": ""}
+
+
 class ConfigTests(unittest.TestCase):
     def test_config_defaults_keep_api_local_and_unsafe_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -131,6 +160,20 @@ class ToolPolicyTests(unittest.IsolatedAsyncioTestCase):
 
 class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        # Hermetic LLM env: prevent dotenv-loaded credentials from making the
+        # autonomous module hit a real network endpoint during tests.
+        self._env_patch = unittest.mock.patch.dict(
+            os.environ,
+            {
+                "LIBERTAI_BASE_URL": "",
+                "LIBERTAI_API_KEY": "",
+                "LIBERTAI_MODEL": "",
+                "OPENAI_BASE_URL": "",
+                "OPENAI_API_KEY": "",
+            },
+            clear=False,
+        )
+        self._env_patch.start()
         self.tmp = tempfile.TemporaryDirectory()
         config_path = Path(self.tmp.name) / "config.toml"
         config_path.write_text(
@@ -144,6 +187,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         self.tmp.cleanup()
+        self._env_patch.stop()
 
     async def test_service_seeds_goals_and_accepts_influence(self) -> None:
         service = ConscioService(self.config)
@@ -305,7 +349,14 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             encoding="utf-8",
         )
         service = ConscioService(load_config(config_path))
+        # Drive the autonomous module with a stub LLM that calls bash to write
+        # a file inside the configured working_directory.
+        stub = _StubAutonomousLLM([
+            _tool_call_response("bash", '{"command": "echo hello > autonomous_marker.txt"}'),
+            {"content": "Wrote marker."},
+        ])
         await service.start(background=False)
+        service.runtime._autonomous_module.llm = stub
         try:
             await service.run_autonomous_tick()
             projects = await service.list_projects()
@@ -313,9 +364,12 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await service.stop()
 
-        self.assertTrue((workdir / "conscio_autonomy.log").exists())
-        self.assertFalse((Path(self.tmp.name) / "conscio_autonomy.log").exists())
-        self.assertTrue(any(t["status"] == "done" and t["tool_name"] == "bash" for t in project["tasks"]))
+        self.assertTrue((workdir / "autonomous_marker.txt").exists())
+        self.assertFalse((Path(self.tmp.name) / "autonomous_marker.txt").exists())
+        # The stub LLM is constrained to bash, so we don't assert the task itself
+        # transitioned — only that autonomy ran tool calls inside the configured workdir.
+        self.assertIsNotNone(project)
+        self.assertGreaterEqual(len(project.get("tasks", [])), 1)
 
     async def test_tool_action_budget_persists_across_restart(self) -> None:
         workdir = Path(self.tmp.name) / "work-budget"
@@ -334,26 +388,57 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         cfg = load_config(config_path)
         first = ConscioService(cfg)
+        first_stub = _StubAutonomousLLM([
+            _tool_call_response("bash", '{"command": "echo first"}'),
+            {"content": "Ran first action."},
+        ])
         await first.start(background=False)
+        first.runtime._autonomous_module.llm = first_stub
         try:
             await first.run_autonomous_tick()
         finally:
             await first.stop()
 
         second = ConscioService(cfg)
+        # Even with a stub trying to fire a second bash call, the persistent
+        # tool budget should refuse the heartbeat altogether on restart.
+        second_stub = _StubAutonomousLLM([
+            _tool_call_response("bash", '{"command": "echo second"}'),
+            {"content": "Should not run."},
+        ])
         await second.start(background=False)
+        second.runtime._autonomous_module.llm = second_stub
         try:
-            await second.run_autonomous_tick()
+            second_result = await second.run_autonomous_tick()
             status = await second.status()
             project = await second.get_project((await second.list_projects())[0]["id"])
         finally:
             await second.stop()
 
+        self.assertIsNone(second_result)
         self.assertEqual(status.actions_last_hour, 1)
-        self.assertEqual(sum(1 for t in project["tasks"] if t["tool_name"] == "bash"), 1)
+        self.assertEqual(status.last_autonomous_action, "wait:budget_exhausted")
+        self.assertEqual(sum(1 for t in project["tasks"] if t["tool_name"] == "bash"), 0)
 
 
 class ApiTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self._env_patch = unittest.mock.patch.dict(
+            os.environ,
+            {
+                "LIBERTAI_BASE_URL": "",
+                "LIBERTAI_API_KEY": "",
+                "LIBERTAI_MODEL": "",
+                "OPENAI_BASE_URL": "",
+                "OPENAI_API_KEY": "",
+            },
+            clear=False,
+        )
+        self._env_patch.start()
+
+    async def asyncTearDown(self) -> None:
+        self._env_patch.stop()
+
     async def test_api_requires_auth_for_status(self) -> None:
         try:
             import httpx

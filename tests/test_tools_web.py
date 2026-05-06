@@ -116,14 +116,99 @@ class WebToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("This is readable text.", result["output"])
 
     async def test_web_fetch_rejects_non_http_urls(self) -> None:
-        async def fake_run(*args: str) -> tuple[bool, str]:
-            raise FileNotFoundError
-
-        with patch.object(web, "_run_libertai", fake_run):
-            result = await web.web_fetch("file:///etc/passwd")
+        result = await web.web_fetch("file:///etc/passwd")
 
         self.assertTrue(result["error"])
         self.assertIn("Only http and https", result["output"])
+
+    async def test_web_fetch_rejects_loopback_literal(self) -> None:
+        result = await web.web_fetch("http://127.0.0.1/secret")
+
+        self.assertTrue(result["error"])
+        self.assertIn("blocked", result["output"].lower())
+
+    async def test_web_fetch_rejects_link_local_metadata_ip(self) -> None:
+        result = await web.web_fetch("http://169.254.169.254/latest/meta-data/")
+
+        self.assertTrue(result["error"])
+        self.assertIn("blocked", result["output"].lower())
+
+    async def test_web_fetch_rejects_localhost_hostname(self) -> None:
+        result = await web.web_fetch("http://localhost/secret")
+
+        self.assertTrue(result["error"])
+        self.assertIn("blocked", result["output"].lower())
+
+    async def test_web_fetch_rejects_metadata_hostname(self) -> None:
+        result = await web.web_fetch("http://metadata.google.internal/")
+
+        self.assertTrue(result["error"])
+        self.assertIn("blocked", result["output"].lower())
+
+    async def test_web_fetch_rejects_dotinternal_hostname(self) -> None:
+        result = await web.web_fetch("http://service.internal/path")
+
+        self.assertTrue(result["error"])
+        self.assertIn("blocked", result["output"].lower())
+
+    async def test_fallback_fetch_rejects_dns_rebind_to_private_ip(self) -> None:
+        async def fake_run(*args: str) -> tuple[bool, str]:
+            raise FileNotFoundError
+
+        def fake_resolve(host: str, port: int) -> list[str]:
+            return ["10.0.0.1"]
+
+        with patch.object(web, "_run_libertai", fake_run), \
+             patch.object(web, "_resolve_host", fake_resolve):
+            result = await web.web_fetch("http://attacker.example/")
+
+        self.assertTrue(result["error"])
+        self.assertIn("10.0.0.1", result["output"])
+
+    async def test_fallback_fetch_rejects_redirect_to_private_ip(self) -> None:
+        async def fake_run(*args: str) -> tuple[bool, str]:
+            raise FileNotFoundError
+
+        # First validate_url_full call (for attacker.example) must pass; then httpx
+        # returns a redirect to a private IP, which the second validation rejects.
+        public_ips = {"attacker.example": ["93.184.215.14"], "redirect.example": ["10.0.0.7"]}
+
+        def fake_resolve(host: str, port: int) -> list[str]:
+            return public_ips.get(host, [])
+
+        class FakeResponse:
+            def __init__(self, status_code: int, text: str = "", location: str | None = None) -> None:
+                self.status_code = status_code
+                self.text = text
+                self.headers = {"location": location} if location else {}
+                self.is_redirect = 300 <= status_code < 400
+
+            def raise_for_status(self) -> None:
+                if self.status_code >= 400:
+                    raise httpx.HTTPStatusError("err", request=None, response=None)  # type: ignore[arg-type]
+
+        class FakeClient:
+            async def __aenter__(self) -> "FakeClient":
+                return self
+
+            async def __aexit__(self, *exc: Any) -> None:
+                return None
+
+            async def get(self, url: str) -> FakeResponse:
+                if url.startswith("http://attacker.example"):
+                    return FakeResponse(302, location="http://redirect.example/private")
+                return FakeResponse(200, text="should not reach")
+
+        import httpx
+        from typing import Any
+
+        with patch.object(web, "_run_libertai", fake_run), \
+             patch.object(web, "_resolve_host", fake_resolve), \
+             patch.object(web.httpx, "AsyncClient", lambda *a, **k: FakeClient()):
+            result = await web.web_fetch("http://attacker.example/")
+
+        self.assertTrue(result["error"])
+        self.assertIn("redirect.example", result["output"])
 
 
 if __name__ == "__main__":

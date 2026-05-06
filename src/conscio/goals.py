@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import sqlite3
+import json
+import re
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -77,26 +78,23 @@ class GoalStore:
     def __init__(self, memory: MemoryStore) -> None:
         self.memory = memory
 
-    def _conn(self) -> sqlite3.Connection:
-        return self.memory._conn()
-
     async def initialize(self) -> None:
         await self.memory.initialize()
-        self._conn().executescript(GOAL_SCHEMA)
-        self._conn().commit()
+        self.memory.executescript(GOAL_SCHEMA)
         await self.seed_defaults()
 
     async def seed_defaults(self) -> None:
         now = time.time()
+        items: list[tuple[str, tuple]] = []
         for idx, drive in enumerate(SEED_DRIVES):
             goal_id = f"seed-{idx + 1}"
-            self._conn().execute(
+            items.append((
                 "INSERT OR IGNORE INTO goals "
                 "(id, description, source, status, priority, confidence, appraisal_weight, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (goal_id, drive, "seed", "active", 0.8 - (idx * 0.04), 0.75, 0.75, now, now),
-            )
-        self._conn().commit()
+            ))
+        self.memory.transaction(items)
 
     async def add_goal(
         self,
@@ -122,7 +120,7 @@ class GoalStore:
             created_at=now,
             updated_at=now,
         )
-        self._conn().execute(
+        self.memory.execute(
             "INSERT INTO goals "
             "(id, description, source, status, priority, confidence, appraisal_weight, review_notes, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -139,7 +137,6 @@ class GoalStore:
                 goal.updated_at,
             ),
         )
-        self._conn().commit()
         return goal
 
     async def add_influence(self, content: str, *, kind: str = "goal", source: str = "user") -> Influence:
@@ -155,7 +152,7 @@ class GoalStore:
             created_at=now,
             updated_at=now,
         )
-        self._conn().execute(
+        self.memory.execute(
             "INSERT INTO influences (id, kind, content, source, status, appraisal, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
@@ -178,7 +175,6 @@ class GoalStore:
                 appraisal_weight=0.7,
                 review_notes=f"Adopted from influence {influence.id}.",
             )
-        self._conn().commit()
         return influence
 
     def _appraise_influence(self, content: str, kind: str) -> tuple[str, str]:
@@ -198,47 +194,174 @@ class GoalStore:
 
     async def list_goals(self, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         if status:
-            rows = self._conn().execute(
+            return self.memory.fetchall(
                 "SELECT * FROM goals WHERE status = ? ORDER BY priority DESC, updated_at DESC LIMIT ?",
                 (status, limit),
-            ).fetchall()
-        else:
-            rows = self._conn().execute(
-                "SELECT * FROM goals ORDER BY status, priority DESC, updated_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-        return [dict(row) for row in rows]
+            )
+        return self.memory.fetchall(
+            "SELECT * FROM goals ORDER BY status, priority DESC, updated_at DESC LIMIT ?",
+            (limit,),
+        )
 
     async def list_influences(self, limit: int = 50) -> list[dict[str, Any]]:
-        rows = self._conn().execute(
+        return self.memory.fetchall(
             "SELECT * FROM influences ORDER BY updated_at DESC LIMIT ?",
             (limit,),
-        ).fetchall()
-        return [dict(row) for row in rows]
+        )
 
     async def active_constraints(self, limit: int = 20) -> list[dict[str, Any]]:
-        rows = self._conn().execute(
+        return self.memory.fetchall(
             "SELECT * FROM influences WHERE kind = 'constraint' AND status = 'active' ORDER BY updated_at DESC LIMIT ?",
             (limit,),
-        ).fetchall()
-        return [dict(row) for row in rows]
+        )
 
     async def active_goal(self) -> Goal | None:
-        row = self._conn().execute(
+        row = self.memory.fetchone(
             "SELECT * FROM goals WHERE status = 'active' ORDER BY priority DESC, appraisal_weight DESC, updated_at DESC LIMIT 1"
-        ).fetchone()
-        return Goal(**dict(row)) if row else None
+        )
+        return Goal(**row) if row else None
+
+    async def review_with_llm(
+        self,
+        llm: Any,
+        *,
+        recent_episodes: list[dict[str, Any]] | None = None,
+        recent_influences: list[dict[str, Any]] | None = None,
+        max_decisions: int = 8,
+    ) -> list[dict[str, Any]]:
+        """Ask the LLM to review goals; apply keep/retire/reprioritize decisions transactionally.
+
+        Returns the list of applied decisions. Best-effort: invalid decisions are skipped silently.
+        """
+        active_goals = await self.list_goals(status="active", limit=50)
+        paused_goals = await self.list_goals(status="paused", limit=50)
+        goals = active_goals + paused_goals
+        if not goals:
+            return []
+        prompt = self._build_review_prompt(goals, recent_episodes or [], recent_influences or [])
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Conscio reviewing your own goals. Output a JSON array of decisions, "
+                    "one per goal you want to update. Each item must have: "
+                    "{\"goal_id\": string, \"action\": one of [\"keep\", \"retire\", \"reprioritize\"], "
+                    "\"new_priority\": optional number in [0, 1] required if action=reprioritize, "
+                    "\"reason\": short string}. "
+                    "Output ONLY the JSON array, no surrounding prose."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ]
+        response = await llm.chat_async(messages, temperature=0.2, max_tokens=800)
+        raw = str(response.get("content") or "").strip()
+        decisions = self._parse_review_decisions(raw)
+        if not decisions:
+            return []
+        valid_ids = {g["id"] for g in goals}
+        applied: list[dict[str, Any]] = []
+        now = time.time()
+        for decision in decisions[:max_decisions]:
+            goal_id = str(decision.get("goal_id", ""))
+            action = str(decision.get("action", "")).lower()
+            reason = str(decision.get("reason", ""))[:500]
+            if goal_id not in valid_ids:
+                continue
+            if action == "keep":
+                self.memory.execute(
+                    "UPDATE goals SET last_reviewed_at = ?, updated_at = ?, review_notes = ? WHERE id = ?",
+                    (now, now, reason or "kept by self-review", goal_id),
+                )
+                applied.append({"goal_id": goal_id, "action": "keep", "reason": reason})
+            elif action == "retire":
+                self.memory.execute(
+                    "UPDATE goals SET status = 'retired', last_reviewed_at = ?, updated_at = ?, "
+                    "review_notes = ? WHERE id = ?",
+                    (now, now, reason or "retired by self-review", goal_id),
+                )
+                applied.append({"goal_id": goal_id, "action": "retire", "reason": reason})
+            elif action == "reprioritize":
+                try:
+                    new_priority = float(decision.get("new_priority", 0.5))
+                except (TypeError, ValueError):
+                    continue
+                new_priority = max(0.0, min(1.0, new_priority))
+                self.memory.execute(
+                    "UPDATE goals SET priority = ?, last_reviewed_at = ?, updated_at = ?, "
+                    "review_notes = ? WHERE id = ?",
+                    (new_priority, now, now, reason or "reprioritized by self-review", goal_id),
+                )
+                applied.append({
+                    "goal_id": goal_id,
+                    "action": "reprioritize",
+                    "new_priority": new_priority,
+                    "reason": reason,
+                })
+        if applied:
+            await self.memory.add_fact(
+                f"Goal review applied {len(applied)} decision(s): "
+                + ", ".join(f"{d['action']}:{d['goal_id'][:8]}" for d in applied),
+                source="goal_review",
+                confidence="MEDIUM",
+            )
+        return applied
+
+    @staticmethod
+    def _parse_review_decisions(raw: str) -> list[dict[str, Any]]:
+        if not raw:
+            return []
+        # Find the first JSON array in the response.
+        match = re.search(r"\[.*\]", raw, re.DOTALL)
+        candidate = match.group(0) if match else raw
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+        return []
+
+    @staticmethod
+    def _build_review_prompt(
+        goals: list[dict[str, Any]],
+        episodes: list[dict[str, Any]],
+        influences: list[dict[str, Any]],
+    ) -> str:
+        lines = ["GOALS:"]
+        for g in goals:
+            lines.append(
+                f"  - id={g['id']} status={g['status']} priority={g.get('priority', 0):.2f} "
+                f"description={g.get('description', '')[:200]}"
+            )
+        lines.append("")
+        lines.append("RECENT_EPISODES:")
+        if not episodes:
+            lines.append("  none")
+        for e in episodes[:10]:
+            lines.append(
+                f"  - source={e.get('source', '')} action={e.get('selected_action', '')} "
+                f"output={(e.get('output') or '')[:160]}"
+            )
+        lines.append("")
+        lines.append("RECENT_INFLUENCES:")
+        if not influences:
+            lines.append("  none")
+        for inf in influences[:10]:
+            lines.append(
+                f"  - kind={inf.get('kind', '')} status={inf.get('status', '')} "
+                f"content={(inf.get('content') or '')[:160]}"
+            )
+        return "\n".join(lines)
 
     async def review(self, note: str = "Autonomous review kept current priorities.") -> Goal | None:
         goal = await self.active_goal()
         if goal is None:
             return None
         now = time.time()
-        self._conn().execute(
+        self.memory.execute(
             "UPDATE goals SET last_reviewed_at = ?, updated_at = ?, review_notes = ? WHERE id = ?",
             (now, now, note, goal.id),
         )
-        self._conn().commit()
         goal.last_reviewed_at = now
         goal.review_notes = note
         return goal
