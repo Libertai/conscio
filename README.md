@@ -17,9 +17,10 @@ cognitive architecture:
 ```text
 events -> local specialist candidates -> attention competition
        -> global workspace broadcast -> competing intentions
-       -> prefix-stable context assembly -> action selection
-       -> prediction/error -> memory consolidation -> compaction
-       -> goal review -> autonomous action
+       -> prefix-stable context assembly -> LLM tool-loop
+       -> action + tool observation -> typed prediction check
+       -> memory consolidation -> compaction
+       -> periodic goal review -> autonomous heartbeat
 ```
 
 Generated self-report is not the only evidence. Conscio records what it
@@ -40,19 +41,40 @@ changed.
   episodes, relevant FTS memory, workspace entries, and the user input.
 - **Memory Consolidation**: stores episodic summaries, procedural response
   patterns, user-stated preferences, and periodic semantic compactions.
+- **Typed Prediction Predicates**: intentions carry structural predicates
+  (`answer_delivered`, `tool_succeeded`, `tool_output_contains`, `task_status`,
+  `goal_proposed`, `none`) instead of free-text expectations, so prediction
+  error reflects a real check rather than word overlap.
 - **Goal System**: seed drives and appraised user influence become durable,
-  revisable goals that the agent can review over time.
+  revisable goals. An LLM goal-review pass runs on a configurable cadence and
+  applies keep/retire/reprioritize decisions transactionally.
 - **Projects and Tasks**: autonomous ticks create or resume durable projects
   and tasks tied to active goals.
-- **Autonomous Service**: a nonstop loop performs heartbeat, reflection, goal
-  review, project/task updates, memory consolidation, and action episodes.
-- **Tool Policy**: unsafe shell/code autonomy is config-gated for isolated VMs.
+- **Autonomous Tool-Loop**: every heartbeat fires an LLM tool-loop with goal,
+  project, task, memory, constraint, and budget context. Self-management tools
+  (`set_task_status`, `add_task`, `note_progress`, `propose_subgoal`,
+  `remember_fact`, `remember_facts`, `search_memory`) let the model take
+  durable action between ticks. The same loop drives user chat, so chat and
+  autonomous paths share one tool-use mechanism.
+- **Per-Tool JSON Schemas**: every tool advertises a typed JSON schema with
+  `additionalProperties: false`, so the LLM never sees a permissive union.
+- **Tool Policy**: unsafe shell/code autonomy is config-gated for isolated VMs;
+  the autonomous tool-loop enforces a persistent per-hour action budget that
+  survives restart.
 - **Tool Environment**: shell, Python, and LibertAI subprocesses run with a
   normalized PATH for VM and user-local tool installs.
-- **Resilient Web Tools**: web search and fetch prefer the LibertAI CLI and
-  fall back to guarded HTTP retrieval when the local provider is unavailable.
+- **Resilient Web Tools with SSRF Guard**: `web_search` and `web_fetch` prefer
+  the LibertAI CLI and fall back to guarded HTTP retrieval. URL validation
+  rejects non-http(s) schemes, blocked hostnames, literal private/loopback/
+  link-local/multicast/reserved/metadata IPs, and DNS-resolved private
+  addresses. Each redirect hop is revalidated.
+- **Unified SQLite Locking**: every writer (memory, goals, autonomy) routes
+  through the locked `MemoryStore` helpers (`execute`, `fetchall`, `fetchone`,
+  `executescript`, `transaction`); a 16-thread stress test runs without races.
 - **Authenticated Web UI, API, and CLI**: users can talk to it, influence it,
-  inspect it, pause it, and resume it.
+  inspect it, pause it, and resume it. The web UI sweeps expired sessions and
+  in-window login-failure trackers on each lookup, with hard caps that drop
+  earliest-expiring entries on overflow.
 
 ## Quick Start
 

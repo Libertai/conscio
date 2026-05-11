@@ -81,7 +81,9 @@ shell_timeout = 30
 ```
 
 Only enable this inside an isolated VM that can be rebuilt. Unsafe autonomy
-cannot be enabled by an API request or CLI flag.
+cannot be enabled by an API request or CLI flag. The per-hour
+`max_actions_per_hour` budget is enforced across the autonomous tool-loop and
+persists across restart, so a service bounce cannot reset the rate cap.
 
 ## systemd
 

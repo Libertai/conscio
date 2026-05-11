@@ -108,11 +108,15 @@ prediction error, active goal, and known limitations. These variables affect
 attention and action selection rather than serving only as explanatory text.
 
 Predictive processing motivates the runtime's expectation and mismatch loop.
-Candidate intentions carry expected observations. After action, the prediction
-engine compares expectation to observed output and emits conflict entries when
-the mismatch is large. The current implementation uses a simple textual overlap
-heuristic, but the architectural role is clear: action should be evaluated
-against expectation, and mismatch should be able to alter future cognition.
+Candidate intentions carry typed prediction predicates. After action, the
+prediction engine evaluates the predicate against the observed output and the
+workspace and emits a conflict entry when the predicate fails. The current
+predicate kinds are `answer_delivered`, `tool_succeeded`,
+`tool_output_contains`, `task_status`, `goal_proposed`, and `none`. The
+architectural role is to evaluate action against expectation; the typed
+predicates replace an earlier free-text heuristic that produced spurious
+word-overlap mismatches on most episodes, and let mismatch alter future
+cognition without flooding attention.
 
 Integrated information theory is relevant as a prominent theory of
 consciousness, but Conscio does not implement IIT and does not compute Phi.
@@ -184,8 +188,9 @@ flowchart LR
     INPUT["Input"] --> CANDIDATES["Workspace candidates"]
     CANDIDATES --> ATTENTION["Attention + broadcast"]
     ATTENTION --> CONTEXT["Stable prefix + context"]
-    CONTEXT --> ACTION["Action outcome"]
-    ACTION --> REVIEW["Prediction memory trace"]
+    CONTEXT --> LOOP["LLM tool-loop"]
+    LOOP --> ACTION["Action outcome"]
+    ACTION --> REVIEW["Typed prediction trace"]
 ```
 
 The service loop adds:
@@ -225,14 +230,24 @@ The default cognitive episode uses specialist modules:
 
 - `PerceptionModule` converts input events into perceived observations.
 - `MemoryRetrievalModule` retrieves recent episodic memory for the session.
-- `ResponseModule` proposes an answer intention, using either an LLM or a
-  deterministic offline fallback.
-- `ToolProposalModule` proposes web verification when the workspace suggests a
-  need for current information.
+- `ResponseModule` handles user-chat events, driving an LLM tool-loop with the
+  prefix-stable assembled prompt and the registered tool surface, and emits
+  one intention reflecting whichever action it took (or a deterministic
+  offline fallback when no LLM is configured).
+- `AutonomousActionModule` is the autonomous sibling of `ResponseModule`: it
+  fires on heartbeat events whose metadata marks them as autonomous, supplies
+  the LLM with goal/project/task/episode/memory/constraint/budget context via
+  an `AutonomousPromptAssembler`, and runs the same tool-loop with explicit
+  self-management tools.
 - `ConstraintMonitorModule` detects simple instruction conflicts, such as a
   one-word constraint violated by a candidate answer.
 - `ReflectionModule` proposes reflective intentions when conflict reaches the
   global workspace.
+
+Both response and autonomous modules share a single `ToolLoop` helper that
+iteratively chats with the LLM, executes one tool per round, writes the
+observation back into the workspace, and stops when the model produces a final
+answer or a configured per-episode tool-round budget is exhausted.
 
 The module list is replaceable. Conscio's important commitment is not this
 particular set of modules, but the pattern that multiple local processes can
@@ -310,28 +325,52 @@ than invented after the fact by an LLM.
 ### 4.6 Intention and Action Selection
 
 Modules can attach `Intention` objects to workspace entries. An intention has a
-kind, content, source, confidence, expected observation, optional tool name and
-arguments, risk, urgency, and expected value. The action selector chooses among
-available intentions using confidence, expected value, urgency, risk, and
-current uncertainty. When conflict or prediction error is high, reflective
-intentions can override ordinary action.
+kind, content, source, confidence, a typed prediction predicate, optional tool
+name and arguments, risk, urgency, and expected value. The action selector
+chooses among available intentions using confidence, expected value, urgency,
+risk, and current uncertainty. When conflict or prediction error is high,
+reflective intentions can override ordinary action.
 
 The current action kinds are `answer`, `tool`, `ask`, `reflect`, `refuse`,
 `wait`, and `stop`. This makes the action policy explicit: replying to a user
 is only one possible action among several.
 
+For both chat and autonomous events, the actual tool surface is exercised
+inside the module's LLM tool-loop rather than through a separate planner.
+Each registered tool advertises a JSON schema with `additionalProperties:
+false`, so the LLM only ever sees typed parameter shapes. The autonomous loop
+also exposes a small set of self-management tools — `set_task_status`,
+`add_task`, `note_progress`, `propose_subgoal`, `remember_fact`,
+`remember_facts`, `search_memory` — so durable progress on goals, projects,
+and tasks happens through tool calls with explicit schemas rather than as a
+side effect of generating prose.
+
 ### 4.7 Prediction Error
 
-Each intention can specify an expected observation. After action, the
-prediction engine compares the expected observation with the observed output.
-If the mismatch is high, it emits a conflict entry and updates the self-state's
-prediction error. The current implementation uses term overlap as a simple
-deterministic proxy. Future versions should replace this with structured
-outcome models and task-specific validators.
+Each intention can specify a typed `PredictionPredicate` describing the
+expected observation. The predicate kinds are:
+
+- `answer_delivered` — the action produced non-empty answer text.
+- `tool_succeeded` — a recent tool observation in the workspace returned
+  without error and with a zero or absent exit code (optionally for a named
+  tool).
+- `tool_output_contains` — a configured needle appears in the observed
+  output.
+- `task_status` — the observed output mentions a target task status.
+- `goal_proposed` — the observed output indicates a new goal proposal.
+- `none` — no expectation; the predicate is skipped.
+
+After action, the prediction engine evaluates the predicate. On failure it
+emits a `CONFLICT` entry tagged with the predicate kind and updates the
+self-state's prediction error. The typed predicates replace an earlier
+free-text expectation that compared word overlap with observed output and
+flooded the workspace with bogus mismatches; structural predicates only fire
+when the observation actually fails the named check.
 
 Prediction error matters because it prevents action from being a terminal
 event. Acting changes the world or the conversation; the system then evaluates
-whether the change matched its expectation.
+whether the change matched its expectation. Future versions should extend the
+predicate vocabulary and pair it with task-specific validators.
 
 ### 4.8 Context and Memory
 
@@ -368,9 +407,29 @@ appraised and can be adopted, rejected, deferred, negotiated, or activated. It
 is not treated as absolute control over the agent's will.
 
 The service layer persists active projects and tasks linked to goals. An
-autonomous heartbeat can select an active goal, create or resume a project,
-create or resume a task, and run an episode directed at that task. This is the
-mechanism by which Conscio becomes more than a request-response chatbot.
+autonomous heartbeat selects an active goal, creates or resumes a project,
+creates or resumes a task, and runs an autonomous episode whose action is an
+LLM tool call against the registered tool surface — including the
+self-management tools that mark tasks done, add new tasks, record progress
+notes, or propose new self-authored subgoals. This is the mechanism by which
+Conscio becomes more than a request-response chatbot.
+
+On a configurable cadence (every ten ticks by default), `GoalStore` runs an
+LLM-backed self-review of all active and paused goals. The model returns a
+JSON array of `keep`, `retire`, or `reprioritize` decisions; the store
+validates each `goal_id` against the supplied set, ignores unknown ids,
+applies the surviving decisions through the locked write path in a single
+review pass, and persists a semantic-memory fact summarizing what was
+applied. Goal evolution therefore happens through a structured, audited path
+rather than implicit prompt drift.
+
+Persistence runs through unified locking. `MemoryStore` exposes
+`execute`/`fetchall`/`fetchone`/`executescript`/`transaction` helpers
+guarded by an `RLock` over a WAL-mode SQLite connection, and every writer —
+goals, autonomy, projects, tasks, episodes — routes through these helpers.
+The autonomous tool-loop also enforces a per-hour tool-action budget that
+persists across restart, so a runaway loop or a service bounce cannot bypass
+the configured rate cap.
 
 ### 4.10 Deployment Boundary and Tool Policy
 
@@ -394,6 +453,17 @@ SVG markup, and returns a bounded readable-text excerpt. This keeps
 current-information access useful during research runs without turning web
 browsing into an opaque privileged capability.
 
+Both the LibertAI fallback and the direct HTTP path go through an SSRF guard.
+URL validation rejects non-`http`/`https` schemes, an explicit blocklist of
+hostnames (`localhost`, `metadata`, cloud-metadata aliases, and `*.localhost`/
+`*.local`/`*.internal` suffixes), literal IP addresses that are private,
+loopback, link-local, multicast, reserved, or unspecified, and any DNS name
+that resolves to such an address. Redirects are followed manually, with each
+hop revalidated, so a server-side redirect to `169.254.169.254` or
+`metadata.google.internal` is rejected before any read. Combined with the
+config-gated unsafe-tool policy, this makes the agent's network body a
+bounded, auditable capability rather than an unmonitored egress channel.
+
 Subprocess-backed tools also share a normalized execution environment. The
 tool layer prepends known VM and user-local binary directories before
 resolving `python3` and `libertai`, and passes that environment to shell, code,
@@ -405,30 +475,50 @@ explicit.
 
 The current repository implements:
 
-- an event-driven cognitive runtime with attention, self-state, prediction,
-  prefix-stable context assembly, memory consolidation, and modular candidate
-  generation;
+- an event-driven cognitive runtime with attention, self-state, typed
+  prediction predicates, prefix-stable context assembly, memory
+  consolidation, and modular candidate generation;
+- a shared LLM tool-loop driving both user-chat and autonomous-heartbeat
+  paths, with per-tool JSON schemas (`additionalProperties: false`) for
+  shell, code, web, and self-management tools;
+- a dedicated `AutonomousActionModule` and `AutonomousPromptAssembler` that
+  give the LLM a stable system prefix plus goal/project/task/episode/
+  memory/constraint/budget context per heartbeat, plus the self-management
+  tools (`set_task_status`, `add_task`, `note_progress`, `propose_subgoal`,
+  `remember_fact`, `remember_facts`, `search_memory`);
+- LLM-backed periodic goal review that applies validated keep/retire/
+  reprioritize decisions transactionally and ignores unknown goal ids;
 - deterministic offline fallback behavior for smoke tests;
 - SQLite-backed episodic, semantic, procedural, and full-text memory, plus
-  goals, influence, projects, tasks, service episodes, and traces;
-- a FastAPI service, CLI, and password-protected web dashboard;
+  goals, influence, projects, tasks, service episodes, and traces, all
+  routed through unified locked `MemoryStore` helpers;
+- a FastAPI service, CLI, and password-protected web dashboard with periodic
+  garbage collection of expired sessions and login-failure trackers and hard
+  caps that drop earliest-expiring entries on overflow;
 - web/API visibility into the latest assembled model context;
 - normalized tool-environment resolution for shell, Python, and LibertAI
   subprocesses;
-- resilient web search and fetch tools with LibertAI-provider preference and
-  guarded HTTP fallback;
-- pause/resume controls and serialized service execution;
+- resilient web search and fetch tools with LibertAI-provider preference,
+  guarded HTTP fallback, an SSRF guard that rejects non-http(s) schemes,
+  blocked hostnames, literal/DNS-resolved private IPs, and revalidated
+  redirect hops;
+- pause/resume controls, serialized service execution, and a per-hour tool-
+  action budget that persists across restart;
 - config-gated unsafe autonomy for VM deployments;
 - service and regression tests covering core runtime, service locking,
-  autonomy, influence appraisal, API authentication, working-directory
-  enforcement, web/API behavior, and web-tool fallback behavior.
+  autonomous tool calls, per-episode and per-hour budgets, autonomous-output
+  isolation from subsequent user chats, self-management tool effects, goal
+  review with stub LLM, per-tool schema rejection of unknown properties,
+  influence appraisal, API authentication, working-directory enforcement,
+  SSRF rejection paths, web/API behavior, web-tool fallback behavior, and
+  16-thread SQLite concurrency.
 
 The system is therefore already an executable prototype. It remains incomplete
 as a scientific instrument. In particular, the current attention scoring,
-prediction-error heuristic, reflection policy, semantic compaction, and goal
-generation are simple hand-coded mechanisms. The implementation is sufficient
-to test the shape of the architecture, not sufficient to claim strong general
-intelligence or settled artificial phenomenology.
+prediction predicate vocabulary, reflection policy, semantic compaction, and
+goal generation are simple hand-coded mechanisms. The implementation is
+sufficient to test the shape of the architecture, not sufficient to claim
+strong general intelligence or settled artificial phenomenology.
 
 ## 6. Evaluation Plan
 
@@ -501,11 +591,16 @@ Ablation experiments should disable one subsystem at a time:
 - no memory retrieval,
 - no prefix-stable context assembly,
 - no conflict monitor,
-- no prediction error,
+- no typed prediction predicates,
+- no autonomous tool-loop (heartbeats degrade to no-op waits),
+- no self-management tools (`set_task_status`, `add_task`, `note_progress`,
+  `propose_subgoal`),
+- no LLM goal review,
 - no resilient web-tool fallback,
+- no SSRF guard on the web tools,
 - no self-state contribution to attention,
-- no goal review,
-- no autonomous project/task persistence.
+- no autonomous project/task persistence,
+- no persistent per-hour tool-action budget.
 
 The architecture predicts that removing these mechanisms should degrade
 specific capabilities. For example, removing the conflict monitor should reduce
@@ -522,11 +617,15 @@ should reduce robustness when the preferred provider is unavailable.
 | No memory retrieval | Weaker cross-episode continuity |
 | No prefix-stable context assembly | Weaker prompt auditability and less stable LLM context |
 | No conflict monitor | Lower instruction-constraint correction |
-| No prediction error | Weaker recovery from failed expectations |
+| No typed prediction predicates | Spurious mismatches or no recovery from failed expectations |
+| No autonomous tool-loop | Heartbeats produce no durable action |
+| No self-management tools | No durable task/goal updates between heartbeats |
+| No LLM goal review | Stagnant or contradictory goal set over long horizons |
 | No resilient web-tool fallback | Lower current-information robustness under provider failure |
+| No SSRF guard | Tool body becomes an unmonitored egress channel |
 | No self-state contribution to attention | Less adaptive prioritization under uncertainty |
-| No goal review | Weaker long-horizon goal coherence |
 | No project/task persistence | Less durable autonomous work |
+| No persistent per-hour budget | Restart bypass of action-rate caps |
 
 ### 6.4 Current Smoke Tests
 
@@ -538,12 +637,21 @@ The current evaluation suite includes:
 
 Regression and service tests exercise broader implementation behavior,
 including goal seeding, influence appraisal, autonomous ticks, project/task
-persistence, API authentication, service locking, working-directory policy, and
-tool restrictions. Web-tool regression tests cover provider preference, HTTP
-fallback behavior, URL validation, search-result parsing, and text extraction.
-These tests are engineering checks, not sufficient scientific validation. They
-should be expanded into benchmark suites with ablation data and long-running
-service trials.
+persistence, API authentication, service locking, working-directory policy,
+and tool restrictions. New service tests assert that a stub LLM drives a real
+autonomous tool call, that per-episode and per-hour budgets stop runaway
+loops, that autonomous output never leaks into a subsequent user-chat answer,
+that the four self-management tools take effect, and that
+`GoalStore.review_with_llm` applies validated decisions and ignores invalid
+goal ids. Per-tool schema tests confirm unknown properties are rejected.
+Web-tool regression tests cover provider preference, HTTP fallback behavior,
+URL validation, redirect revalidation, blocked-IP and DNS-resolution paths,
+search-result parsing, and text extraction. A 16-thread SQLite stress test
+covers the unified locking helpers. The web-UI sweep test covers session
+expiry, login-failure window pruning, and the size-cap eviction path.
+These tests are engineering checks, not sufficient scientific validation.
+They should be expanded into benchmark suites with ablation data and
+long-running service trials.
 
 ## 7. Discussion
 
@@ -573,15 +681,17 @@ as an IIT implementation. It does not show that text-and-tool agency is
 sufficient for phenomenal consciousness.
 
 The current implementation is also limited in several engineering respects.
-Attention scoring is hand-tuned. Prediction error is heuristic. Goal generation
-is not yet strongly generative. Reflection is shallow. Memory consolidation and
-semantic compaction are simple. Full-text retrieval is useful but does not yet
-model belief conflict, decay, privacy boundaries, or provenance deeply. Web
-fallbacks improve resilience but remain shallow HTML retrieval and extraction,
-not robust browser automation or source reliability modeling. The system's
-body is a VM and tool interface rather than a rich sensorimotor environment.
-LLM-backed modules can confabulate, and deterministic fallback modules are
-deliberately narrow.
+Attention scoring is hand-tuned. The prediction predicate vocabulary is small
+and structural rather than semantic. Goal review is LLM-driven but the
+generative side of new goals is still seeded heuristically. Reflection is
+shallow. Memory consolidation and semantic compaction are simple. Full-text
+retrieval is useful but does not yet model belief conflict, decay, privacy
+boundaries, or provenance deeply. Web fallbacks improve resilience and the
+SSRF guard prevents trivially exploitable internal access, but the fetcher is
+still shallow HTML retrieval and extraction, not robust browser automation or
+source reliability modeling. The system's body is a VM and tool interface
+rather than a rich sensorimotor environment. LLM-backed modules can
+confabulate, and deterministic fallback modules are deliberately narrow.
 
 The strongest responsible claim is therefore:
 
@@ -596,8 +706,10 @@ evaluation, and philosophical commitments beyond this paper.
 
 Near-term work should focus on making the architecture more testable:
 
-- add LLM-backed structured planning and goal revision;
-- add richer prediction models and task-specific validators;
+- extend the prediction-predicate vocabulary and pair predicates with
+  task-specific validators;
+- make autonomous goal generation more strongly self-authored, building on
+  the existing `propose_subgoal` tool and LLM goal-review path;
 - expand memory into stronger episodic, semantic, procedural, and
   autobiographical consolidation paths with decay, contradiction handling, and
   provenance;
@@ -620,9 +732,12 @@ constraints, and with what trace evidence?
 Conscio is a concrete architecture for moving machine-consciousness discussion
 from self-report to implementation. It instantiates local candidate generation,
 selective attention, global broadcast, a self-model, an attention schema,
-intention selection, prefix-stable context assembly, prediction-error
-monitoring, memory consolidation, durable goals, user influence, and autonomous
-VM-scoped action. These mechanisms are auditable and ablatable.
+intention selection, prefix-stable context assembly, typed prediction-error
+monitoring, memory consolidation, durable goals reviewed by an LLM on a
+schedule, user influence, an LLM tool-loop shared by chat and autonomous
+heartbeats, self-management tools that turn heartbeats into durable progress,
+and an SSRF-guarded, budget-bounded VM-scoped action surface. These mechanisms
+are auditable and ablatable.
 
 The result is not a proof that the system has human-like experience. It is a
 research artifact that makes a precise operational claim: if consciousness in
