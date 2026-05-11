@@ -84,14 +84,15 @@
     <span class="hidden xs:inline font-mono text-[10px] tabular smallcaps" style="color: var(--color-fg-faint)">observatory</span>
   </a>
 
-  <!-- desktop nav (mobile uses BottomTabBar) -->
-  <nav class="hidden md:flex items-center gap-0.5 -mx-1">
+  <!-- desktop nav (mobile uses BottomTabBar). Made deliberately prominent
+       after a user reported they couldn't find the chat tab. -->
+  <nav class="hidden md:flex items-center gap-1 ml-2">
     {#each navTabs as tab (tab.href)}
       <a
         href={tab.href}
         use:link
         use:active={{ path: tab.href, className: "nav-active" }}
-        class="nav-link px-3 py-1.5 rounded-sm font-mono text-[11px] smallcaps tracking-wider no-underline transition-colors"
+        class="nav-link px-3.5 py-2 rounded-md font-mono text-[13px] smallcaps tracking-wider no-underline transition-colors"
       >
         {tab.label}
       </a>
@@ -131,16 +132,18 @@
 
 <style>
   .nav-link {
-    color: var(--color-fg-mute);
+    color: var(--color-fg);
+    opacity: 0.55;
     border: 1px solid transparent;
   }
   .nav-link:hover {
-    color: var(--color-fg);
-    background: color-mix(in oklab, var(--color-fg-faint) 8%, transparent);
+    opacity: 0.9;
+    background: color-mix(in oklab, var(--color-fg-faint) 12%, transparent);
   }
   :global(.nav-active) {
-    color: var(--color-fg) !important;
+    opacity: 1 !important;
     border-color: var(--color-border-hot);
-    background: color-mix(in oklab, var(--color-accent) 8%, transparent);
+    background: color-mix(in oklab, var(--color-accent) 14%, transparent);
+    box-shadow: inset 0 -2px 0 var(--color-accent);
   }
 </style>

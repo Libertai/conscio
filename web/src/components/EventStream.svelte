@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, untrack } from "svelte";
   import { events, startEventStream, stopEventStream, type ActivityEntry } from "$lib/stores/events.svelte";
 
   const CHANNELS: Array<{ kind: string; label: string; abbr: string }> = [
@@ -31,8 +31,21 @@
 
   function fmtTime(ts: number): string {
     const d = new Date(ts * 1000);
-    const pad = (n: number, w = 2) => n.toString().padStart(w, "0");
-    return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3).slice(0, 3)}`;
+    const pad = (n: number) => n.toString().padStart(2, "0");
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+
+  function displaySource(entry: ActivityEntry): string {
+    // Service-level events stash the event type in `source` (e.g. "chat.message")
+    // which duplicates the chip label. Map them to a meaningful actor instead.
+    const SERVICE_SOURCE: Record<string, string> = {
+      "chat.message": "operator",
+      "episode.created": "agent",
+      "project.updated": "system",
+      "control.paused": "system",
+    };
+    if (entry.source && SERVICE_SOURCE[entry.source]) return SERVICE_SOURCE[entry.source];
+    return entry.source ?? "";
   }
 
   let pulseFor = $state<Record<string, number>>({});
@@ -47,15 +60,20 @@
   });
 
   // Pulse the rail of a channel when a new entry of that kind arrives.
+  // The body reads + writes `pulseFor`, which would cause an effect loop;
+  // wrapping the mutations in untrack() keeps the dependency restricted to
+  // `events.entries[0]` only.
   $effect(() => {
     const e = events.entries[0];
     if (!e) return;
-    const id = ++lastPulseId;
-    pulseFor = { ...pulseFor, [e.kind]: id };
-    const k = e.kind;
-    setTimeout(() => {
-      if (pulseFor[k] === id) pulseFor = { ...pulseFor, [k]: 0 };
-    }, 600);
+    untrack(() => {
+      const id = ++lastPulseId;
+      pulseFor = { ...pulseFor, [e.kind]: id };
+      const k = e.kind;
+      setTimeout(() => {
+        if (pulseFor[k] === id) pulseFor = { ...pulseFor, [k]: 0 };
+      }, 600);
+    });
   });
 
   let healthLabel = $derived(
@@ -107,19 +125,21 @@
         <ul class="px-5 md:px-8 py-4 space-y-2">
           {#each events.entries as entry (entry.id)}
             {@const meta = abbrFor(entry)}
-            <li class="slide-in-x grid grid-cols-[3.25rem_2.25rem_1fr_auto] items-baseline gap-3 py-2 border-b border-dashed"
+            {@const src = displaySource(entry)}
+            <li class="slide-in-x grid grid-cols-[3.75rem_2.25rem_1fr_auto] items-baseline gap-3 py-2 border-b border-dashed"
                 style="border-color: color-mix(in oklab, var(--color-border) 60%, transparent)">
-              <span class="font-mono text-[10px] tabular" style="color: var(--color-fg-faint)">{fmtTime(entry.ts)}</span>
-              <span class="font-mono text-[10px] tabular smallcaps text-center px-1.5 py-0.5 rounded-sm border"
+              <span class="font-mono text-[11px] tabular" style="color: var(--color-fg-faint)">{fmtTime(entry.ts)}</span>
+              <span class="font-mono text-[10px] tabular smallcaps text-center px-1.5 py-0.5 rounded-sm border whitespace-nowrap"
                     style="border-color: {meta.color}; color: {meta.color}; background: color-mix(in oklab, {meta.color} 10%, transparent)">
                 {meta.abbr}
               </span>
               <span class="text-sm leading-snug" style="color: var(--color-fg)">
                 {entry.content}
               </span>
-              {#if entry.source}
-                <span class="font-mono text-[10px] tabular smallcaps justify-self-end" style="color: var(--color-fg-faint)">
-                  {entry.source}
+              {#if src}
+                <span class="hidden sm:inline font-mono text-[10px] tabular smallcaps justify-self-end whitespace-nowrap"
+                      style="color: var(--color-fg-faint)">
+                  {src}
                 </span>
               {/if}
             </li>
@@ -139,7 +159,7 @@
             {ch.abbr}
           </span>
           <div class="relative w-[3px] h-12 rounded-full overflow-hidden"
-               style="background: color-mix(in oklab, var(--color-ch-{ch.kind}) 18%, transparent)">
+               style="background: color-mix(in oklab, var(--color-ch-{ch.kind}) 32%, transparent)">
             {#if pulseFor[ch.kind]}
               <div class="absolute inset-0 channel-pulse"
                    style="background: var(--color-ch-{ch.kind}); box-shadow: 0 0 8px var(--color-ch-{ch.kind})">
