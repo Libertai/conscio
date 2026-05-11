@@ -277,6 +277,17 @@ class AutonomyStore:
         )
         return [self._episode_from_row(row) for row in rows]
 
+    async def episodes_before(
+        self, cursor_ts: float, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Cursor pagination — return episodes older than ``cursor_ts``."""
+        rows = self.memory.fetchall(
+            "SELECT * FROM service_episodes WHERE created_at < ? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (cursor_ts, limit),
+        )
+        return [self._episode_from_row(row) for row in rows]
+
     async def recent_trace(self, limit: int = 20) -> str:
         rows = self.memory.fetchall(
             "SELECT content FROM service_traces ORDER BY created_at DESC LIMIT ?",

@@ -7,6 +7,12 @@
   const navTabs = [
     { href: "/stream", label: "stream" },
     { href: "/chat", label: "chat" },
+    { href: "/projects", label: "projects" },
+    { href: "/goals", label: "goals" },
+    { href: "/influences", label: "influences" },
+    { href: "/memory", label: "memory" },
+    { href: "/episodes", label: "episodes" },
+    { href: "/trace", label: "trace" },
     { href: "/settings", label: "settings" },
   ];
 
@@ -84,15 +90,15 @@
     <span class="hidden xs:inline font-mono text-[10px] tabular smallcaps" style="color: var(--color-fg-faint)">observatory</span>
   </a>
 
-  <!-- desktop nav (mobile uses BottomTabBar). Made deliberately prominent
-       after a user reported they couldn't find the chat tab. -->
-  <nav class="hidden md:flex items-center gap-1 ml-2">
+  <!-- desktop nav (mobile uses BottomTabBar). Horizontal-scrolls on narrower
+       laptops so all 9 tabs stay reachable. -->
+  <nav class="hidden md:flex items-center gap-0.5 ml-2 overflow-x-auto no-scrollbar min-w-0">
     {#each navTabs as tab (tab.href)}
       <a
         href={tab.href}
         use:link
         use:active={{ path: tab.href, className: "nav-active" }}
-        class="nav-link px-3.5 py-2 rounded-md font-mono text-[13px] smallcaps tracking-wider no-underline transition-colors"
+        class="nav-link px-3 py-2 rounded-md font-mono text-[12px] smallcaps tracking-wider no-underline transition-colors whitespace-nowrap"
       >
         {tab.label}
       </a>

@@ -212,6 +212,53 @@ class GoalStore:
             (limit,),
         )
 
+    # ── Single-record reads + edits for the UI ──────────────────────
+
+    async def get_goal(self, goal_id: str) -> dict[str, Any] | None:
+        return self.memory.fetchone("SELECT * FROM goals WHERE id = ?", (goal_id,))
+
+    async def update_goal(
+        self,
+        goal_id: str,
+        *,
+        description: str | None = None,
+        status: str | None = None,
+        priority: float | None = None,
+        review_notes: str | None = None,
+    ) -> dict[str, Any] | None:
+        current = await self.get_goal(goal_id)
+        if current is None:
+            return None
+        new_desc = description if description is not None else current["description"]
+        new_status = status if status is not None else current["status"]
+        new_priority = priority if priority is not None else current["priority"]
+        new_notes = review_notes if review_notes is not None else current["review_notes"]
+        self.memory.execute(
+            "UPDATE goals SET description = ?, status = ?, priority = ?, "
+            "review_notes = ?, updated_at = ? WHERE id = ?",
+            (new_desc, new_status, new_priority, new_notes, time.time(), goal_id),
+        )
+        return await self.get_goal(goal_id)
+
+    async def retire_goal(self, goal_id: str) -> dict[str, Any] | None:
+        return await self.update_goal(
+            goal_id, status="retired", review_notes="Retired via operator console.",
+        )
+
+    async def retire_influence(self, influence_id: str) -> dict[str, Any] | None:
+        current = self.memory.fetchone(
+            "SELECT * FROM influences WHERE id = ?", (influence_id,)
+        )
+        if current is None:
+            return None
+        self.memory.execute(
+            "UPDATE influences SET status = 'retired', updated_at = ? WHERE id = ?",
+            (time.time(), influence_id),
+        )
+        return self.memory.fetchone(
+            "SELECT * FROM influences WHERE id = ?", (influence_id,)
+        )
+
     async def active_constraints(self, limit: int = 20) -> list[dict[str, Any]]:
         return self.memory.fetchall(
             "SELECT * FROM influences WHERE kind = 'constraint' AND status = 'active' ORDER BY updated_at DESC LIMIT ?",

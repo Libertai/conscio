@@ -36,6 +36,19 @@ class ChatSessionCreateRequest(BaseModel):
     title: str | None = None
 
 
+class GoalCreateRequest(BaseModel):
+    description: str
+    priority: float = 0.5
+    source: str = "user"
+
+
+class GoalUpdateRequest(BaseModel):
+    description: str | None = None
+    status: str | None = None
+    priority: float | None = None
+    review_notes: str | None = None
+
+
 def _session_token(service: ConscioService) -> str:
     return secrets.token_urlsafe(32)
 
@@ -262,6 +275,171 @@ def create_web_router(service: ConscioService) -> APIRouter:
             "user": req.content,
             "agent": result.output,
             "selected_action": result.selected_action,
+        }
+
+    # ── Projects ─────────────────────────────────────────────────────────
+    @router.get("/ui/api/projects", include_in_schema=False)
+    async def ui_projects(
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> list[dict[str, Any]]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        return await service.list_projects()
+
+    @router.get("/ui/api/projects/{project_id}", include_in_schema=False)
+    async def ui_project_detail(
+        project_id: str,
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> dict[str, Any]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        found = await service.get_project(project_id)
+        if found is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        return found
+
+    @router.post("/ui/api/projects/{project_id}/pause", include_in_schema=False)
+    async def ui_project_pause(
+        project_id: str,
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> dict[str, str]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        try:
+            await service.set_project_status(project_id, "paused")
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="project not found") from exc
+        return {"status": "paused"}
+
+    @router.post("/ui/api/projects/{project_id}/resume", include_in_schema=False)
+    async def ui_project_resume(
+        project_id: str,
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> dict[str, str]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        try:
+            await service.set_project_status(project_id, "active")
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="project not found") from exc
+        return {"status": "active"}
+
+    # ── Goals ────────────────────────────────────────────────────────────
+    @router.get("/ui/api/goals", include_in_schema=False)
+    async def ui_goals(
+        status: str | None = Query(default=None),
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> list[dict[str, Any]]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        return await service.goals.list_goals(status=status)
+
+    @router.post("/ui/api/goals", include_in_schema=False)
+    async def ui_goal_create(
+        req: GoalCreateRequest,
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> dict[str, Any]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        goal = await service.goals.add_goal(
+            req.description,
+            source=req.source,
+            priority=req.priority,
+        )
+        record = await service.goals.get_goal(goal.id)
+        service.event_broker.emit("goal.changed", {"goal_id": goal.id, "action": "created"})
+        return record or {"id": goal.id, "description": goal.description}
+
+    @router.patch("/ui/api/goals/{goal_id}", include_in_schema=False)
+    async def ui_goal_update(
+        goal_id: str,
+        req: GoalUpdateRequest,
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> dict[str, Any]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        record = await service.goals.update_goal(
+            goal_id,
+            description=req.description,
+            status=req.status,
+            priority=req.priority,
+            review_notes=req.review_notes,
+        )
+        if record is None:
+            raise HTTPException(status_code=404, detail="goal not found")
+        service.event_broker.emit("goal.changed", {"goal_id": goal_id, "action": "updated"})
+        return record
+
+    @router.delete("/ui/api/goals/{goal_id}", include_in_schema=False)
+    async def ui_goal_retire(
+        goal_id: str,
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> dict[str, Any]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        record = await service.goals.retire_goal(goal_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="goal not found")
+        service.event_broker.emit("goal.changed", {"goal_id": goal_id, "action": "retired"})
+        return record
+
+    # ── Influences ───────────────────────────────────────────────────────
+    @router.get("/ui/api/influences", include_in_schema=False)
+    async def ui_influences(
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> list[dict[str, Any]]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        return await service.list_influences()
+
+    @router.delete("/ui/api/influences/{influence_id}", include_in_schema=False)
+    async def ui_influence_retire(
+        influence_id: str,
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> dict[str, Any]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        record = await service.goals.retire_influence(influence_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="influence not found")
+        return record
+
+    # ── Episodes (cursor pagination) ─────────────────────────────────────
+    @router.get("/ui/api/episodes", include_in_schema=False)
+    async def ui_episodes(
+        limit: int = Query(default=20, ge=1, le=100),
+        before: float | None = Query(default=None),
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> list[dict[str, Any]]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        if before is None:
+            return await service.recent_episodes(limit)
+        return await service.episodes_before(before, limit)
+
+    # ── Trace + Model Context ────────────────────────────────────────────
+    @router.get("/ui/api/trace", include_in_schema=False)
+    async def ui_trace(
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> dict[str, str]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        return {"trace": await service.recent_trace()}
+
+    @router.get("/ui/api/model_context", include_in_schema=False)
+    async def ui_model_context(
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> dict[str, str]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        return {"model_context": service.latest_model_context}
+
+    # ── Memory search ────────────────────────────────────────────────────
+    @router.get("/ui/api/memory/search", include_in_schema=False)
+    async def ui_memory_search(
+        q: str = Query(min_length=1),
+        limit: int = Query(default=20, ge=1, le=100),
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> list[dict[str, Any]]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        return await service.search_memory(q, limit)
+
+    @router.get("/ui/api/memory/recent", include_in_schema=False)
+    async def ui_memory_recent(
+        limit: int = Query(default=20, ge=1, le=100),
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> dict[str, list[dict[str, Any]]]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        return {
+            "facts": await service.recent_facts(limit),
+            "skills": await service.list_skills(),
         }
 
     # ── Server-Sent Events stream ────────────────────────────────────────

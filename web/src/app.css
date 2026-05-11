@@ -165,6 +165,13 @@ textarea {
   font-variant-numeric: tabular-nums;
 }
 
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 .smallcaps {
   font-feature-settings: "smcp", "c2sc";
   letter-spacing: 0.06em;

@@ -654,6 +654,9 @@ class ConscioService:
             return stored
         return [asdict(ep) for ep in self._episodes[-limit:]][::-1]
 
+    async def episodes_before(self, cursor_ts: float, limit: int = 20) -> list[dict[str, Any]]:
+        return await self.autonomy.episodes_before(cursor_ts, limit)
+
     async def recent_trace(self) -> str:
         stored = await self.autonomy.recent_trace()
         return stored or self.runtime.trace.format(limit=120)

@@ -2,10 +2,15 @@
   import { link, router } from "svelte-spa-router";
   import active from "svelte-spa-router/active";
 
+  // Five most-used pages get the always-visible mobile bottom row.
+  // Influences, episodes, trace are reachable via the "more" tab which
+  // expands a sheet on tap.
   const tabs = [
     { href: "/stream", label: "stream", glyph: "≋" },
     { href: "/chat", label: "chat", glyph: "❯" },
-    { href: "/settings", label: "settings", glyph: "◫" },
+    { href: "/projects", label: "projects", glyph: "◐" },
+    { href: "/memory", label: "memory", glyph: "✦" },
+    { href: "/settings", label: "more", glyph: "···" },
   ];
 
   let isLogin = $derived(router.location === "/login");
@@ -13,7 +18,7 @@
 
 {#if !isLogin}
   <nav
-    class="md:hidden fixed bottom-0 inset-x-0 z-30 h-16 grid grid-cols-3 border-t"
+    class="md:hidden fixed bottom-0 inset-x-0 z-30 h-16 grid grid-cols-5 border-t"
     style="background: var(--color-bg-elev); padding-bottom: env(safe-area-inset-bottom);"
   >
     {#each tabs as tab (tab.href)}
