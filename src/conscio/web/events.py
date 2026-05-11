@@ -30,6 +30,16 @@ CLIENT_QUEUE_SIZE = 256
 HEARTBEAT_SECONDS = 15.0
 STATUS_TICK_SECONDS = 2.0
 
+# Temporary diagnostic logging (remove once SSE delivery is verified in prod).
+import logging  # noqa: E402
+
+_log = logging.getLogger("conscio.web.events")
+_log.setLevel(logging.INFO)
+_h = logging.StreamHandler()
+_h.setFormatter(logging.Formatter("[broker] %(message)s"))
+_log.addHandler(_h)
+_log.propagate = False
+
 
 @dataclass
 class _Client:
@@ -51,15 +61,19 @@ class WorkspaceEventBroker:
 
     def attach(self) -> None:
         if self._unsubscribe is not None:
+            _log.info("attach: already attached, skipping")
             return
         try:
             self._loop = asyncio.get_running_loop()
         except RuntimeError:
-            # Outside a running loop (e.g. tests constructing the broker
-            # without an awaited service.start()). The loop reference will
-            # be captured on first emit / stream.
             self._loop = None
         self._unsubscribe = self._workspace.subscribe(self._on_entry)
+        _log.info(
+            "attach: ws=%x subscribers=%d loop=%s",
+            id(self._workspace),
+            len(self._workspace._subscribers),
+            self._loop,
+        )
 
     def detach(self) -> None:
         if self._unsubscribe is not None:
@@ -72,6 +86,7 @@ class WorkspaceEventBroker:
     def register(self) -> _Client:
         client = _Client()
         self._clients.append(client)
+        _log.info("register: client_count=%d ws=%x", len(self._clients), id(self._workspace))
         return client
 
     def unregister(self, client: _Client) -> None:
@@ -95,6 +110,14 @@ class WorkspaceEventBroker:
             running_loop = asyncio.get_running_loop()
         except RuntimeError:
             running_loop = None
+        _log.info(
+            "emit type=%s clients=%d running_loop=%s self_loop=%s same=%s",
+            event_type,
+            len(self._clients),
+            running_loop,
+            self._loop,
+            running_loop is self._loop,
+        )
         if running_loop is not None and running_loop is self._loop:
             self._dispatch(payload)
         elif self._loop is not None:
@@ -124,6 +147,7 @@ class WorkspaceEventBroker:
     # ── workspace handler (sync, called from cognition loop) ─────
 
     def _on_entry(self, entry: WorkspaceEntry) -> None:
+        _log.info("on_entry kind=%s clients=%d", entry.type.value, len(self._clients))
         payload = {
             "type": f"workspace.{entry.type.value}",
             "ts": entry.timestamp,
