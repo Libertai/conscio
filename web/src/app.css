@@ -137,6 +137,48 @@ textarea {
   animation: breathe 2.4s ease-in-out infinite;
 }
 
+@keyframes reveal {
+  from { transform: translateY(-4px); opacity: 0; }
+  to   { transform: translateY(0);    opacity: 1; }
+}
+
+.boot-reveal {
+  animation: reveal 360ms cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
+}
+
+/* Smooth theme swap (no snap). */
+html { transition: background-color 250ms ease; }
+html, body, .theme-fade {
+  transition: background-color 250ms ease, color 250ms ease, border-color 250ms ease;
+}
+
+/* Full-screen pause overlay — grain + dim. */
+.pause-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  pointer-events: none;
+  background:
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='1.2' numOctaves='1' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.08 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>"),
+    color-mix(in oklab, var(--color-bg) 80%, transparent);
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+.pause-overlay.on { opacity: 1; }
+.pause-overlay::before {
+  content: "paused";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-family: var(--font-mono);
+  letter-spacing: 0.5em;
+  font-size: 11px;
+  text-transform: lowercase;
+  color: var(--color-warn);
+  font-feature-settings: "smcp";
+}
+
 @keyframes breathe {
   0%, 100% { opacity: 0.6; }
   50% { opacity: 1; }

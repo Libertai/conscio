@@ -1,6 +1,7 @@
 <script lang="ts">
   import Router from "svelte-spa-router";
   import AppShell from "./components/AppShell.svelte";
+  import CommandPalette from "./components/CommandPalette.svelte";
   import { routes } from "./router";
   import { onMount } from "svelte";
   import { theme } from "./lib/stores/theme.svelte";
@@ -14,3 +15,5 @@
 <AppShell>
   <Router {routes} />
 </AppShell>
+
+<CommandPalette />

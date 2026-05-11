@@ -65,6 +65,7 @@
   }
 
   let synced = $derived(Math.max(0, Math.floor((now - lastSyncAt) / 1000)));
+  let paused = $derived(!!status.paused);
 
   const indicators: Array<{ label: string; on: boolean | undefined; pulse: boolean; color: string }> = $derived([
     { label: "run", on: status.running, pulse: !!status.running && !status.paused, color: "var(--color-ok)" },
@@ -81,8 +82,10 @@
   ]);
 </script>
 
+<div class="pause-overlay {paused ? 'on' : ''}"></div>
+
 <header
-  class="sticky top-0 z-20 h-14 flex items-center gap-6 px-5 border-b backdrop-blur-sm"
+  class="sticky top-0 z-20 h-14 flex items-center gap-6 px-5 border-b backdrop-blur-sm boot-reveal"
   style="background: color-mix(in oklab, var(--color-bg-elev) 92%, transparent);"
 >
   <a href="#/" class="flex items-baseline gap-2 no-underline shrink-0">
@@ -128,8 +131,10 @@
     {/each}
   </div>
 
-  <div class="ml-auto sm:ml-0 flex items-center gap-2 font-mono text-[10px] smallcaps"
+  <div class="ml-auto sm:ml-0 flex items-center gap-3 font-mono text-[10px] smallcaps"
        style="color: var(--color-fg-faint)">
+    <kbd class="hidden md:inline-block px-1.5 py-0.5 rounded-sm border tabular"
+         style="border-color: var(--color-border); color: var(--color-fg-mute)">⌘k</kbd>
     <span class="hidden sm:inline">synced {synced}s</span>
     <span class="inline-block w-1.5 h-1.5 rounded-full breathe"
           style="background: var(--color-accent)"></span>
