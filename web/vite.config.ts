@@ -10,7 +10,9 @@ export default defineConfig({
       $lib: fileURLToPath(new URL("./src/lib", import.meta.url)),
     },
   },
-  base: "/ui/",
+  // While the SPA dogfoods at /ui2 (Phases 0-3) the asset prefix must match.
+  // Phase 4 swaps this back to "/ui/" along with the FastAPI mount move.
+  base: "/ui2/",
   build: {
     outDir: fileURLToPath(new URL("../src/conscio/static", import.meta.url)),
     emptyOutDir: true,
