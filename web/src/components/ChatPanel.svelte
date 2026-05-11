@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { chat, loadHistory, sendMessage } from "$lib/stores/chat";
+  import { chat, loadHistory, sendMessage } from "$lib/stores/chat.svelte";
 
   let composer = $state("");
   let textarea: HTMLTextAreaElement | undefined;

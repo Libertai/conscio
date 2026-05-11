@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { events, startEventStream, stopEventStream, type ActivityEntry } from "$lib/stores/events";
+  import { events, startEventStream, stopEventStream, type ActivityEntry } from "$lib/stores/events.svelte";
 
   const CHANNELS: Array<{ kind: string; label: string; abbr: string }> = [
     { kind: "observation", label: "observation", abbr: "OB" },

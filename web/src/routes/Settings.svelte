@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { theme } from "$lib/stores/theme";
+  import { theme } from "$lib/stores/theme.svelte";
   import { api } from "$lib/api/client";
   import { push } from "svelte-spa-router";
 
