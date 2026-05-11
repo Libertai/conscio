@@ -1,0 +1,73 @@
+name: build-web
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - ".github/workflows/build-web.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: build-web
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 1
+
+      # Read the head commit message via the github context. Pipe via env to keep
+      # untrusted input out of the shell expansion phase.
+      - name: Skip if commit is itself a build commit
+        id: gate
+        env:
+          HEAD_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          first_line="${HEAD_MSG%%$'\n'*}"
+          if [[ "$first_line" == *"[skip ci]"* ]] || [[ "$first_line" == "chore(web):"* ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: pnpm/action-setup@v4
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          node-version: "20"
+          cache: "pnpm"
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install
+        if: steps.gate.outputs.skip != 'true'
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        if: steps.gate.outputs.skip != 'true'
+        working-directory: web
+        run: pnpm build
+
+      - name: Commit built assets
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          git config user.name  "conscio-build-bot"
+          git config user.email "conscio-build-bot@users.noreply.github.com"
+          git add src/conscio/static
+          if git diff --cached --quiet; then
+            echo "no asset changes"
+            exit 0
+          fi
+          git commit -m "chore(web): rebuild assets [skip ci]"
+          git push

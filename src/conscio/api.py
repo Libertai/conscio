@@ -5,14 +5,19 @@ import asyncio
 import hmac
 import os
 import signal
+from pathlib import Path
 from typing import Any
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query
+from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from conscio.config import ServiceConfig
 from conscio.service import ConscioService
 from conscio.webui import create_web_router
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 class MessageRequest(BaseModel):
@@ -143,6 +148,35 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
         return await svc.search_memory(q, limit)
 
     app.include_router(create_web_router(svc))
+
+    # ── new SPA dogfood mount at /ui2 (Phase 0 → Phase 4 swap to /ui) ──
+    if (STATIC_DIR / "index.html").is_file():
+        assets_dir = STATIC_DIR / "assets"
+        if assets_dir.is_dir():
+            app.mount(
+                "/ui2/assets",
+                StaticFiles(directory=str(assets_dir)),
+                name="ui2-assets",
+            )
+
+        @app.get("/ui2", include_in_schema=False)
+        @app.get("/ui2/", include_in_schema=False)
+        async def _ui2_root() -> FileResponse:
+            return FileResponse(
+                str(STATIC_DIR / "index.html"),
+                headers={"Cache-Control": "no-cache"},
+            )
+
+        @app.get("/ui2/{path:path}", include_in_schema=False)
+        async def _ui2_spa(path: str) -> Response:
+            # Don't shadow /ui2/assets (handled by StaticFiles mount).
+            if path.startswith("assets/"):
+                raise HTTPException(status_code=404)
+            return FileResponse(
+                str(STATIC_DIR / "index.html"),
+                headers={"Cache-Control": "no-cache"},
+            )
+
     app.state.conscio_service = svc
     return app
 

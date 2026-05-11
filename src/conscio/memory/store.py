@@ -53,6 +53,24 @@ CREATE TABLE IF NOT EXISTS thoughts (
     created_at REAL NOT NULL,
     depth INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS chat_sessions (
+    id TEXT PRIMARY KEY,
+    title TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    selected_action TEXT,
+    episode_id TEXT,
+    created_at REAL NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES chat_sessions(id)
+);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_session
+    ON chat_messages (session_id, created_at);
 """
 
 
@@ -272,6 +290,80 @@ class MemoryStore:
             "SELECT * FROM thoughts WHERE session_id = ? ORDER BY created_at",
             (session_id,),
         )
+
+    # ── Chat (operator console persistence) ──────────────────────
+
+    async def list_chat_sessions(self, limit: int = 50) -> list[dict]:
+        return self._fetchall(
+            "SELECT id, title, created_at, updated_at FROM chat_sessions "
+            "ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        )
+
+    async def get_chat_session(self, session_id: str) -> dict | None:
+        return self.fetchone(
+            "SELECT id, title, created_at, updated_at FROM chat_sessions WHERE id = ?",
+            (session_id,),
+        )
+
+    async def upsert_chat_session(self, session_id: str, title: str | None = None) -> None:
+        now = time.time()
+        self._execute(
+            "INSERT INTO chat_sessions (id, title, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "title = COALESCE(excluded.title, chat_sessions.title), "
+            "updated_at = excluded.updated_at",
+            (session_id, title, now, now),
+        )
+
+    async def append_chat_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        selected_action: str | None = None,
+        episode_id: str | None = None,
+    ) -> int:
+        now = time.time()
+        with self._lock:
+            conn = self._conn()
+            cursor = conn.execute(
+                "INSERT INTO chat_messages "
+                "(session_id, role, content, selected_action, episode_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (session_id, role, content, selected_action, episode_id, now),
+            )
+            conn.execute(
+                "UPDATE chat_sessions SET updated_at = ? WHERE id = ?",
+                (now, session_id),
+            )
+            conn.commit()
+            return int(cursor.lastrowid or 0)
+
+    async def get_chat_messages(
+        self, session_id: str, limit: int = 200, before_id: int | None = None
+    ) -> list[dict]:
+        if before_id is not None:
+            return self._fetchall(
+                "SELECT id, session_id, role, content, selected_action, episode_id, created_at "
+                "FROM chat_messages WHERE session_id = ? AND id < ? "
+                "ORDER BY id DESC LIMIT ?",
+                (session_id, before_id, limit),
+            )
+        return self._fetchall(
+            "SELECT id, session_id, role, content, selected_action, episode_id, created_at "
+            "FROM chat_messages WHERE session_id = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (session_id, limit),
+        )
+
+    async def delete_chat_session(self, session_id: str) -> None:
+        with self._lock:
+            conn = self._conn()
+            conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM chat_sessions WHERE id = ?", (session_id,))
+            conn.commit()
 
     # ── Full-text search ─────────────────────────────────────────
 

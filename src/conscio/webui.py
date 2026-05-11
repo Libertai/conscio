@@ -5,11 +5,13 @@ import secrets
 import time
 from typing import Any
 
-from fastapi import APIRouter, Cookie, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import APIRouter, Cookie, HTTPException, Query, Request, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 
 from conscio.service import ConscioService
+from conscio.web.chat import ChatStore, DEFAULT_SESSION_ID
+from conscio.web.events import stream_events
 
 
 SESSION_COOKIE = "conscio_web_session"
@@ -23,6 +25,15 @@ class LoginRequest(BaseModel):
 
 class TextRequest(BaseModel):
     content: str
+
+
+class ChatMessageRequest(BaseModel):
+    content: str
+    session_id: str | None = None
+
+
+class ChatSessionCreateRequest(BaseModel):
+    title: str | None = None
 
 
 def _session_token(service: ConscioService) -> str:
@@ -78,6 +89,7 @@ def create_web_router(service: ConscioService) -> APIRouter:
     router = APIRouter()
     sessions: dict[str, float] = {}
     login_failures: dict[str, list[float]] = {}
+    chat_store = ChatStore(service.memory)
 
     @router.get("/", include_in_schema=False)
     async def root() -> RedirectResponse:
@@ -180,6 +192,98 @@ def create_web_router(service: ConscioService) -> APIRouter:
         if result is None:
             return {"output": "", "selected_action": "wait"}
         return {"output": result.output, "selected_action": result.selected_action}
+
+    # ── Chat persistence (server-side, replaces localStorage) ────────────
+    @router.get("/ui/api/chat/sessions", include_in_schema=False)
+    async def ui_chat_sessions(
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> list[dict[str, Any]]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        return await chat_store.list_sessions()
+
+    @router.post("/ui/api/chat/sessions", include_in_schema=False)
+    async def ui_chat_session_create(
+        req: ChatSessionCreateRequest,
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> dict[str, Any]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        return await chat_store.create_session(req.title)
+
+    @router.delete("/ui/api/chat/sessions/{session_id}", include_in_schema=False)
+    async def ui_chat_session_delete(
+        session_id: str,
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> dict[str, bool]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        try:
+            await chat_store.delete_session(session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True}
+
+    @router.get("/ui/api/chat/sessions/{session_id}/messages", include_in_schema=False)
+    async def ui_chat_messages(
+        session_id: str,
+        limit: int = Query(default=200, ge=1, le=500),
+        before_id: int | None = Query(default=None, ge=1),
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> list[dict[str, Any]]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        return await chat_store.get_messages(session_id, limit=limit, before_id=before_id)
+
+    @router.post("/ui/api/chat/sessions/{session_id}/messages", include_in_schema=False)
+    async def ui_chat_post_message(
+        session_id: str,
+        req: TextRequest,
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> dict[str, Any]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        await chat_store.ensure_default_session()
+        await chat_store.append_message(session_id, "user", req.content)
+        result = await service.submit_message(req.content)
+        agent_msg = await chat_store.append_message(
+            session_id,
+            "agent",
+            result.output,
+            selected_action=result.selected_action,
+        )
+        service.event_broker.emit(
+            "chat.message",
+            {
+                "session_id": session_id,
+                "user": req.content,
+                "agent": result.output,
+                "selected_action": result.selected_action,
+                "agent_message_id": agent_msg["id"],
+            },
+        )
+        return {
+            "session_id": session_id,
+            "user": req.content,
+            "agent": result.output,
+            "selected_action": result.selected_action,
+        }
+
+    # ── Server-Sent Events stream ────────────────────────────────────────
+    @router.get("/ui/api/events", include_in_schema=False)
+    async def ui_events(
+        request: Request,
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> StreamingResponse:
+        _require_web_auth(service, sessions, conscio_web_session)
+        broker = service.event_broker
+        # Identity encoding defeats Caddy's gzip buffering without needing a
+        # Caddyfile change. X-Accel-Buffering disables nginx buffering too.
+        headers = {
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Content-Encoding": "identity",
+        }
+        return StreamingResponse(
+            stream_events(broker, is_disconnected=request.is_disconnected),
+            media_type="text/event-stream",
+            headers=headers,
+        )
 
     return router
 

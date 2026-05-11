@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#0E1014" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#F4F1EA" media="(prefers-color-scheme: light)" />
+    <title>conscio · observatory</title>
+    <script>
+      // FOUC guard: pick theme before stylesheet loads.
+      (function () {
+        try {
+          var stored = localStorage.getItem("conscio.theme");
+          var prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+          var theme = stored || (prefersDark ? "dark" : "light");
+          document.documentElement.setAttribute("data-theme", theme);
+        } catch (_) {}
+      })();
+    </script>
+    <script type="module" crossorigin src="/ui/assets/index-BluFy1OR.js"></script>
+    <link rel="stylesheet" crossorigin href="/ui/assets/index-CqiUiqWS.css">
+  </head>
+  <body>
+    <div id="app"></div>
+  </body>
+</html>

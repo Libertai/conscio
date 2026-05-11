@@ -160,6 +160,10 @@ class ConscioService:
         self._episodes: list[StoredEpisode] = []
         self._autonomous_action_times: list[float] = []
         self._event_lock = asyncio.Lock()
+        # SSE broker — attached on start(), detached on stop(). Imported lazily
+        # so circular imports through conscio.web stay impossible.
+        from conscio.web.events import WorkspaceEventBroker  # noqa: PLC0415
+        self._event_broker: WorkspaceEventBroker = WorkspaceEventBroker(self.runtime.workspace)
 
     def _register_self_tools(self, tools: PolicyToolRegistry) -> None:
         async def remember_fact(
@@ -378,6 +382,7 @@ class ConscioService:
             await self.runtime.initialize()
             self.running = True
             self.started_at = time.time()
+            self._event_broker.attach()
             goal = await self.goals.active_goal()
             if goal:
                 self.runtime.self_state.active_goal = goal.description
@@ -406,14 +411,22 @@ class ConscioService:
                 pass
             self._event_task = None
         self._fail_pending_events(RuntimeError("Conscio service stopped."))
+        self._event_broker.detach()
         await self.runtime.close()
         self.lock.release()
 
+    @property
+    def event_broker(self):
+        """Public accessor for the SSE broker (consumed by the web router)."""
+        return self._event_broker
+
     def pause(self) -> None:
         self.paused = True
+        self._event_broker.emit("control.paused", {"paused": True})
 
     def resume(self) -> None:
         self.paused = False
+        self._event_broker.emit("control.paused", {"paused": False})
 
     async def submit_message(self, content: str, *, source: str = "user") -> EpisodeResult:
         result = await self._submit_event(InputEvent(content=content, source=source, event_type="message"))
@@ -664,6 +677,9 @@ class ConscioService:
         changed = await self.autonomy.set_project_status(project_id, status)
         if not changed:
             raise KeyError(project_id)
+        self._event_broker.emit(
+            "project.updated", {"project_id": project_id, "status": status}
+        )
 
     async def list_influences(self) -> list[dict[str, Any]]:
         return await self.goals.list_influences()
@@ -706,6 +722,18 @@ class ConscioService:
             selected_action=ep.selected_action,
             metrics=dict(ep.metrics),
             trace=result.cognitive_trace,
+        )
+        self._event_broker.emit(
+            "episode.created",
+            {
+                "id": ep.id,
+                "source": ep.source,
+                "event_type": ep.event_type,
+                "selected_action": ep.selected_action,
+                "input": ep.input[:280],
+                "output": ep.output[:280],
+                "metrics": dict(ep.metrics),
+            },
         )
 
     async def _context_state(self) -> dict[str, Any]:
