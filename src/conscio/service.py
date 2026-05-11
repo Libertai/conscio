@@ -553,12 +553,19 @@ class ConscioService:
             and self._tick_count % self._goal_review_interval == 0
         ):
             try:
-                await self.goals.review_with_llm(
+                await self.autonomy.record_action("goal_review_attempt")
+                applied = await self.goals.review_with_llm(
                     self.runtime._autonomous_module.llm,
                     recent_episodes=await self.autonomy.recent_episodes(15),
                     recent_influences=await self.goals.list_influences(15),
                 )
+                if not applied:
+                    await self.autonomy.record_action("goal_review_empty")
             except Exception as exc:  # noqa: BLE001 — review is best-effort
+                try:
+                    await self.autonomy.record_action("goal_review_error")
+                except Exception:  # noqa: BLE001 — recording must not mask the original failure
+                    pass
                 self.last_error = f"goal_review_failed: {exc}"
         return result
 

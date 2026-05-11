@@ -565,6 +565,100 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("tool limit", result.output.lower())
 
 
+class DsmlToolCallParserTests(unittest.IsolatedAsyncioTestCase):
+    """DeepSeek-style native tool-call markers leaking into assistant content must
+    still execute the intended tool call."""
+
+    def _import_parser(self):
+        from conscio.core.tool_loop import _parse_dsml_tool_call
+
+        return _parse_dsml_tool_call
+
+    def test_dsml_fenced_json_format(self) -> None:
+        parse = self._import_parser()
+        content = (
+            "<｜tool_calls_begin｜><｜tool_call_begin｜>function<｜tool_sep｜>search_memory\n"
+            "```json\n{\"query\": \"vitamin b1\"}\n```"
+            "<｜tool_call_end｜><｜tool_calls_end｜>"
+        )
+        request = parse(content)
+        self.assertIsNotNone(request)
+        self.assertEqual(request.name, "search_memory")
+        self.assertEqual(request.args, {"query": "vitamin b1"})
+
+    def test_dsml_bare_brace_format(self) -> None:
+        parse = self._import_parser()
+        content = (
+            "<｜tool_calls_begin｜><｜tool_call_begin｜>function<｜tool_sep｜>add_task"
+            '{"description": "read article", "priority": 0.6}'
+            "<｜tool_call_end｜><｜tool_calls_end｜>"
+        )
+        request = parse(content)
+        self.assertIsNotNone(request)
+        self.assertEqual(request.name, "add_task")
+        self.assertEqual(request.args, {"description": "read article", "priority": 0.6})
+
+    def test_dsml_truncated_close(self) -> None:
+        parse = self._import_parser()
+        content = (
+            "<｜tool_calls_begin｜><｜tool_call_begin｜>function<｜tool_sep｜>note_progress\n"
+            '{"note": "finished reading"}'
+        )
+        request = parse(content)
+        self.assertIsNotNone(request)
+        self.assertEqual(request.name, "note_progress")
+        self.assertEqual(request.args, {"note": "finished reading"})
+
+    def test_dsml_missing_function_name_returns_none(self) -> None:
+        # Model emits the separator with `{` immediately after — no name text.
+        # Must return None instead of crashing on splitlines()[0].
+        parse = self._import_parser()
+        content = (
+            "<｜tool_calls_begin｜><｜tool_call_begin｜>function<｜tool_sep｜>"
+            '{"x": 1}<｜tool_call_end｜><｜tool_calls_end｜>'
+        )
+        self.assertIsNone(parse(content))
+
+    def test_dsml_ignores_non_dsml_content(self) -> None:
+        parse = self._import_parser()
+        self.assertIsNone(parse("Hello, world."))
+        self.assertIsNone(parse(""))
+        self.assertIsNone(parse("I considered using <｜some marker｜> but decided not to."))
+
+    async def test_tool_loop_executes_dsml_leaked_call(self) -> None:
+        from conscio.core.tool_loop import ToolLoop
+        from conscio.core.workspace import Workspace
+
+        leaked = (
+            "<｜tool_calls_begin｜><｜tool_call_begin｜>function<｜tool_sep｜>echo\n"
+            "```json\n{\"value\": \"hi\"}\n```"
+            "<｜tool_call_end｜><｜tool_calls_end｜>"
+        )
+        llm = IterativeLLM([
+            {"content": leaked, "tool_calls": []},
+            {"content": "done.", "tool_calls": []},
+        ])
+        tools = ToolRegistry()
+        observed: list[dict] = []
+
+        async def echo(value: str) -> dict:
+            observed.append({"value": value})
+            return {"output": f"echo:{value}", "exit_code": 0}
+
+        tools.register("echo", echo, "Echo a value.")
+        loop = ToolLoop(llm=llm, tools=tools, max_rounds=3)
+        workspace = Workspace()
+        result = await loop.run(
+            [{"role": "user", "content": "echo hi"}],
+            workspace,
+            tool_schemas=[{"type": "function", "function": {"name": "echo", "parameters": {}}}],
+        )
+        self.assertEqual(observed, [{"value": "hi"}])
+        self.assertEqual(result.final_text, "done.")
+        self.assertEqual(len(result.tool_requests), 1)
+        self.assertEqual(result.tool_requests[0].name, "echo")
+
+
 class EvalTests(unittest.IsolatedAsyncioTestCase):
     async def test_smoke_eval_runs(self) -> None:
         rows = await run_eval_suite("smoke")

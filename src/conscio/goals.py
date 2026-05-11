@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 import uuid
@@ -8,6 +9,8 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from conscio.memory.store import MemoryStore
+
+logger = logging.getLogger(__name__)
 
 
 GOAL_SCHEMA = """
@@ -257,6 +260,13 @@ class GoalStore:
         raw = str(response.get("content") or "").strip()
         decisions = self._parse_review_decisions(raw)
         if not decisions:
+            if raw:
+                logger.warning("goal_review: parse miss, raw=%r", raw[:2000])
+                await self.memory.add_fact(
+                    f"Goal review parse miss; raw response head: {raw[:200]}",
+                    source="goal_review",
+                    confidence="LOW",
+                )
             return []
         valid_ids = {g["id"] for g in goals}
         applied: list[dict[str, Any]] = []

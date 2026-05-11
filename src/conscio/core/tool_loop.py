@@ -3,6 +3,7 @@ autonomous-action paths."""
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -141,7 +142,7 @@ class ToolLoop:
     def _tool_request(response: dict[str, Any]) -> ToolRequest | None:
         calls = response.get("tool_calls") or []
         if not calls:
-            return None
+            return _parse_dsml_tool_call(str(response.get("content") or ""))
         call = calls[0]
         function = call.get("function") or {}
         name = str(function.get("name") or "").strip()
@@ -184,4 +185,79 @@ def latest_tool_observation(workspace: Workspace, name: str) -> WorkspaceEntry |
     for entry in reversed(workspace.read(limit=100, type_filter={EntryType.OBSERVATION})):
         if entry.source == "tool" and entry.metadata.get("tool") == name:
             return entry
+    return None
+
+
+# Recovers DeepSeek-style native tool-call markers that leak into the assistant
+# `content` field instead of arriving as proper OpenAI `tool_calls`. Tokens
+# observed: `<｜tool_calls_begin｜>`, `<｜tool_call_begin｜>`, `<｜tool_sep｜>`,
+# `<｜tool_call_end｜>`, `<｜tool_calls_end｜>` (and a `<｜DSML｜tool_calls>` variant).
+_DSML_SEP = re.compile(r"<\s*[｜|]\s*tool[_ ]?sep\s*[｜|]\s*>", re.IGNORECASE)
+_DSML_CALL_BEGIN = re.compile(r"<\s*[｜|]\s*tool[_ ]?call[_ ]?begin\s*[｜|]\s*>", re.IGNORECASE)
+_DSML_CALL_END = re.compile(r"<\s*[｜|]\s*tool[_ ]?call[_ ]?end\s*[｜|]\s*>", re.IGNORECASE)
+_DSML_HINT = re.compile(r"<\s*[｜|]\s*(?:dsml\s*)?tool[_ ]?calls?", re.IGNORECASE)
+_JSON_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
+
+
+def _parse_dsml_tool_call(content: str) -> ToolRequest | None:
+    if not content or not _DSML_HINT.search(content):
+        return None
+    # Restrict to the first call's region if both call_begin and call_end are present.
+    begin_match = _DSML_CALL_BEGIN.search(content)
+    region = content[begin_match.end():] if begin_match else content
+    end_match = _DSML_CALL_END.search(region)
+    if end_match:
+        region = region[: end_match.start()]
+    sep_match = _DSML_SEP.search(region)
+    if sep_match:
+        # Strip a leading role token like "function" before <｜tool_sep｜>.
+        name_and_args = region[sep_match.end():]
+    else:
+        name_and_args = region
+    fence = _JSON_FENCE.search(name_and_args)
+    if fence:
+        prefix = name_and_args[: fence.start()].strip()
+        args_raw = fence.group(1)
+    else:
+        brace = name_and_args.find("{")
+        if brace == -1:
+            return None
+        prefix = name_and_args[:brace].strip()
+        args_raw = _extract_balanced_json(name_and_args, brace)
+        if args_raw is None:
+            return None
+    name = (prefix.splitlines() or [""])[0].strip().strip("`").strip()
+    if not name:
+        return None
+    try:
+        args = json.loads(args_raw)
+    except json.JSONDecodeError:
+        args = {"input": args_raw}
+    if not isinstance(args, dict):
+        args = {"input": args}
+    return ToolRequest(name=name, args=args)
+
+
+def _extract_balanced_json(text: str, start: int) -> str | None:
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
     return None

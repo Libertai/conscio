@@ -199,6 +199,50 @@ class GoalReviewWithLLMTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(applied, [])
 
+    async def test_review_with_llm_parse_miss_records_fact_and_logs(self) -> None:
+        service = ConscioService(self.config)
+        await service.start(background=False)
+        try:
+            stub = _StubLLM([{"content": "I don't think any goals need updating right now."}])
+            with self.assertLogs("conscio.goals", level="WARNING") as captured:
+                applied = await service.goals.review_with_llm(
+                    stub,
+                    recent_episodes=[],
+                    recent_influences=[],
+                )
+            facts = service.memory.fetchall(
+                "SELECT fact FROM semantic WHERE source = 'goal_review' ORDER BY id DESC LIMIT 5"
+            )
+        finally:
+            await service.stop()
+
+        self.assertEqual(applied, [])
+        self.assertTrue(any("parse miss" in rec for rec in captured.output))
+        self.assertTrue(any("parse miss" in f["fact"] for f in facts))
+
+    async def test_plan_and_act_records_review_attempt(self) -> None:
+        service = ConscioService(self.config)
+        await service.start(background=False)
+        try:
+            service._goal_review_interval = 1
+            stub = _StubLLM([
+                {"content": "Thinking about the goal."},
+                {"content": "no decisions today"},
+            ])
+            service.runtime._autonomous_module.llm = stub
+            await service.run_autonomous_tick()
+            rows = service.memory.fetchall(
+                "SELECT kind, COUNT(*) AS n FROM action_events "
+                "WHERE kind LIKE 'goal_review_%' GROUP BY kind"
+            )
+        finally:
+            await service.stop()
+
+        kinds = {r["kind"]: r["n"] for r in rows}
+        self.assertEqual(kinds.get("goal_review_attempt"), 1)
+        self.assertEqual(kinds.get("goal_review_empty"), 1)
+        self.assertNotIn("goal_review_error", kinds)
+
 
 class PerToolSchemaTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
