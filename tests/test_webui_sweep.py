@@ -3,11 +3,11 @@ from __future__ import annotations
 import time
 import unittest
 
-from conscio.webui import (
+from conscio.web.auth import (
     MAX_LOGIN_FAILURE_TRACKERS,
     MAX_SESSIONS,
-    _sweep_login_failures,
-    _sweep_sessions,
+    sweep_login_failures as _sweep_login_failures,
+    sweep_sessions as _sweep_sessions,
 )
 
 

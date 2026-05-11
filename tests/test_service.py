@@ -509,9 +509,11 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("model_context", payload)
         self.assertIn("facts", payload)
         self.assertIn("skills", payload)
-        self.assertIn("Conscio", dashboard.text)
-        self.assertIn("Model Context", dashboard.text)
-        self.assertIn("Memory", dashboard.text)
+        # The dashboard now serves the Svelte SPA shell. We assert on the
+        # title + the SPA root mount rather than the legacy DOM strings.
+        self.assertIn("conscio", dashboard.text.lower())
+        self.assertIn("observatory", dashboard.text.lower())
+        self.assertIn('id="app"', dashboard.text)
 
     async def test_web_logout_revokes_session(self) -> None:
         try:

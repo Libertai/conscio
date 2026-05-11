@@ -1,4 +1,10 @@
 grit-carry-state-false.2n6.me {
+	# Compress everything except the SSE stream so events flush instantly.
+	# The backend also sets Content-Encoding: identity defensively, but
+	# excluding /ui/api/events here is the textbook fix.
+	@compressible {
+		not path /ui/api/events
+	}
+	encode @compressible zstd gzip
 	reverse_proxy 127.0.0.1:8765
-	encode zstd gzip
 }

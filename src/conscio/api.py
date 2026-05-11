@@ -8,8 +8,8 @@ import signal
 from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query
-from fastapi.responses import FileResponse, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -149,33 +149,44 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
 
     app.include_router(create_web_router(svc))
 
-    # ── new SPA dogfood mount at /ui2 (Phase 0 → Phase 4 swap to /ui) ──
+    # ── SPA host at /ui (Phase 4 swap; was previously dogfooded at /ui2) ──
     if (STATIC_DIR / "index.html").is_file():
         assets_dir = STATIC_DIR / "assets"
         if assets_dir.is_dir():
             app.mount(
-                "/ui2/assets",
+                "/ui/assets",
                 StaticFiles(directory=str(assets_dir)),
-                name="ui2-assets",
+                name="ui-assets",
             )
 
-        @app.get("/ui2", include_in_schema=False)
-        @app.get("/ui2/", include_in_schema=False)
-        async def _ui2_root() -> FileResponse:
+        @app.get("/ui", include_in_schema=False)
+        @app.get("/ui/", include_in_schema=False)
+        async def _ui_root() -> FileResponse:
             return FileResponse(
                 str(STATIC_DIR / "index.html"),
                 headers={"Cache-Control": "no-cache"},
             )
 
-        @app.get("/ui2/{path:path}", include_in_schema=False)
-        async def _ui2_spa(path: str) -> Response:
-            # Don't shadow /ui2/assets (handled by StaticFiles mount).
-            if path.startswith("assets/"):
+        @app.get("/ui/{path:path}", include_in_schema=False)
+        async def _ui_spa(path: str, request: Request) -> Response:
+            # Don't shadow the API or the static-asset mount.
+            if path.startswith("api/") or path.startswith("assets/"):
                 raise HTTPException(status_code=404)
             return FileResponse(
                 str(STATIC_DIR / "index.html"),
                 headers={"Cache-Control": "no-cache"},
             )
+
+        # Bookmarks pointed at /ui2 during the Phase 0-3 dogfood era get
+        # redirected so the operator's saved tab keeps working.
+        @app.get("/ui2", include_in_schema=False)
+        @app.get("/ui2/", include_in_schema=False)
+        async def _ui2_redirect_root() -> RedirectResponse:
+            return RedirectResponse("/ui/", status_code=301)
+
+        @app.get("/ui2/{path:path}", include_in_schema=False)
+        async def _ui2_redirect(path: str) -> RedirectResponse:
+            return RedirectResponse(f"/ui/{path}", status_code=301)
 
     app.state.conscio_service = svc
     return app
