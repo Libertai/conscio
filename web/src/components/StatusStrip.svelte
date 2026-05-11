@@ -1,6 +1,14 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
+  import { link } from "svelte-spa-router";
+  import active from "svelte-spa-router/active";
   import { api } from "$lib/api/client";
+
+  const navTabs = [
+    { href: "/stream", label: "stream" },
+    { href: "/chat", label: "chat" },
+    { href: "/settings", label: "settings" },
+  ];
 
   type Status = {
     running?: boolean;
@@ -71,10 +79,24 @@
   class="sticky top-0 z-20 h-14 flex items-center gap-6 px-5 border-b backdrop-blur-sm"
   style="background: color-mix(in oklab, var(--color-bg-elev) 92%, transparent);"
 >
-  <a href="#/" class="flex items-baseline gap-2 no-underline">
+  <a href="#/" class="flex items-baseline gap-2 no-underline shrink-0">
     <span class="font-display italic text-xl tracking-tight" style="color: var(--color-fg)">conscio</span>
-    <span class="font-mono text-[10px] tabular smallcaps" style="color: var(--color-fg-faint)">observatory</span>
+    <span class="hidden xs:inline font-mono text-[10px] tabular smallcaps" style="color: var(--color-fg-faint)">observatory</span>
   </a>
+
+  <!-- desktop nav (mobile uses BottomTabBar) -->
+  <nav class="hidden md:flex items-center gap-0.5 -mx-1">
+    {#each navTabs as tab (tab.href)}
+      <a
+        href={tab.href}
+        use:link
+        use:active={{ path: tab.href, className: "nav-active" }}
+        class="nav-link px-3 py-1.5 rounded-sm font-mono text-[11px] smallcaps tracking-wider no-underline transition-colors"
+      >
+        {tab.label}
+      </a>
+    {/each}
+  </nav>
 
   <div class="flex items-center gap-3">
     {#each indicators as ind (ind.label)}
@@ -106,3 +128,19 @@
           style="background: var(--color-accent)"></span>
   </div>
 </header>
+
+<style>
+  .nav-link {
+    color: var(--color-fg-mute);
+    border: 1px solid transparent;
+  }
+  .nav-link:hover {
+    color: var(--color-fg);
+    background: color-mix(in oklab, var(--color-fg-faint) 8%, transparent);
+  }
+  :global(.nav-active) {
+    color: var(--color-fg) !important;
+    border-color: var(--color-border-hot);
+    background: color-mix(in oklab, var(--color-accent) 8%, transparent);
+  }
+</style>
