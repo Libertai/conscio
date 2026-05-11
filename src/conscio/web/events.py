@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
@@ -29,16 +30,7 @@ from conscio.core.workspace import Workspace, WorkspaceEntry
 CLIENT_QUEUE_SIZE = 256
 HEARTBEAT_SECONDS = 15.0
 STATUS_TICK_SECONDS = 2.0
-
-# Temporary diagnostic logging (remove once SSE delivery is verified in prod).
-import logging  # noqa: E402
-
-_log = logging.getLogger("conscio.web.events")
-_log.setLevel(logging.INFO)
-_h = logging.StreamHandler()
-_h.setFormatter(logging.Formatter("[broker] %(message)s"))
-_log.addHandler(_h)
-_log.propagate = False
+BACKLOG_SIZE = 80
 
 
 @dataclass
@@ -50,30 +42,26 @@ class _Client:
 class WorkspaceEventBroker:
     """Fan-out broker. One per ``ConscioService`` lifetime."""
 
-    def __init__(self, workspace: Workspace) -> None:
+    def __init__(self, workspace: Workspace, *, backlog: int = BACKLOG_SIZE) -> None:
         self._workspace = workspace
         self._clients: list[_Client] = []
         self._lock = asyncio.Lock()
         self._unsubscribe: Callable[[], None] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Ring buffer of recent events so a freshly-connected client doesn't
+        # stare at an empty timeline while it waits for the next live signal.
+        self._backlog: deque[dict[str, Any]] = deque(maxlen=max(0, backlog))
 
     # ── lifecycle ────────────────────────────────────────────────
 
     def attach(self) -> None:
         if self._unsubscribe is not None:
-            _log.info("attach: already attached, skipping")
             return
         try:
             self._loop = asyncio.get_running_loop()
         except RuntimeError:
             self._loop = None
         self._unsubscribe = self._workspace.subscribe(self._on_entry)
-        _log.info(
-            "attach: ws=%x subscribers=%d loop=%s",
-            id(self._workspace),
-            len(self._workspace._subscribers),
-            self._loop,
-        )
 
     def detach(self) -> None:
         if self._unsubscribe is not None:
@@ -85,9 +73,20 @@ class WorkspaceEventBroker:
 
     def register(self) -> _Client:
         client = _Client()
+        # Pre-fill the queue with backlog so the client sees recent history
+        # immediately on connect. Tag each replayed event so the UI can style
+        # them differently if it wants to (faded, etc.).
+        for past in list(self._backlog):
+            try:
+                client.queue.put_nowait({**past, "_replay": True})
+            except asyncio.QueueFull:
+                break
         self._clients.append(client)
-        _log.info("register: client_count=%d ws=%x", len(self._clients), id(self._workspace))
         return client
+
+    @property
+    def backlog_size(self) -> int:
+        return len(self._backlog)
 
     def unregister(self, client: _Client) -> None:
         try:
@@ -105,25 +104,22 @@ class WorkspaceEventBroker:
         """Fan out a service-level event to every client. Safe from any thread
         (re-routes to the loop via ``call_soon_threadsafe`` if necessary)."""
         payload = {"type": event_type, "ts": time.time(), **data}
+        self._record(payload)
         running_loop: asyncio.AbstractEventLoop | None
         try:
             running_loop = asyncio.get_running_loop()
         except RuntimeError:
             running_loop = None
-        _log.info(
-            "emit type=%s clients=%d running_loop=%s self_loop=%s same=%s",
-            event_type,
-            len(self._clients),
-            running_loop,
-            self._loop,
-            running_loop is self._loop,
-        )
         if running_loop is not None and running_loop is self._loop:
             self._dispatch(payload)
         elif self._loop is not None:
             self._loop.call_soon_threadsafe(self._dispatch, payload)
         else:
             self._dispatch(payload)
+
+    def _record(self, payload: dict[str, Any]) -> None:
+        if self._backlog.maxlen:
+            self._backlog.append(payload)
 
     def _dispatch(self, payload: dict[str, Any]) -> None:
         for client in self._clients:
@@ -147,7 +143,6 @@ class WorkspaceEventBroker:
     # ── workspace handler (sync, called from cognition loop) ─────
 
     def _on_entry(self, entry: WorkspaceEntry) -> None:
-        _log.info("on_entry kind=%s clients=%d", entry.type.value, len(self._clients))
         payload = {
             "type": f"workspace.{entry.type.value}",
             "ts": entry.timestamp,
@@ -161,6 +156,7 @@ class WorkspaceEventBroker:
             "metadata": entry.metadata,
             "kind": entry.type.value,
         }
+        self._record(payload)
         # The workspace broadcast runs inside the cognition coroutine which
         # owns ``self._loop``, so a direct dispatch is fine. We still guard.
         if self._loop is None or self._loop.is_closed():

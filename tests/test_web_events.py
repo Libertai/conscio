@@ -119,6 +119,37 @@ def test_stream_events_yields_open_then_event() -> None:
     _run(scenario())
 
 
+def test_backlog_replays_to_late_clients() -> None:
+    async def scenario() -> None:
+        ws = Workspace()
+        broker = WorkspaceEventBroker(ws, backlog=20)
+        broker.attach()
+        try:
+            # No clients yet — these go to the ring buffer only.
+            broker.emit("a", {"i": 1})
+            ws.broadcast(WorkspaceEntry(content="x", source="t", type=EntryType.OBSERVATION))
+            broker.emit("b", {"i": 2})
+            assert broker.backlog_size == 3
+
+            # New client subscribes; should receive all 3 as replay.
+            client = broker.register()
+            seen: list[dict[str, Any]] = []
+            for _ in range(3):
+                seen.append(client.queue.get_nowait())
+            assert [s["type"] for s in seen] == ["a", "workspace.observation", "b"]
+            assert all(s.get("_replay") for s in seen)
+
+            # A live event after registration: not flagged as replay.
+            broker.emit("c", {"i": 3})
+            live = client.queue.get_nowait()
+            assert live["type"] == "c"
+            assert "_replay" not in live or live.get("_replay") is False
+        finally:
+            broker.detach()
+
+    _run(scenario())
+
+
 def test_encode_sse_round_trip() -> None:
     out = encode_sse({"type": "x", "n": 3}, event="x", retry_ms=2500)
     assert out.startswith("retry: 2500\n")
