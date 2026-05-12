@@ -270,7 +270,6 @@ class ResponseModule:
             tools=self.tools,
             max_rounds=self.max_tool_rounds,
             temperature=0.4,
-            max_tokens=600,
         )
         result = await loop.run(messages, workspace, tool_schemas)
         self.last_tool_requests.extend(result.tool_requests)

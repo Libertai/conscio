@@ -242,7 +242,6 @@ class AutonomousActionModule:
             tools=self.tools,
             max_rounds=self.max_tool_rounds,
             temperature=0.3,
-            max_tokens=600,
             on_tool_observation=self.on_tool_observation,
         )
         result = await loop.run(messages, workspace, tool_schemas)

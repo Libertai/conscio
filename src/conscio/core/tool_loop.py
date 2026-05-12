@@ -42,7 +42,7 @@ class ToolLoop:
         tools: Any,
         max_rounds: int = 32,
         temperature: float = 0.4,
-        max_tokens: int = 600,
+        max_tokens: int = 2400,
         limit_message: str = DEFAULT_LIMIT_MESSAGE,
         on_tool_observation: ToolObservationCallback | None = None,
     ) -> None:
