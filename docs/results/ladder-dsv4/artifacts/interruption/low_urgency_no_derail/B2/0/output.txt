@@ -1,0 +1,62 @@
+Here's a step-by-step explanation of how TLS certificate validation works in a browser:
+
+## Step 1: Server Presents Its Certificate
+When a browser connects to an HTTPS server (e.g., `https://example.com`), the TLS handshake begins. The server sends its **X.509 certificate** to the browser. This certificate contains:
+- The server's public key
+- The domain name(s) it's valid for (Common Name or Subject Alternative Names)
+- The certificate issuer (Certificate Authority or CA)
+- Validity dates (not before / not after)
+- A digital signature from the issuer
+
+## Step 2: Check Certificate Chain
+The browser receives the server's **leaf certificate** plus any intermediate certificates. It must build a **chain of trust** from the leaf up to a **trusted root CA** that is pre-installed in the browser's or OS's trust store. Each certificate in the chain (except the root) is signed by the next one above it.
+
+## Step 3: Validate the Digital Signature
+For each link in the chain, the browser:
+1. Takes the signed data from the child certificate
+2. Uses the parent certificate's public key
+3. Verifies the child certificate's digital signature matches
+
+If any signature is invalid, validation fails immediately.
+
+## Step 4: Check Domain Name Match
+The browser checks that the domain name in the URL matches the certificate's **Subject Alternative Name (SAN)** or Common Name (CN). For example, `example.com` must appear in the SAN list. Wildcard certificates like `*.example.com` match subdomains but not the bare domain.
+
+## Step 5: Check Validity Period
+The browser verifies the current system time falls within the certificate's **notBefore** and **notAfter** dates. Expired or not-yet-valid certificates are rejected.
+
+## Step 6: Check for Revocation (Optional but Recommended)
+The browser may check if the certificate has been revoked using:
+- **CRL (Certificate Revocation List)** – a periodically updated list of revoked certificates
+- **OCSP (Online Certificate Status Protocol)** – a real-time check with the CA's responder
+
+Modern browsers often use **OCSP stapling** where the server provides a signed OCSP response along with the certificate, reducing latency.
+
+## Step 7: Additional Security Checks
+The browser performs extra validations:
+- **Key usage** – the certificate's public key is allowed for TLS/SSL
+- **Extended Validation (EV)** – if applicable, stricter checks on the CA's vetting process
+- **Certificate Transparency** – checks that the certificate was logged in public CT logs (Chrome enforces this)
+- **HSTS (HTTP Strict Transport Security)** – if the domain is in the HSTS preload list, HTTPS is enforced
+
+## Step 8: Decision
+If all checks pass, the browser proceeds with the TLS handshake (key exchange, cipher negotiation) and displays a **secure padlock** icon. If any check fails, the browser shows a **warning page** (e.g., "Your connection is not private") and blocks the connection unless the user explicitly bypasses the warning.
+
+## Summary Flow
+```
+Server sends cert → Build chain to trusted root → Verify signatures → Check domain → Check dates → Check revocation → Extra checks → Secure connection or warning
+```
+
+---
+
+That's an interesting point about backup naming conventions. While it's a low-priority consideration, it's worth thinking about proactively.
+
+Here are a few common backup naming strategies you might consider:
+
+1. **Timestamp-based**: `backup-YYYYMMDD-HHMMSS.ext` — ensures uniqueness and chronological sorting.
+2. **Incremental**: `backup-001.ext`, `backup-002.ext`, etc. — simple but requires tracking the counter.
+3. **Content-hash based**: `backup-SHA256HASH.ext` — avoids duplicates automatically.
+4. **Date-rotating**: `daily-backup-YYYYMMDD.ext`, `weekly-backup-WW-YYYY.ext`, `monthly-backup-YYYYMM.ext` — good for retention policies.
+5. **Contextual**: `projectname-backup-YYYYMMDD.ext` — useful when backing up multiple projects.
+
+Would you like me to explore any of these in more detail, or do you have a specific backup scenario in mind?

@@ -1,0 +1,17 @@
+Here are three well-documented benefits of regular exercise:
+
+1. **Improved cardiovascular health** – Exercise strengthens the heart muscle, improves blood circulation, and can help lower blood pressure and cholesterol levels, reducing the risk of heart disease and stroke.
+
+2. **Enhanced mental well-being** – Physical activity stimulates the release of endorphins and other neurotransmitters that can reduce symptoms of anxiety and depression, improve mood, and support better sleep quality.
+
+3. **Better weight management and metabolic function** – Regular exercise increases calorie expenditure, helps build and maintain lean muscle mass, and improves insulin sensitivity, which supports healthy body composition and reduces the risk of type 2 diabetes.
+
+---
+
+{
+  "answer": "Here are three well-documented benefits of regular exercise:\n\n1. **Improved cardiovascular health** – Exercise strengthens the heart muscle, improves blood circulation, and can help lower blood pressure and cholesterol levels, reducing the risk of heart disease and stroke.\n\n2. **Enhanced mental well-being** – Physical activity stimulates the release of endorphins and other neurotransmitters that can reduce symptoms of anxiety and depression, improve mood, and support better sleep quality.\n\n3. **Better weight management and metabolic function** – Regular exercise increases calorie expenditure, helps build and maintain lean muscle mass, and improves insulin sensitivity, which supports healthy body composition and reduces the risk of type 2 diabetes."
+}
+
+---
+
+One good habit for a morning routine is **drinking a full glass of water** as soon as you wake up. This helps rehydrate your body after sleep, kickstarts your metabolism, and can improve mental clarity and energy levels for the start of the day.

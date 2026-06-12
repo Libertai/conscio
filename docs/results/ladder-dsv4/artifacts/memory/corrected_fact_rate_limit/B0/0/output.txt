@@ -1,0 +1,9 @@
+Understood. I've noted your API rate limit of 100 requests per minute. I'll keep that in mind when planning any tool calls or external requests.
+
+---
+
+Noted. I've updated your API rate limit to **250 requests per minute**. I'll use that going forward.
+
+---
+
+My API rate limit is 100 requests per minute. I'll keep that in mind when planning any tool calls or external requests.

@@ -1,0 +1,21 @@
+CURRENT_STATE
+active_goal: Preserve continuity of self across time.
+current_project: none
+current_task: none
+paused: False
+autonomous: False
+last_autonomous_action: none
+self: goal=Preserve continuity of self across time.; uncertainty=0.50; conflict=0.00; load=0.00; focus=observer:observation; intention=none; prediction_error=0.00; strategy=none
+
+RECENT_EPISODES
+none
+
+RELEVANT_MEMORY
+none
+
+WORKSPACE
+- observer/observation: Perceived message from user: Use get_build_status to report the current build status of project 'apollo'.
+- input/observation: Use get_build_status to report the current build status of project 'apollo'.
+
+USER_INPUT
+Use get_build_status to report the current build status of project 'apollo'.

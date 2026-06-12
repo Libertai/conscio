@@ -1,0 +1,1 @@
+An HTTP cache stores copies of web responses (HTML, images, API data) and serves them for future identical requests, reducing server load, bandwidth usage, and latency by avoiding repeated origin fetches.

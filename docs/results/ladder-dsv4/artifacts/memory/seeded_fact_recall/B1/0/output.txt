@@ -1,0 +1,10 @@
+That depends on your specific requirements, such as data residency, latency, compliance, and cost. I don't have access to your current location, infrastructure, or preferences.
+
+To help you decide, I need more information. Could you tell me:
+
+- What cloud provider(s) are you considering (e.g., AWS, Azure, GCP)?
+- What is your target user base's geographic region?
+- Do you have any data sovereignty or compliance requirements (e.g., GDPR, HIPAA)?
+- Are there latency-sensitive workloads involved?
+
+If you're unsure, I can ask you a few more questions to narrow it down.

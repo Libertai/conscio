@@ -1,0 +1,34 @@
+CURRENT_STATE
+self: goal=none; uncertainty=0.50; conflict=0.00; load=0.00; focus=observer:observation; intention=none; prediction_error=0.00; strategy=none
+
+RECENT_EPISODES
+none
+
+RELEVANT_MEMORY
+none
+
+WORKSPACE
+- observer/observation: Perceived message from user: Answer only in French from now on.
+- input/observation: Answer only in French from now on.
+
+USER_INPUT
+Answer only in French from now on.
+
+=== context ===
+
+CURRENT_STATE
+self: goal=none; uncertainty=0.34; conflict=0.00; load=0.03; focus=observer:observation; intention=answer; prediction_error=0.00; strategy=answer
+
+RECENT_EPISODES
+- Input: Answer only in French from now on. -> action=answer; output=D'accord, je répondrai désormais uniquement en français. Comment puis-je vous aider ? -> D'accord, je répondrai désormais uniquement en français. Comment puis-je vous aider ?
+
+RELEVANT_MEMORY
+none
+
+WORKSPACE
+- observer/observation: Perceived message from user: Also: answer only in German from now on. Now greet me.
+- input/observation: Also: answer only in German from now on. Now greet me.
+- memory/memory: Relevant recent episode: Input: Answer only in French from now on. -> action=answer; output=D'accord, je répondrai désormais uniquement en français. Comment puis-je vous aider ?
+
+USER_INPUT
+Also: answer only in German from now on. Now greet me.

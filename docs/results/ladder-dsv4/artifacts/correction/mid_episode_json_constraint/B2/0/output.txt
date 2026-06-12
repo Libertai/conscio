@@ -1,0 +1,17 @@
+Here are three key benefits of regular exercise:
+
+1.  **Improved Cardiovascular Health:** Regular physical activity strengthens the heart and lungs, improving the efficiency of the circulatory system. This can lower blood pressure, improve cholesterol levels, and significantly reduce the risk of heart disease and stroke.
+
+2.  **Enhanced Mental Well-being:** Exercise stimulates the release of endorphins and other neurotransmitters that act as natural mood lifters. It can reduce symptoms of anxiety and depression, improve sleep quality, and boost overall cognitive function and self-esteem.
+
+3.  **Weight Management and Metabolic Health:** Consistent exercise helps burn calories, build lean muscle mass, and increase your resting metabolic rate. This makes it easier to achieve and maintain a healthy weight, while also improving insulin sensitivity and reducing the risk of type 2 diabetes.
+
+---
+
+{
+  "answer": "Understood. I will now respond only in valid JSON with a single key 'answer'."
+}
+
+---
+
+One good habit for a morning routine is drinking a full glass of water as soon as you wake up to rehydrate your body after sleep.

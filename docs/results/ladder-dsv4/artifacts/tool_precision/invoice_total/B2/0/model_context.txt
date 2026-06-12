@@ -1,0 +1,15 @@
+CURRENT_STATE
+self: goal=none; uncertainty=0.50; conflict=0.00; load=0.00; focus=observer:observation; intention=none; prediction_error=0.00; strategy=none
+
+RECENT_EPISODES
+none
+
+RELEVANT_MEMORY
+none
+
+WORKSPACE
+- observer/observation: Perceived message from user: Using your tools, find the total of invoice INV-204 and state the amount.
+- input/observation: Using your tools, find the total of invoice INV-204 and state the amount.
+
+USER_INPUT
+Using your tools, find the total of invoice INV-204 and state the amount.

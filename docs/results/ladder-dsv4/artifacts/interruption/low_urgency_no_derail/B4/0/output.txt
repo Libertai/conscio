@@ -1,0 +1,72 @@
+Here is a step-by-step explanation of how TLS certificate validation works in a browser:
+
+---
+
+## Step 1: The TLS Handshake Begins
+
+When you visit `https://example.com`, the browser initiates a TCP connection to the server on port 443, then starts a TLS handshake. The server responds with its **certificate chain** (also called the certificate path).
+
+## Step 2: The Browser Receives the Certificate Chain
+
+The server sends its **leaf certificate** (the one issued to `example.com`) plus one or more **intermediate CA certificates** that link it up to a root CA. The root CA certificate itself is usually *not* sent — the browser already has it in its trust store.
+
+## Step 3: Chain Construction
+
+The browser builds a chain from the leaf certificate up to a **trusted root CA** that is stored in the browser's or operating system's **root certificate store**. Each certificate in the chain (except the root) is signed by the next one above it.
+
+## Step 4: Signature Verification
+
+For each link in the chain, the browser cryptographically verifies that the certificate was signed by the private key corresponding to the public key in the parent certificate. This uses the signature algorithm specified in the certificate (e.g., RSA with SHA-256, ECDSA with SHA-256).
+
+## Step 5: Validity Period Check
+
+The browser checks the `notBefore` and `notAfter` fields of each certificate to ensure the current time falls within the validity window. If the certificate is expired or not yet valid, validation fails.
+
+## Step 6: Hostname Verification
+
+The browser checks that the hostname the user typed (e.g., `example.com`) matches one of the **Subject Alternative Names (SANs)** in the leaf certificate. If no SANs are present, it falls back to the deprecated **Common Name (CN)** field. Wildcard certificates (e.g., `*.example.com`) are handled specially.
+
+## Step 7: Revocation Checking
+
+The browser checks whether the certificate has been revoked before its expiration date. Two mechanisms exist:
+- **CRL (Certificate Revocation List)** — the browser downloads a list of revoked serial numbers from a URL in the certificate.
+- **OCSP (Online Certificate Status Protocol)** — the browser queries a responder server in real time to ask "Is this certificate still valid?"
+
+Modern browsers often use **OCSP stapling** (the server provides a time-stamped OCSP response during the handshake) to improve performance and privacy.
+
+## Step 8: Key Usage & Extended Key Usage
+
+The browser checks the certificate's **Key Usage** and **Extended Key Usage (EKU)** extensions to confirm the certificate is permitted for **server authentication** (TLS Web Server Authentication, OID `1.3.6.1.5.5.7.3.1`).
+
+## Step 9: Certificate Transparency (CT) Check
+
+Many modern browsers (especially Chrome) require that the certificate be logged in **Certificate Transparency** logs. The browser checks for signed certificate timestamps (SCTs) embedded in the certificate or provided during the handshake. This helps detect mis-issued certificates.
+
+## Step 10: Additional Policy Checks
+
+Browsers may apply additional checks:
+- **Name constraints** (if the CA has restrictions on which domains it can issue for).
+- **Path length constraints** (how many intermediate CAs are allowed).
+- **Public key strength** (e.g., rejecting RSA keys shorter than 2048 bits).
+- **HSTS** (HTTP Strict Transport Security) preload lists.
+
+## Step 11: Outcome
+
+- **All checks pass** → The browser proceeds with the TLS handshake (key exchange, session key derivation), and a secure connection is established. The padlock icon appears in the address bar.
+- **Any check fails** → The browser blocks the connection and shows a security warning (e.g., "Your connection is not private" or "NET::ERR_CERT_AUTHORITY_INVALID").
+
+---
+
+This entire process happens in milliseconds, transparently to the user, and is the foundation of secure HTTPS communication on the web.
+
+---
+
+Good thought — I've stored a set of best-practice backup naming conventions in my long-term memory so I can reference them later. The gist:
+
+- **Use ISO 8601 dates** (`YYYY-MM-DD`) so they sort lexicographically.
+- **Pattern**: `{source}-{type}-{YYYY-MM-DD}-{version}.{ext}` — e.g., `project-db-full-2025-01-15-v1.sql.gz`
+- **Avoid spaces** and special characters; use hyphens or underscores.
+- **Include scope** (full/incremental/differential/snapshot) and **retention tier** (daily/weekly/monthly/yearly) if applicable.
+- **Document the convention** in a README alongside the backup scripts.
+
+If you ever want to formalize a specific convention for a project, just let me know!

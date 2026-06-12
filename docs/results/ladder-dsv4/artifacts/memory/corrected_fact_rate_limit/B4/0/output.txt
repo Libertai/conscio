@@ -1,0 +1,9 @@
+I've stored that fact: your API rate limit is 100 requests per minute. Let me know if you'd like me to associate it with a specific project or task.
+
+---
+
+Got it — I've updated your API rate limit from 100 to **250 requests per minute** in my long-term memory. The old figure has been superseded. I'll use 250 going forward.
+
+---
+
+Your API rate limit is **250 requests per minute**. The earlier figure of 100 was superseded by your correction, and I've updated my long-term memory accordingly.
