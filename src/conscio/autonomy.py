@@ -10,6 +10,12 @@ from typing import Any
 from conscio.memory.store import MemoryStore
 
 
+# Stale-task watchdog thresholds (days). Defaults mirror config.MotivationConfig;
+# override per-deploy via the [motivation] TOML table.
+STALE_FLAG_DAYS = 2.0
+STALE_BLOCK_DAYS = 5.0
+
+
 AUTONOMY_SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
@@ -68,8 +74,16 @@ class Task:
 
 
 class AutonomyStore:
-    def __init__(self, memory: MemoryStore) -> None:
+    def __init__(
+        self,
+        memory: MemoryStore,
+        *,
+        stale_flag_days: float = STALE_FLAG_DAYS,
+        stale_block_days: float = STALE_BLOCK_DAYS,
+    ) -> None:
         self.memory = memory
+        self.stale_flag_days = float(stale_flag_days)
+        self.stale_block_days = float(stale_block_days)
 
     async def initialize(self) -> None:
         await self.memory.initialize()
@@ -213,6 +227,43 @@ class AutonomyStore:
             ),
         ])
         return rowcount > 0
+
+    async def flag_stale_tasks(
+        self,
+        pending_days: float | None = None,
+        block_days: float | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Stale-task watchdog (run per autonomous tick).
+
+        Tasks pending/active longer than `pending_days` are returned as
+        `flagged` (the context assembler renders them as [STALE]); tasks older
+        than `block_days` are auto-transitioned to blocked with
+        result="auto-blocked: stale" and an action_event('task_auto_blocked')
+        per task, so the backlog cannot rot silently forever.
+        """
+        now = time.time()
+        flag_days = self.stale_flag_days if pending_days is None else float(pending_days)
+        blocking_days = self.stale_block_days if block_days is None else float(block_days)
+        flag_cutoff = now - flag_days * 86400.0
+        block_cutoff = now - blocking_days * 86400.0
+        rows = self.memory.fetchall(
+            "SELECT * FROM tasks WHERE status IN ('pending', 'active') AND updated_at < ? "
+            "ORDER BY updated_at",
+            (flag_cutoff,),
+        )
+        flagged: list[dict[str, Any]] = []
+        blocked: list[dict[str, Any]] = []
+        for row in rows:
+            task = asdict(self._task_from_row(row))
+            if float(row["updated_at"]) < block_cutoff:
+                await self.update_task(row["id"], status="blocked", result="auto-blocked: stale")
+                await self.record_action("task_auto_blocked")
+                task["status"] = "blocked"
+                task["result"] = "auto-blocked: stale"
+                blocked.append(task)
+            else:
+                flagged.append(task)
+        return {"flagged": flagged, "blocked": blocked}
 
     async def record_action(self, kind: str) -> None:
         self.memory.execute(

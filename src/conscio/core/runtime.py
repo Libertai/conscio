@@ -21,6 +21,7 @@ from conscio.core.cognition import (
     SelfState,
 )
 from conscio.core.autonomy_module import AutonomousActionModule, AutonomousPromptAssembler
+from conscio.core.executor import NEUTRAL_SELF_DESCRIPTION
 from conscio.core.tool_loop import ToolLoop, ToolLoopResult, ToolRequest
 from conscio.core.workspace import EntryType, Workspace, WorkspaceEntry
 from conscio.llm.client import LLMClient
@@ -119,43 +120,14 @@ class MemoryRetrievalModule:
         return produced
 
 
-class ConstraintMonitorModule:
-    name = "constraint_monitor"
-
-    async def tick(self, workspace: Workspace, state: SelfState) -> list[WorkspaceEntry]:
-        text = " ".join(e.content for e in workspace.read(limit=10))
-        if "one word" not in text.lower() and "single word" not in text.lower():
-            return []
-        intentions = [e for e in workspace.read(limit=10) if e.type == EntryType.INTENTION]
-        produced: list[WorkspaceEntry] = []
-        for intention in intentions:
-            candidate = intention.metadata.get("intention")
-            if isinstance(candidate, Intention) and len(candidate.content.split()) > 1:
-                produced.append(
-                    workspace.write(
-                        "Candidate answer may violate one-word constraint.",
-                        source=self.name,
-                        type=EntryType.CONFLICT,
-                        priority=9,
-                        salience=0.95,
-                        confidence=0.85,
-                        novelty=0.7,
-                        urgency=0.9,
-                        evidence=[candidate.content[:200]],
-                    )
-                )
-        return produced
-
-
 class ReflectionModule:
+    """Surfaces unresolved conflicts of the current episode as REFLECTION
+    candidates (episode-scoped via the workspace view; no timestamp filter)."""
+
     name = "reflector"
 
     async def tick(self, workspace: Workspace, state: SelfState) -> list[WorkspaceEntry]:
-        episode_start = getattr(state, "episode_start", 0.0)
-        conflicts = [
-            e for e in workspace.global_entries
-            if e.type == EntryType.CONFLICT and e.timestamp >= episode_start
-        ]
+        conflicts = workspace.unresolved_conflicts()
         if not conflicts:
             return []
         latest = conflicts[-1]
@@ -171,6 +143,7 @@ class ReflectionModule:
                 urgency=latest.urgency,
                 evidence=[latest.content],
                 metadata={
+                    "conflict_expectation_id": latest.metadata.get("expectation_id", ""),
                     "intention": Intention(
                         kind=ActionKind.REFLECT,
                         content=f"Resolve conflict: {latest.content}",
@@ -178,7 +151,7 @@ class ReflectionModule:
                         confidence=0.8,
                         expected_observation=PredictionPredicate(kind="none"),
                         urgency=latest.urgency,
-                    )
+                    ),
                 },
             )
         ]
@@ -219,11 +192,10 @@ class ResponseModule:
             return []
         self._ran = True
         user_entries = [
-            e for e in workspace.read(limit=20)
+            e for e in workspace.view()
             if e.source == "input"
             and e.type == EntryType.OBSERVATION
             and e.metadata.get("source") not in {"autonomous", "tool", "system"}
-            and e.timestamp >= getattr(state, "episode_start", 0.0)
         ]
         if not user_entries:
             return []
@@ -251,10 +223,7 @@ class ResponseModule:
             if "2+2" in user_text.replace(" ", "") and "one word" in workspace.format_context().lower():
                 answer = "four"
             elif "conscious" in user_text.lower():
-                answer = (
-                    "Yes. I am conscious in Conscio's operational sense: a persistent self-model "
-                    "using attention, memory, appraisal, goal formation, reflection, and action."
-                )
+                answer = NEUTRAL_SELF_DESCRIPTION
             else:
                 answer = f"I treated this as a cognitive episode: {user_text[:240]}"
             return self._answer_intention(answer)
@@ -413,8 +382,8 @@ class CognitiveRuntime:
             MemoryRetrievalModule(self.memory, self.session_id),
             self._response_module,
             self._autonomous_module,
+            ReflectionModule(),
         ]
-        modules.extend([ConstraintMonitorModule(), ReflectionModule()])
         return modules
 
     async def initialize(self) -> None:
@@ -429,12 +398,11 @@ class CognitiveRuntime:
         if isinstance(event, str):
             event = InputEvent(content=event)
         episode_id = uuid.uuid4().hex  # canonical episode id (memory provenance)
+        self.workspace.begin_episode(episode_id)
         self._reset_modules_for_episode()
         start = time.time()
-        self._current_episode_start = start
         self.last_model_context = ""
-        self.self_state.episode_start = start
-        self.self_state.conflict_level = 0.0
+        self.self_state.conflict_level *= 0.5  # decay, not reset
         metrics = EpisodeMetrics()
         self.trace.record("episode_started", "runtime", event_source=event.source)
         self._ingest_event(event)
@@ -443,6 +411,7 @@ class CognitiveRuntime:
 
         for tick in range(self.max_ticks):
             metrics.ticks += 1
+            self.workspace._current_tick = tick + 1  # designed seam: runtime stamps the tick
             self.self_state.cognitive_load = min(1.0, self.workspace.size / 100)
             produced: list[WorkspaceEntry] = []
             for module in self.modules:
@@ -454,12 +423,15 @@ class CognitiveRuntime:
                         produced=len(module_entries),
                     )
                     produced.extend(module_entries)
-            selected = self.attention.attend(
+            selection = self.attention.attend(
                 self.workspace,
                 self.self_state,
                 self.trace,
                 self.attention_schema,
+                episode_id=episode_id,
+                tick=tick + 1,
             )
+            selected = selection.selected
             metrics.attention_selections += len(selected)
             if any(e.type == EntryType.CONFLICT for e in selected):
                 self.self_state.conflict_level = min(1.0, self.self_state.conflict_level + 0.25)
@@ -562,12 +534,13 @@ class CognitiveRuntime:
         )
 
     def _collect_intentions(self) -> list[Intention]:
+        """Candidate intentions of the current episode (episode_id filter, not timestamps)."""
         intentions: list[Intention] = []
-        current_episode_start = getattr(self, "_current_episode_start", 0.0)
-        entries = self.workspace.read(limit=100, type_filter={EntryType.INTENTION})
-        for entry in entries:
+        for entry in self.workspace.view():
+            if entry.type != EntryType.INTENTION:
+                continue
             candidate = entry.metadata.get("intention")
-            if isinstance(candidate, Intention) and entry.timestamp >= current_episode_start:
+            if isinstance(candidate, Intention):
                 intentions.append(candidate)
         return intentions
 

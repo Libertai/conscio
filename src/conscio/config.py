@@ -28,6 +28,24 @@ class AblationFlags:
     llm_appraisal: bool = False  # batched LLM appraisal pass (core-only)
 
 
+@dataclass(frozen=True)
+class MotivationConfig:
+    """Motivation v2 knobs: DriveScheduler weights/constants, goal-diversity
+    threshold, and the stale-task watchdog. Tunable via the [motivation] TOML
+    table; defaults mirror the module constants in goals.py / autonomy.py."""
+
+    w_priority: float = 0.35
+    w_appetite: float = 0.35
+    w_aging: float = 0.20
+    w_novelty: float = 0.10
+    aging_tau_seconds: float = 21600.0
+    satiate_step: float = 0.25
+    satiation_decay: float = 0.98
+    goal_dup_threshold: float = 0.88
+    stale_flag_days: float = 2.0
+    stale_block_days: float = 5.0
+
+
 @dataclass
 class ServiceConfig:
     home: Path = DEFAULT_HOME
@@ -58,6 +76,7 @@ class ServiceConfig:
     working_directory: Path = field(default_factory=Path.cwd)
     pause_on_error: bool = True
     ablation: AblationFlags = field(default_factory=AblationFlags)
+    motivation: MotivationConfig = field(default_factory=MotivationConfig)
     max_ticks: int = 8
     tool_rounds_per_tick: int = 4
     max_reflections: int = 2
@@ -123,6 +142,7 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
     tools = raw.get("tools", {})
     engine = raw.get("engine", {})
     ablation = raw.get("ablation", {})
+    motivation = raw.get("motivation", {})
 
     cfg = ServiceConfig(
         home=_as_path(service.get("home"), config_path.parent if config_path.name == "config.toml" else DEFAULT_HOME),
@@ -182,6 +202,18 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
             constraint_judge=bool(ablation.get("constraint_judge", False)),
             llm_appraisal=bool(ablation.get("llm_appraisal", False)),
         ),
+        motivation=MotivationConfig(
+            w_priority=float(motivation.get("w_priority", 0.35)),
+            w_appetite=float(motivation.get("w_appetite", 0.35)),
+            w_aging=float(motivation.get("w_aging", 0.20)),
+            w_novelty=float(motivation.get("w_novelty", 0.10)),
+            aging_tau_seconds=float(motivation.get("aging_tau_seconds", 21600.0)),
+            satiate_step=float(motivation.get("satiate_step", 0.25)),
+            satiation_decay=float(motivation.get("satiation_decay", 0.98)),
+            goal_dup_threshold=float(motivation.get("goal_dup_threshold", 0.88)),
+            stale_flag_days=float(motivation.get("stale_flag_days", 2.0)),
+            stale_block_days=float(motivation.get("stale_block_days", 5.0)),
+        ),
         max_ticks=int(engine.get("max_ticks", 8)),
         tool_rounds_per_tick=int(engine.get("tool_rounds_per_tick", 4)),
         max_reflections=int(engine.get("max_reflections", 2)),
@@ -239,6 +271,18 @@ tool_rounds_per_tick = 4
 max_reflections = 2
 attention_broadcast_limit = 6
 attention_char_budget = 4000
+
+[motivation]
+w_priority = 0.35
+w_appetite = 0.35
+w_aging = 0.2
+w_novelty = 0.1
+aging_tau_seconds = 21600
+satiate_step = 0.25
+satiation_decay = 0.98
+goal_dup_threshold = 0.88
+stale_flag_days = 2.0
+stale_block_days = 5.0
 
 [ablation]
 attention_gating = true

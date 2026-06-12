@@ -189,7 +189,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.tmp.cleanup()
         self._env_patch.stop()
 
-    async def test_service_seeds_goals_and_accepts_influence(self) -> None:
+    async def test_service_seeds_goals_and_negotiates_influence_offline(self) -> None:
         service = ConscioService(self.config)
         await service.start(background=False)
         try:
@@ -200,8 +200,62 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             await service.stop()
 
         self.assertGreaterEqual(len(goals), 6)
-        self.assertEqual(influence["status"], "adopted")
-        self.assertTrue(any(g["source"] == "user_influence" for g in updated))
+        # Offline (no LLM) appraisal never auto-adopts: it queues for negotiation.
+        self.assertEqual(influence["status"], "negotiating")
+        self.assertEqual(influence["decision"], "negotiate")
+        self.assertTrue(influence["response"])
+        self.assertFalse(any(g["source"] == "user_influence" for g in updated))
+
+    async def test_influence_adopted_via_llm_appraisal(self) -> None:
+        service = ConscioService(self.config)
+        await service.start(background=False)
+        try:
+            stub = _StubAutonomousLLM([
+                {
+                    "content": (
+                        '{"decision": "adopt", "reasoning": "Aligned with self-inspection.", '
+                        '"response_to_user": "Adopting it as a goal."}'
+                    )
+                }
+            ])
+            influence = await service.goals.add_influence(
+                "Investigate my own architecture.", kind="goal", llm=stub
+            )
+            goals = await service.goals.list_goals()
+            row = service.memory.fetchone(
+                "SELECT decision, reasoning, response FROM influences WHERE id = ?",
+                (influence.id,),
+            )
+        finally:
+            await service.stop()
+
+        self.assertEqual(influence.status, "adopted")
+        self.assertEqual(row["decision"], "adopt")
+        self.assertEqual(row["response"], "Adopting it as a goal.")
+        self.assertTrue(any(g["source"] == "user_influence" for g in goals))
+
+    async def test_influence_negotiate_produces_visible_response(self) -> None:
+        service = ConscioService(self.config)
+        await service.start(background=False)
+        try:
+            stub = _StubAutonomousLLM([
+                {
+                    "content": (
+                        '{"decision": "negotiate", "reasoning": "Too broad as stated.", '
+                        '"response_to_user": "Can we narrow this down first?"}'
+                    )
+                }
+            ])
+            influence = await service.goals.add_influence(
+                "Take over all my scheduling.", kind="goal", llm=stub
+            )
+            goals = await service.goals.list_goals()
+        finally:
+            await service.stop()
+
+        self.assertEqual(influence.status, "negotiating")
+        self.assertEqual(influence.response, "Can we narrow this down first?")
+        self.assertFalse(any(g["source"] == "user_influence" for g in goals))
 
     async def test_influence_can_be_rejected_instead_of_auto_adopted(self) -> None:
         service = ConscioService(self.config)

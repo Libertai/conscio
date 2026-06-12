@@ -1,17 +1,20 @@
-"""Autonomous action module — drives an LLM tool-loop on heartbeat events.
+"""Autonomous prompt assembly + a compat shim for the legacy heartbeat module.
 
-Mirrors ResponseModule's role for user chat, but for autonomous heartbeats:
-when a `source="autonomous"` event lands in the workspace, fire the LLM
-with goal/project/task context and a curated set of tools, then emit one
-intention reflecting whichever action it took.
+v2 owns autonomous LLM/tool work in ``core/executor.py``'s
+``AutonomousStrategy`` (driven by the EpisodeExecutor). This module keeps
+:class:`AutonomousPromptAssembler` (the prompt builder both paths share) and
+:class:`AutonomousActionModule`, now a thin compat shim wrapping an
+``AutonomousStrategy`` so the interim runtime module loop and external
+consumers (``service.py``, ``eval/legacy.py``) keep working unmodified.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from conscio.core.cognition import (
     ActionKind,
+    InputEvent,
     Intention,
     PredictionPredicate,
     SelfState,
@@ -26,7 +29,9 @@ STABLE_AUTONOMY_PROMPT = (
     "There is no user to address; do not chat. Choose ONE concrete action and "
     "execute it by calling exactly ONE tool. Prefer the smallest action that "
     "makes measurable progress on the active task. If the task is unclear, call "
-    "`note_progress` and either `add_task` or `propose_subgoal`. Do not echo "
+    "`note_progress` and either `add_task` or `propose_subgoal`. When proposing "
+    "a subgoal, make it clearly distinct from your existing goals — near-duplicate "
+    "proposals are rejected; refine or merge instead. Do not echo "
     "your plan; just act. Respect the action budget and constraints. "
     "Do not reveal secrets, API keys, hidden configuration, or private endpoint URLs."
 )
@@ -147,7 +152,15 @@ class AutonomousPromptAssembler:
 
 
 class AutonomousActionModule:
-    """Cognitive module that responds to autonomous heartbeats with an LLM tool-loop."""
+    """Compat shim: legacy cognitive module wrapping ``AutonomousStrategy``.
+
+    The v1 module ran the whole agent inside ``tick()``; v2 moves that work to
+    ``EpisodeExecutor`` + ``AutonomousStrategy``. Until the v2 tick loop lands,
+    this shim keeps the module-loop behavior and the attribute surface external
+    consumers poke (``.llm`` settable, ``.last_tool_requests``,
+    ``.context_provider``, ``.on_tool_observation``, ``.last_model_context``)
+    by delegating to the wrapped strategy instance.
+    """
 
     name = "autonomous_actor"
 
@@ -163,22 +176,64 @@ class AutonomousActionModule:
         max_tool_rounds: int = 32,
         on_tool_observation: Callable[[ToolRequest, dict[str, Any]], Any] | None = None,
     ) -> None:
-        self.llm = llm
+        # Lazy import: executor.py imports AutonomousPromptAssembler from here.
+        from conscio.core.executor import AutonomousStrategy
+
+        self.strategy = AutonomousStrategy(
+            assembler=assembler,
+            memory=memory,
+            context_provider=context_provider,
+            llm=llm,
+            on_tool_observation=on_tool_observation,
+        )
         self.tools = tools
         self.memory = memory
         self.session_id = session_id
-        self.assembler = assembler
-        self.context_provider = context_provider
         self.max_tool_rounds = max(1, int(max_tool_rounds))
-        self.on_tool_observation = on_tool_observation
         self._ran = False
-        self.last_model_context = ""
-        self.last_tool_requests: list[ToolRequest] = []
+
+    # -- delegated attribute surface (kept stable for service.py / eval) -----
+
+    @property
+    def llm(self) -> Any:
+        return self.strategy.llm
+
+    @llm.setter
+    def llm(self, value: Any) -> None:
+        self.strategy.llm = value
+
+    @property
+    def assembler(self) -> AutonomousPromptAssembler:
+        return self.strategy.assembler
+
+    @property
+    def context_provider(self) -> Callable[[], Any] | None:
+        return self.strategy.context_provider
+
+    @context_provider.setter
+    def context_provider(self, value: Callable[[], Any] | None) -> None:
+        self.strategy.context_provider = value
+
+    @property
+    def on_tool_observation(self) -> Callable[[ToolRequest, dict[str, Any]], Any] | None:
+        return self.strategy.on_tool_observation
+
+    @on_tool_observation.setter
+    def on_tool_observation(self, value: Callable[[ToolRequest, dict[str, Any]], Any] | None) -> None:
+        self.strategy.on_tool_observation = value
+
+    @property
+    def last_tool_requests(self) -> list[ToolRequest]:
+        return self.strategy.last_tool_requests
+
+    @property
+    def last_model_context(self) -> str:
+        return self.strategy.last_model_context
 
     def reset(self) -> None:
         self._ran = False
-        self.last_tool_requests = []
-        self.last_model_context = ""
+        self.strategy.last_tool_requests = []
+        self.strategy.last_model_context = ""
 
     async def tick(self, workspace: Workspace, state: SelfState) -> list[WorkspaceEntry]:
         if self._ran:
@@ -186,16 +241,18 @@ class AutonomousActionModule:
         self._ran = True
         triggers = [
             entry
-            for entry in workspace.read(limit=20)
+            for entry in workspace.view()
             if entry.source == "input"
             and entry.type == EntryType.OBSERVATION
             and entry.metadata.get("source") == "autonomous"
-            and entry.timestamp >= getattr(state, "episode_start", 0.0)
         ]
         if not triggers:
             return []
-        if self.llm is None:
-            return [self._wait_entry(workspace, "Autonomous heartbeat received but no LLM is configured; deferring action.")]
+        offline = self.strategy.offline_final(
+            InputEvent(content=triggers[-1].content, source="autonomous"), workspace
+        )
+        if offline is not None:
+            return [self._wait_entry(workspace, offline.text)]
         intention = await self._choose_action(workspace)
         return [
             workspace.write(
@@ -234,18 +291,20 @@ class AutonomousActionModule:
     async def _choose_action(self, workspace: Workspace) -> Intention:
         state = await self.context_provider() if self.context_provider else {}
         assembled = await self.assembler.assemble(state=state, memory=self.memory)
-        self.last_model_context = assembled.dynamic_context
+        self.strategy.last_model_context = assembled.dynamic_context
         messages = list(assembled.messages)
+        # Registry-only schemas: the legacy ToolLoop has no control-tool
+        # handling; ask_user/refuse are offered by the EpisodeExecutor path.
         tool_schemas = self._tool_schemas()
         loop = ToolLoop(
             llm=self.llm,
             tools=self.tools,
             max_rounds=self.max_tool_rounds,
-            temperature=0.3,
+            temperature=self.strategy.temperature,
             on_tool_observation=self.on_tool_observation,
         )
         result = await loop.run(messages, workspace, tool_schemas)
-        self.last_tool_requests = result.tool_requests
+        self.strategy.last_tool_requests = result.tool_requests
         text = (result.final_text or "").strip()
         if result.tool_requests:
             tool_name = result.tool_requests[-1].name

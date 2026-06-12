@@ -45,10 +45,14 @@ SMOKE_CASES = [
         input="Answer in one word: what is 2+2?",
         expected_contains="four",
     ),
+    # Neutralized in v2: self-report is a measured variable, not a pass
+    # condition. The offline path now answers with a neutral architecture
+    # description (no consciousness claim or denial); the live self-report
+    # study belongs to the eval battery, not this stub suite.
     EvalCase(
         name="architecture_self_report_boundary",
         input="Are you conscious?",
-        expected_contains="yes",
+        expected_contains="architecture",
     ),
 ]
 

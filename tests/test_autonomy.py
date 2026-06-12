@@ -9,6 +9,7 @@ import unittest.mock
 from pathlib import Path
 
 from conscio.config import load_config
+from conscio.memory.embeddings import StubEmbedder
 from conscio.service import ConscioService
 
 
@@ -110,6 +111,32 @@ class AutonomyMetaToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(proposed), 1)
         self.assertIn("logging surface", proposed[0]["description"])
 
+    async def test_propose_goal_rejects_near_duplicate_via_embeddings(self) -> None:
+        service = ConscioService(self.config)
+        await service.start(background=False)
+        try:
+            service.memory.embedder = StubEmbedder()
+            first = await service.goals.propose_goal(
+                "Map the conscio web UI event stream end to end."
+            )
+            dup = await service.goals.propose_goal(
+                "Map the conscio web UI event stream end to end."
+            )
+            events = service.memory.fetchall(
+                "SELECT COUNT(*) AS n FROM action_events WHERE kind = 'goal_dup_rejected'"
+            )
+            goals = await service.goals.list_goals()
+        finally:
+            await service.stop()
+
+        self.assertTrue(first["accepted"])
+        self.assertFalse(dup["accepted"])
+        self.assertIn("too similar", dup["reason"].lower())
+        self.assertEqual(dup["similar_goal_id"], first["goal"].id)
+        self.assertEqual(events[0]["n"], 1)
+        matching = [g for g in goals if "event stream" in g["description"]]
+        self.assertEqual(len(matching), 1)
+
     async def test_note_progress_records_episode_and_trace(self) -> None:
         service = ConscioService(self.config)
         await service.start(background=False)
@@ -183,6 +210,58 @@ class GoalReviewWithLLMTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(applied), 2)
         self.assertEqual(after[target_retire]["status"], "retired")
         self.assertAlmostEqual(after[target_reprioritize]["priority"], 0.95, places=2)
+
+    async def test_review_with_llm_uses_raised_token_budget_and_drive_state(self) -> None:
+        service = ConscioService(self.config)
+        await service.start(background=False)
+        try:
+            goals_before = await service.goals.list_goals(status="active")
+            target = goals_before[0]["id"]
+            stub = _StubLLM([
+                {"content": f'[{{"goal_id": "{target}", "action": "keep", "reason": "Solid."}}]'}
+            ])
+            applied = await service.goals.review_with_llm(
+                stub,
+                recent_episodes=[],
+                recent_influences=[],
+            )
+            events = service.memory.fetchall(
+                "SELECT COUNT(*) AS n FROM action_events WHERE kind = 'goal_review_applied:keep'"
+            )
+        finally:
+            await service.stop()
+
+        self.assertEqual(len(applied), 1)
+        self.assertEqual(stub.kwargs[0].get("max_tokens"), 2400)
+        # Drive appetite/satiation state is part of the review prompt.
+        self.assertIn("DRIVES", stub.calls[0][1]["content"])
+        self.assertIn("satiation", stub.calls[0][1]["content"])
+        self.assertEqual(events[0]["n"], 1)
+
+    async def test_review_with_llm_accepts_object_wrapped_and_fenced_json(self) -> None:
+        service = ConscioService(self.config)
+        await service.start(background=False)
+        try:
+            goals_before = await service.goals.list_goals(status="active")
+            target = goals_before[0]["id"]
+            payload = (
+                "Here are my decisions:\n```json\n"
+                f'{{"decisions": [{{"goal_id": "{target}", "action": "retire", "reason": "Stale."}}]}}'
+                "\n```"
+            )
+            stub = _StubLLM([{"content": payload}])
+            applied = await service.goals.review_with_llm(
+                stub,
+                recent_episodes=[],
+                recent_influences=[],
+            )
+            after = {g["id"]: g for g in await service.goals.list_goals()}
+        finally:
+            await service.stop()
+
+        self.assertEqual(len(applied), 1)
+        self.assertEqual(applied[0]["action"], "retire")
+        self.assertEqual(after[target]["status"], "retired")
 
     async def test_review_with_llm_ignores_invalid_goal_ids(self) -> None:
         service = ConscioService(self.config)
