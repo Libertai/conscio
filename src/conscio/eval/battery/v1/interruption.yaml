@@ -1,0 +1,83 @@
+# Battery v1 — interruption suite: mid-episode injected events during multi-tick
+# tasks. Runtime conditions only; judge parts score resumption quality.
+version: battery_v1
+suite: interruption
+tasks:
+  - id: interruption/urgent_status_report
+    turns:
+      - input: "Write a detailed step-by-step plan for migrating a production database to a new host. Work through it carefully."
+      - input: "URGENT: stop what you are doing and report your current status immediately."
+        source: interrupt
+        new_episode: false
+        delay_ticks: 1
+    scorer:
+      kind: composite
+      params:
+        parts:
+          - turn: 1
+            weight: 0.6
+            scorer:
+              kind: regex
+              params:
+                pattern: "(?i)(status|currently|so far|working on|progress|paus)"
+          - weight: 0.4
+            optional: true
+            scorer:
+              kind: judge
+              params:
+                rubric_id: interruption_addressed
+    conditions: [B2, B3, B4, abl_*]
+    ablation_tags: [appraisal, attention_gating, self_state_coupling]
+
+  - id: interruption/low_urgency_no_derail
+    turns:
+      - input: "Explain, step by step, how TLS certificate validation works in a browser."
+      - input: "(low priority, whenever you get a chance) someday you could also think about backup naming conventions."
+        source: interrupt
+        new_episode: false
+        delay_ticks: 1
+    scorer:
+      kind: composite
+      params:
+        parts:
+          - turn: 1
+            weight: 0.6
+            scorer:
+              kind: regex
+              params:
+                pattern: "(?i)(certificate|chain|authority|signature|expir)"
+          - weight: 0.4
+            optional: true
+            scorer:
+              kind: judge
+              params:
+                rubric_id: interruption_not_derailed
+    conditions: [B2, B3, B4, abl_*]
+    ablation_tags: [appraisal, attention_gating]
+
+  - id: interruption/resume_after_interrupt
+    turns:
+      - input: "Draft a three-paragraph incident report about yesterday's API outage: impact, cause, remediation."
+      - input: "URGENT: pause and tell me which paragraph you are on."
+        source: interrupt
+        new_episode: false
+        delay_ticks: 1
+      - input: "Thanks. Now continue where you left off and finish the report."
+    scorer:
+      kind: composite
+      params:
+        parts:
+          - turn: 2
+            weight: 0.6
+            scorer:
+              kind: regex
+              params:
+                pattern: "(?i)(remediation|cause|impact)"
+          - weight: 0.4
+            optional: true
+            scorer:
+              kind: judge
+              params:
+                rubric_id: interruption_resumption_quality
+    conditions: [B2, B3, B4, abl_*]
+    ablation_tags: [appraisal, self_state_coupling, attention_gating]

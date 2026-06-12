@@ -123,6 +123,34 @@ class LLMClient:
             ]
         return result
 
+    async def embed_batch(
+        self, texts: list[str], *, model: str = "bge-m3"
+    ) -> list[list[float]] | None:
+        """Returns one 1024-float vector per input, or None if the endpoint errors."""
+        try:
+            resp = await self.async_.embeddings.create(model=model, input=texts)
+            return [d.embedding for d in resp.data]
+        except Exception:
+            return None
+
+    async def embed(self, text: str, *, model: str = "bge-m3") -> list[float] | None:
+        out = await self.embed_batch([text], model=model)
+        return out[0] if out else None
+
+    def embed_batch_sync(
+        self, texts: list[str], *, model: str = "bge-m3"
+    ) -> list[list[float]] | None:
+        """Sync variant of embed_batch (mirrors chat/chat_async pairing)."""
+        try:
+            resp = self.sync.embeddings.create(model=model, input=texts)
+            return [d.embedding for d in resp.data]
+        except Exception:
+            return None
+
+    def embed_sync(self, text: str, *, model: str = "bge-m3") -> list[float] | None:
+        out = self.embed_batch_sync([text], model=model)
+        return out[0] if out else None
+
     async def chat_stream(
         self,
         messages: list[dict],

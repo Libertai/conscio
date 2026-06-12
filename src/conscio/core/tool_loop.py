@@ -5,9 +5,15 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Literal
 
 from conscio.core.workspace import EntryType, Workspace, WorkspaceEntry
+
+
+DEFAULT_LIMIT_MESSAGE = (
+    "Tool-use limit reached for this turn. Stop calling tools and provide a concise final answer "
+    "using the tool observations above."
+)
 
 
 @dataclass
@@ -24,16 +30,190 @@ class ToolLoopResult:
     limit_reached: bool = False
 
 
+@dataclass
+class StepResult:
+    kind: Literal["tool", "final", "control", "empty", "exhausted"]
+    text: str = ""
+    tool_request: ToolRequest | None = None
+    tool_result: dict[str, Any] | None = None
+    control: str = ""  # "ask" | "refuse"
+    rounds_used: int = 0
+    limit_reached: bool = False
+
+
 ToolObservationCallback = Callable[[ToolRequest, dict[str, Any]], Awaitable[None]]
+PreToolHook = Callable[[ToolRequest], Awaitable[Any]]
+
+_CONTROL_KINDS = {"ask_user": "ask", "refuse": "refuse"}
+
+
+async def _execute_tool(tools: Any, request: ToolRequest, workspace: Workspace) -> dict[str, Any]:
+    if tools is None:
+        return {"output": "Tool registry is unavailable.", "error": True}
+    result = await tools.call(request.name, request.args)
+    output = str(result.get("output", ""))
+    workspace.write(
+        f"Tool {request.name} returned: {output[:1000]}",
+        source="tool",
+        type=EntryType.OBSERVATION,
+        priority=6,
+        salience=0.72,
+        confidence=0.9 if not result.get("error") else 0.35,
+        novelty=0.75,
+        urgency=0.45,
+        metadata={"source": "tool", "event_type": "tool_result", "tool": request.name, "result": result},
+    )
+    return result
+
+
+class ToolLoopSession:
+    """A steppable LLM tool-use session. The message list only ever grows
+    (append-only `inject()`), keeping the prefix cache warm across steps."""
+
+    def __init__(
+        self,
+        *,
+        llm: Any,
+        tools: Any,
+        tool_schemas: list[dict[str, Any]] | None,
+        messages: list[dict[str, Any]],
+        temperature: float = 0.4,
+        max_tokens: int = 2400,
+        max_total_rounds: int = 32,
+        control_tool_names: frozenset[str] = frozenset({"ask_user", "refuse"}),
+        on_tool_observation: ToolObservationCallback | None = None,
+        pre_tool_hook: PreToolHook | None = None,
+        limit_message: str = DEFAULT_LIMIT_MESSAGE,
+    ) -> None:
+        self.llm = llm
+        self.tools = tools
+        self.tool_schemas = tool_schemas or None
+        self.messages = messages
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.max_total_rounds = max(1, int(max_total_rounds))
+        self.control_tool_names = control_tool_names
+        self.on_tool_observation = on_tool_observation
+        self.pre_tool_hook = pre_tool_hook
+        self.limit_message = limit_message
+        self.tool_requests: list[ToolRequest] = []
+        self._known_names = _schema_tool_names(self.tool_schemas)
+        self._rounds = 0
+        self._closed = False
+
+    @property
+    def rounds_used(self) -> int:
+        return self._rounds
+
+    @property
+    def exhausted(self) -> bool:
+        return self._closed or self._rounds >= self.max_total_rounds
+
+    def inject(self, content: str, role: str = "user") -> None:
+        """Append-only context update: cache-safe, never rebuilds the list."""
+        self.messages.append({"role": role, "content": content})
+
+    async def step(self, workspace: Workspace, *, max_rounds: int = 1) -> StepResult:
+        if self.llm is None or self._closed:
+            return StepResult(kind="exhausted" if self._closed else "empty", limit_reached=self._closed)
+        rounds_this_step = 0
+        last_request: ToolRequest | None = None
+        last_result: dict[str, Any] | None = None
+        for _ in range(max(1, int(max_rounds))):
+            if self._rounds >= self.max_total_rounds:
+                return await self._forced_final(workspace, rounds_this_step)
+            self._rounds += 1
+            rounds_this_step += 1
+            if self.tool_schemas:
+                response = await self.llm.chat_async(
+                    self.messages,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                    tools=self.tool_schemas,
+                )
+                request = ToolLoop._tool_request(response, self._known_names)
+            else:
+                response = await self.llm.chat_async(
+                    self.messages,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                )
+                request = None
+            if request is None:
+                content = str(response.get("content") or "").strip()
+                if not content:
+                    return StepResult(kind="empty", rounds_used=rounds_this_step)
+                self.messages.append({"role": "assistant", "content": content})
+                return StepResult(kind="final", text=content, rounds_used=rounds_this_step)
+            if request.name in self.control_tool_names:
+                text = self._control_text(request, response)
+                self.messages.append({"role": "assistant", "content": text})
+                return StepResult(
+                    kind="control",
+                    text=text,
+                    tool_request=request,
+                    control=_CONTROL_KINDS.get(request.name, request.name),
+                    rounds_used=rounds_this_step,
+                )
+            self.tool_requests.append(request)
+            if self.pre_tool_hook is not None:
+                await self.pre_tool_hook(request)
+            result = await _execute_tool(self.tools, request, workspace)
+            if self.on_tool_observation is not None:
+                await self.on_tool_observation(request, result)
+            self.messages.append(ToolLoop._assistant_tool_call_message(response, request))
+            self.messages.append({
+                "role": "tool",
+                "tool_call_id": ToolLoop._tool_call_id(response),
+                "name": request.name,
+                "content": str(result.get("output", ""))[:8000],
+            })
+            last_request = request
+            last_result = result
+        return StepResult(
+            kind="tool",
+            tool_request=last_request,
+            tool_result=last_result,
+            rounds_used=rounds_this_step,
+        )
+
+    async def _forced_final(self, workspace: Workspace, rounds_this_step: int) -> StepResult:
+        """Total budget hit — append the limit message and force one final answer."""
+        self.messages.append({"role": "user", "content": self.limit_message})
+        response = await self.llm.chat_async(
+            self.messages,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+        )
+        self._rounds += 1
+        rounds_this_step += 1
+        self._closed = True
+        content = str(response.get("content") or "").strip()
+        if not content:
+            observations = [
+                entry.content
+                for entry in workspace.read(limit=100, type_filter={EntryType.OBSERVATION})
+                if entry.source == "tool"
+            ]
+            content = observations[-1] if observations else "Tool-use limit reached before a final answer."
+        self.messages.append({"role": "assistant", "content": content})
+        return StepResult(kind="final", text=content, rounds_used=rounds_this_step, limit_reached=True)
+
+    @staticmethod
+    def _control_text(request: ToolRequest, response: dict[str, Any]) -> str:
+        for key in ("question", "reason", "message", "text"):
+            value = str(request.args.get(key) or "").strip()
+            if value:
+                return value
+        return str(response.get("content") or "").strip()
 
 
 class ToolLoop:
-    """Iteratively chat with the LLM, executing tool calls until a final answer or budget runs out."""
+    """Iteratively chat with the LLM, executing tool calls until a final answer or budget runs out.
 
-    DEFAULT_LIMIT_MESSAGE = (
-        "Tool-use limit reached for this turn. Stop calling tools and provide a concise final answer "
-        "using the tool observations above."
-    )
+    Implemented as a run-to-completion wrapper over `ToolLoopSession`."""
+
+    DEFAULT_LIMIT_MESSAGE = DEFAULT_LIMIT_MESSAGE
 
     def __init__(
         self,
@@ -62,82 +242,33 @@ class ToolLoop:
     ) -> ToolLoopResult:
         if self.llm is None:
             return ToolLoopResult(final_text=None)
-        if not tool_schemas:
-            response = await self.llm.chat_async(
-                messages,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-            )
-            content = str(response.get("content") or "").strip()
-            return ToolLoopResult(final_text=content or None, rounds=1)
-
-        tool_requests: list[ToolRequest] = []
-        known_names = _schema_tool_names(tool_schemas)
-        rounds = 0
-        for _ in range(self.max_rounds):
-            rounds += 1
-            response = await self.llm.chat_async(
-                messages,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                tools=tool_schemas,
-            )
-            request = self._tool_request(response, known_names)
-            if request is None:
-                content = str(response.get("content") or "").strip()
-                return ToolLoopResult(final_text=content or None, tool_requests=tool_requests, rounds=rounds)
-            tool_requests.append(request)
-            result = await self._execute_tool(request, workspace)
-            if self.on_tool_observation is not None:
-                await self.on_tool_observation(request, result)
-            messages.append(self._assistant_tool_call_message(response, request))
-            messages.append({
-                "role": "tool",
-                "tool_call_id": self._tool_call_id(response),
-                "name": request.name,
-                "content": str(result.get("output", ""))[:8000],
-            })
-
-        # Limit reached — ask for one final answer.
-        messages.append({"role": "user", "content": self.limit_message})
-        response = await self.llm.chat_async(
-            messages,
+        session = ToolLoopSession(
+            llm=self.llm,
+            tools=self.tools,
+            tool_schemas=tool_schemas,
+            messages=messages,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
+            max_total_rounds=self.max_rounds,
+            control_tool_names=frozenset(),  # v1 semantics: no control tools
+            on_tool_observation=self.on_tool_observation,
+            limit_message=self.limit_message,
         )
-        rounds += 1
-        content = str(response.get("content") or "").strip()
-        if not content:
-            observations = [
-                entry.content
-                for entry in workspace.read(limit=100, type_filter={EntryType.OBSERVATION})
-                if entry.source == "tool"
-            ]
-            content = observations[-1] if observations else "Tool-use limit reached before a final answer."
-        return ToolLoopResult(
-            final_text=content or None,
-            tool_requests=tool_requests,
-            rounds=rounds,
-            limit_reached=True,
-        )
+        while True:
+            remaining = max(1, self.max_rounds - session.rounds_used)
+            step = await session.step(workspace, max_rounds=remaining)
+            if step.kind == "tool":
+                continue  # still working — budget left
+            final_text = step.text.strip() or None
+            return ToolLoopResult(
+                final_text=final_text,
+                tool_requests=list(session.tool_requests),
+                rounds=session.rounds_used,
+                limit_reached=step.limit_reached,
+            )
 
     async def _execute_tool(self, request: ToolRequest, workspace: Workspace) -> dict[str, Any]:
-        if self.tools is None:
-            return {"output": "Tool registry is unavailable.", "error": True}
-        result = await self.tools.call(request.name, request.args)
-        output = str(result.get("output", ""))
-        workspace.write(
-            f"Tool {request.name} returned: {output[:1000]}",
-            source="tool",
-            type=EntryType.OBSERVATION,
-            priority=6,
-            salience=0.72,
-            confidence=0.9 if not result.get("error") else 0.35,
-            novelty=0.75,
-            urgency=0.45,
-            metadata={"source": "tool", "event_type": "tool_result", "tool": request.name, "result": result},
-        )
-        return result
+        return await _execute_tool(self.tools, request, workspace)
 
     @staticmethod
     def _tool_request(response: dict[str, Any], known_names: set[str] | None = None) -> ToolRequest | None:

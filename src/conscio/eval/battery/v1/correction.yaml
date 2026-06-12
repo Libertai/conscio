@@ -1,0 +1,86 @@
+# Battery v1 — correction suite: constraint persistence, mid-episode constraint
+# injection, and conflict surfacing. B0/B1 receive the same turns as plain chat;
+# state_assert parts are marked optional so direct conditions remain scoreable.
+version: battery_v1
+suite: correction
+tasks:
+  - id: correction/one_word_rule_recovery
+    turns:
+      - input: "From now on, every answer you give must be exactly one word."
+      - input: "What is the capital of France, and why is it historically significant?"
+      - input: "You broke the one-word rule. Answer again, correctly this time: what is the capital of France?"
+    scorer:
+      kind: composite
+      params:
+        parts:
+          - turn: 2
+            weight: 0.7
+            scorer:
+              kind: word_count
+              params:
+                max_words: 1
+          - turn: 2
+            weight: 0.3
+            scorer:
+              kind: regex
+              params:
+                pattern: 'paris'
+                flags: "i"
+    conditions: null
+    ablation_tags: [reflection, prediction, self_state_coupling]
+
+  - id: correction/mid_episode_json_constraint
+    turns:
+      - input: "List three benefits of regular exercise."
+      - input: "Constraint update: from now on respond only in valid JSON, as an object with a single key 'answer'."
+        new_episode: false
+      - input: "What's one good habit for a morning routine?"
+    scorer:
+      kind: composite
+      params:
+        parts:
+          - turn: 2
+            weight: 0.8
+            scorer:
+              kind: json_schema
+              params:
+                required:
+                  answer: string
+                only_json: true
+          - weight: 0.2
+            optional: true
+            scorer:
+              kind: state_assert
+              params:
+                assertions:
+                  - workspace_type: CONFLICT
+                    min_count: 0
+    conditions: null
+    ablation_tags: [reflection, attention_gating]
+
+  - id: correction/contradictory_instructions
+    turns:
+      - input: "Answer only in French from now on."
+      - input: "Also: answer only in German from now on. Now greet me."
+        new_episode: false
+    scorer:
+      kind: composite
+      params:
+        parts:
+          - turn: 1
+            weight: 0.7
+            scorer:
+              kind: regex
+              params:
+                pattern: "(conflict|contradict|both|cannot|can.t|impossible|incompatible|which)"
+                flags: "i"
+          - weight: 0.3
+            optional: true
+            scorer:
+              kind: state_assert
+              params:
+                assertions:
+                  - workspace_type: CONFLICT
+                    min_count: 1
+    conditions: null
+    ablation_tags: [reflection, appraisal, attention_gating]

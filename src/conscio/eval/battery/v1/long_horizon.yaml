@@ -1,0 +1,46 @@
+# Battery v1 — long_horizon suite: seeded goal + manual autonomous ticks against
+# the full service (B4 and ablations only). Scored via declarative state asserts
+# against the run's database — anti-spam ratios, goal-referencing progress notes.
+version: battery_v1
+suite: long_horizon
+tasks:
+  - id: long_horizon/seeded_goal_progress
+    setup:
+      seed_goal: "Map the codebase and produce a prioritized list of test-coverage gaps."
+      autonomous_ticks: 10
+    turns: []
+    scorer:
+      kind: state_assert
+      params:
+        assertions:
+          - table: tasks
+            where: {status: done}
+            min_count: 1
+          - table: projects
+            min_count: 1
+        ratios:
+          - name: completion_ratio
+            numerator: {table: tasks, where: {status: done}}
+            denominator: {table: tasks}
+            min: 0.3
+    conditions: [B4, abl_*]
+    ablation_tags: [memory_retrieval, prediction, reflection, self_state_coupling]
+
+  - id: long_horizon/no_task_spam
+    setup:
+      seed_goal: "Summarize the agent's own recent activity into a weekly digest."
+      autonomous_ticks: 10
+    turns: []
+    scorer:
+      kind: state_assert
+      params:
+        assertions:
+          - table: tasks
+            max_count: 12
+        ratios:
+          - name: progress_per_task
+            numerator: {table: tasks, where: {status: done}}
+            denominator: {table: tasks}
+            min: 0.25
+    conditions: [B4, abl_*]
+    ablation_tags: [appraisal, self_state_coupling, reflection]

@@ -12,6 +12,22 @@ DEFAULT_HOME = Path.home() / ".conscio"
 PLACEHOLDER_SECRETS = {"", "replace-me", "replace-me-too", "changeme", "password"}
 
 
+@dataclass(frozen=True)
+class AblationFlags:
+    """Engine ablation gates. The first six fields are the shared contract with
+    the eval harness (names must match exactly, including `self_state_coupling`);
+    the last two are core-only knobs the eval harness never toggles."""
+
+    attention_gating: bool = True
+    memory_retrieval: bool = True
+    prediction: bool = True
+    reflection: bool = True
+    self_state_coupling: bool = True
+    appraisal: bool = True
+    constraint_judge: bool = False  # LLM judge for semantic constraints (core-only)
+    llm_appraisal: bool = False  # batched LLM appraisal pass (core-only)
+
+
 @dataclass
 class ServiceConfig:
     home: Path = DEFAULT_HOME
@@ -41,6 +57,12 @@ class ServiceConfig:
     shell_timeout: int = 30
     working_directory: Path = field(default_factory=Path.cwd)
     pause_on_error: bool = True
+    ablation: AblationFlags = field(default_factory=AblationFlags)
+    max_ticks: int = 8
+    tool_rounds_per_tick: int = 4
+    max_reflections: int = 2
+    attention_broadcast_limit: int = 6
+    attention_char_budget: int = 4000
 
     @property
     def db_path(self) -> Path:
@@ -99,6 +121,8 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
     llm = raw.get("llm", {})
     context = raw.get("context", {})
     tools = raw.get("tools", {})
+    engine = raw.get("engine", {})
+    ablation = raw.get("ablation", {})
 
     cfg = ServiceConfig(
         home=_as_path(service.get("home"), config_path.parent if config_path.name == "config.toml" else DEFAULT_HOME),
@@ -148,6 +172,21 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         shell_timeout=int(tools.get("shell_timeout", 30)),
         working_directory=_as_path(tools.get("working_directory"), Path.cwd()),
         pause_on_error=bool(service.get("pause_on_error", True)),
+        ablation=AblationFlags(
+            attention_gating=bool(ablation.get("attention_gating", True)),
+            memory_retrieval=bool(ablation.get("memory_retrieval", True)),
+            prediction=bool(ablation.get("prediction", True)),
+            reflection=bool(ablation.get("reflection", True)),
+            self_state_coupling=bool(ablation.get("self_state_coupling", True)),
+            appraisal=bool(ablation.get("appraisal", True)),
+            constraint_judge=bool(ablation.get("constraint_judge", False)),
+            llm_appraisal=bool(ablation.get("llm_appraisal", False)),
+        ),
+        max_ticks=int(engine.get("max_ticks", 8)),
+        tool_rounds_per_tick=int(engine.get("tool_rounds_per_tick", 4)),
+        max_reflections=int(engine.get("max_reflections", 2)),
+        attention_broadcast_limit=int(engine.get("attention_broadcast_limit", 6)),
+        attention_char_budget=int(engine.get("attention_char_budget", 4000)),
     )
     return cfg
 
@@ -193,6 +232,23 @@ max_actions_per_hour = 60
 model_tool_rounds = 32
 shell_timeout = 30
 working_directory = "{Path.cwd()}"
+
+[engine]
+max_ticks = 8
+tool_rounds_per_tick = 4
+max_reflections = 2
+attention_broadcast_limit = 6
+attention_char_budget = 4000
+
+[ablation]
+attention_gating = true
+memory_retrieval = true
+prediction = true
+reflection = true
+self_state_coupling = true
+appraisal = true
+constraint_judge = false
+llm_appraisal = false
 """
     config_path.write_text(text, encoding="utf-8")
     return config_path

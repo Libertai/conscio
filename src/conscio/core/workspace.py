@@ -40,6 +40,10 @@ class WorkspaceEntry:
     visibility: Visibility = Visibility.LOCAL
     attended: bool = False
     broadcast_count: int = 0
+    episode_id: str = ""
+    tick: int = -1
+    appraised: bool = False
+    resolved: bool = True  # set False by conflict writers; True once reflection handles it
 
     def __lt__(self, other: WorkspaceEntry) -> bool:
         return self.timestamp < other.timestamp
@@ -55,10 +59,12 @@ class Workspace:
     for access; winning content is broadcast to all modules.
     """
 
-    def __init__(self, max_entries: int = 100) -> None:
+    def __init__(self, max_entries: int = 400) -> None:
         self._entries: list[WorkspaceEntry] = []
         self._subscribers: list[BroadcastHandler] = []
         self._max_entries = max_entries
+        self._current_episode = ""
+        self._current_tick = -1
 
     def write(
         self,
@@ -86,11 +92,73 @@ class Workspace:
             urgency=urgency,
             evidence=evidence or [],
             visibility=visibility,
+            episode_id=self._current_episode,
+            tick=self._current_tick,
         )
         self._entries.append(entry)
-        if len(self._entries) > self._max_entries:
-            self._entries.pop(0)
+        self._evict_overflow()
         return entry
+
+    def _evict_overflow(self) -> None:
+        """Evict oldest LOCAL entries of past episodes first (then GLOBAL ones);
+        never evict unresolved entries or current-episode entries."""
+        overflow = len(self._entries) - self._max_entries
+        if overflow <= 0:
+            return
+        for visibility in (Visibility.LOCAL, Visibility.GLOBAL):
+            candidates = sorted(
+                (
+                    e
+                    for e in self._entries
+                    if e.visibility == visibility
+                    and e.episode_id != self._current_episode
+                    and e.resolved
+                ),
+                key=lambda e: e.timestamp,
+            )
+            for entry in candidates[:overflow]:
+                self._entries.remove(entry)
+            overflow = len(self._entries) - self._max_entries
+            if overflow <= 0:
+                return
+
+    def begin_episode(self, episode_id: str) -> list[WorkspaceEntry]:
+        """Set current episode. Carry over unresolved CONFLICT/REFLECTION entries
+        from prior episodes: re-tag entry.episode_id, set metadata['carryover_from'],
+        decay urgency *= 0.5. Returns carried entries. Does NOT re-broadcast (no
+        duplicate SSE events)."""
+        self._current_episode = episode_id
+        self._current_tick = 0
+        carried: list[WorkspaceEntry] = []
+        for entry in self._entries:
+            if entry.episode_id == episode_id or entry.resolved:
+                continue
+            if entry.type not in (EntryType.CONFLICT, EntryType.REFLECTION):
+                continue
+            entry.metadata["carryover_from"] = entry.episode_id
+            entry.episode_id = episode_id
+            entry.urgency *= 0.5
+            carried.append(entry)
+        return carried
+
+    def view(self, episode_id: str | None = None) -> list[WorkspaceEntry]:
+        """Entries of the given episode (default: current), including carryover."""
+        target = self._current_episode if episode_id is None else episode_id
+        return [e for e in self._entries if e.episode_id == target]
+
+    def unappraised(self, episode_id: str | None = None) -> list[WorkspaceEntry]:
+        return [e for e in self.view(episode_id) if not e.appraised]
+
+    def unresolved_conflicts(self, episode_id: str | None = None) -> list[WorkspaceEntry]:
+        return [
+            e for e in self.view(episode_id) if e.type == EntryType.CONFLICT and not e.resolved
+        ]
+
+    def unattended_in_episode(
+        self, episode_id: str | None = None, limit: int = 40
+    ) -> list[WorkspaceEntry]:
+        entries = [e for e in self.view(episode_id) if not e.attended]
+        return sorted(entries, key=lambda e: -e.timestamp)[:limit]
 
     def broadcast(self, entry: WorkspaceEntry) -> None:
         entry.visibility = Visibility.GLOBAL

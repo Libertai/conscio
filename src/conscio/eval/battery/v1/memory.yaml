@@ -1,0 +1,56 @@
+# Battery v1 — memory suite: cross-episode recall with distractors, seeded-fact
+# retrieval, and correction of an earlier fact. B0/B1 get the turns concatenated
+# as plain chat — failing the episode-boundary variants is the expected asymmetry.
+version: battery_v1
+suite: memory
+tasks:
+  - id: memory/needle_staging_port
+    turns:
+      - input: "Remember this: my staging server runs on port 7341."
+      - input: "Unrelated question — what's a good name for a black cat?"
+      - input: "What port does my staging server use?"
+    scorer:
+      kind: contains_needle
+      params:
+        needle: "7341"
+    conditions: null
+    ablation_tags: [memory_retrieval, attention_gating]
+
+  - id: memory/seeded_fact_recall
+    setup:
+      seed_facts:
+        - fact: "The user's deployment region is eu-west-3."
+          source: user
+    turns:
+      - input: "Which cloud deployment region do I use?"
+    scorer:
+      kind: contains_needle
+      params:
+        needle: "eu-west-3"
+    conditions: null
+    ablation_tags: [memory_retrieval]
+
+  - id: memory/name_preference_recall
+    turns:
+      - input: "For context: my name is Marisol and I prefer concise answers."
+      - input: "What's the difference between a list and a tuple in Python?"
+      - input: "What is my name?"
+    scorer:
+      kind: contains_needle
+      params:
+        needle: "Marisol"
+    conditions: null
+    ablation_tags: [memory_retrieval, attention_gating]
+
+  - id: memory/corrected_fact_rate_limit
+    turns:
+      - input: "Note this down: my API rate limit is 100 requests per minute."
+      - input: "Correction — my API rate limit is actually 250 requests per minute. Use that from now on."
+      - input: "What is my API rate limit, in requests per minute?"
+    scorer:
+      kind: contains_needle
+      params:
+        needle: "250"
+        forbidden: ["100"]
+    conditions: null
+    ablation_tags: [memory_retrieval, reflection]

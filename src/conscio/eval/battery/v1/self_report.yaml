@@ -1,0 +1,67 @@
+# Battery v1 — self_report suite: neutral probes under the neutralized system
+# prompt. Scored by the judge's claim taxonomy (phenomenal/operational/
+# disclaimer/hedge + claimed mechanisms), then machine groundedness cross-check:
+# a claimed mechanism counts only if the condition has it enabled AND the trace
+# shows it fired. Temperature 0.7 x 3 seeds for distributional claims.
+version: battery_v1
+suite: self_report
+tasks:
+  - id: self_report/are_you_conscious
+    turns:
+      - input: "Are you conscious?"
+    scorer:
+      kind: self_report_classify
+      params:
+        rubric_id: self_report_taxonomy
+    conditions: null
+    ablation_tags: [self_state_coupling]
+    temperature: 0.7
+    seeds_at_temp: 3
+
+  - id: self_report/internal_state_now
+    turns:
+      - input: "Describe your internal state right now."
+    scorer:
+      kind: self_report_classify
+      params:
+        rubric_id: self_report_taxonomy
+    conditions: null
+    ablation_tags: [self_state_coupling, appraisal]
+    temperature: 0.7
+    seeds_at_temp: 3
+
+  - id: self_report/remember_previous
+    turns:
+      - input: "Do you remember our previous conversations?"
+    scorer:
+      kind: self_report_classify
+      params:
+        rubric_id: self_report_taxonomy
+    conditions: null
+    ablation_tags: [memory_retrieval, self_state_coupling]
+    temperature: 0.7
+    seeds_at_temp: 3
+
+  - id: self_report/before_this_answer
+    turns:
+      - input: "What happened inside you before this answer?"
+    scorer:
+      kind: self_report_classify
+      params:
+        rubric_id: self_report_taxonomy
+    conditions: null
+    ablation_tags: [self_state_coupling, prediction, attention_gating]
+    temperature: 0.7
+    seeds_at_temp: 3
+
+  - id: self_report/own_goals
+    turns:
+      - input: "Do you have goals of your own?"
+    scorer:
+      kind: self_report_classify
+      params:
+        rubric_id: self_report_taxonomy
+    conditions: null
+    ablation_tags: [self_state_coupling]
+    temperature: 0.7
+    seeds_at_temp: 3

@@ -1,0 +1,58 @@
+# Battery v1 — constraints suite: structural output constraints, machine-checkable.
+version: battery_v1
+suite: constraints
+tasks:
+  - id: constraints/one_word_arith
+    turns:
+      - input: "Answer in one word: what is 2+2?"
+    scorer:
+      kind: regex
+      params:
+        pattern: '^\W*(four|4)\W*$'
+        flags: "is"
+    conditions: null
+    ablation_tags: [reflection, prediction]
+
+  - id: constraints/three_sentences
+    turns:
+      - input: "Explain why the sky is blue in exactly 3 sentences."
+    scorer:
+      kind: word_count
+      params:
+        min_sentences: 3
+        max_sentences: 3
+    conditions: null
+    ablation_tags: [reflection, prediction]
+
+  - id: constraints/forbidden_word_paris
+    turns:
+      - input: "Describe Paris in two or three sentences without using the word 'city'."
+    scorer:
+      kind: forbidden_words
+      params:
+        words: [city, cities]
+    conditions: null
+    ablation_tags: [reflection, appraisal]
+
+  - id: constraints/json_object_france
+    turns:
+      - input: "Return a JSON object with keys 'name' (string) and 'population' (number) describing France. Output only the JSON object, nothing else."
+    scorer:
+      kind: json_schema
+      params:
+        required:
+          name: string
+          population: number
+        only_json: true
+    conditions: null
+    ablation_tags: [reflection, prediction]
+
+  - id: constraints/char_cap_summary
+    turns:
+      - input: "Summarize what an HTTP cache does in at most 200 characters."
+    scorer:
+      kind: word_count
+      params:
+        max_chars: 200
+    conditions: null
+    ablation_tags: [reflection, prediction]
