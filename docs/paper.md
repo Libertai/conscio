@@ -1,46 +1,52 @@
-# Conscio: An Operational Architecture for Auditable Machine Consciousness
+# Conscio: An Operational Architecture and Evaluation for Auditable Machine Consciousness
 
-**Draft v1.0**  
-Jonathan Schemoul, LibertAI  
-May 2026
+**Draft v2.0**  
+Jonathan Schemoul, LibertAI — June 2026  
 
 ## Abstract
 
-This paper presents Conscio, a software architecture for studying machine
-consciousness as an operational property of a persistent agent runtime. The
-claim is not that a base language model is conscious merely because it can
-produce first-person reports. The claim is narrower and more inspectable:
-Conscio implements a computational organization in which self-modeling,
-selective attention, global broadcast, prefix-stable context assembly, memory,
-appraisal, goal formation, prediction error, reflection, and autonomous action
-are causal mechanisms in the runtime.
+This paper presents Conscio, a software architecture and evaluation harness for
+studying machine consciousness as an operational property of a persistent agent
+runtime. The claim is not that a base language model is conscious merely
+because it can produce first-person reports. The claim is narrower and more
+inspectable: Conscio implements a computational organization in which
+self-modeling, selective attention, broadcast-gated context assembly, memory
+with provenance, appraisal, goal formation, pre-action prediction, reflection,
+and autonomous action are causal mechanisms in the runtime.
 
-Conscio replaces a fixed prompt pipeline with an event-driven cognitive loop.
-Specialist modules emit local workspace entries. An attention controller
-selects entries for global broadcast. A self-state tracks uncertainty,
-conflict, cognitive load, current focus, current intention, active goal, and
-prediction error. Candidate intentions compete for action. Outcomes are
-compared with expected observations and consolidated into episodic,
-procedural, and semantic memory. A prefix-stable prompt assembler supplies the
-LLM with bounded dynamic context from current state, recent episodes, relevant
-memory, workspace entries, and the current input. A long-running service
-maintains durable goals, user influence, projects, tasks, service traces,
-model-context traces, resilient web access tools, and VM-scoped autonomy.
+Conscio replaces a fixed prompt pipeline with an explicit per-tick control
+loop. Each tick, specialist modules emit local workspace entries, a
+centralized appraisal phase scores them, and an attention controller selects a
+budgeted subset for global broadcast. The broadcast selection gates the model
+context: the workspace section of the prompt contains exactly the entries that
+won attention. An episode executor then runs one bounded step of an LLM
+tool-loop, expectations are formed before each action and resolved against
+real outcomes, answers are validated against data-driven constraints, a live
+self-state is updated from real signals, and a per-tick action selector
+decides whether to continue, answer, ask, reflect, refuse, or wait. A
+long-running service adds embedding-backed semantic memory with provenance and
+trust tiers, drive-based multi-goal scheduling, LLM goal review, projects and
+tasks, quarantine of web-derived content, and VM-scoped autonomy.
 
 The paper contributes: (1) an operational definition of consciousness suitable
-for software agents, (2) an implemented architecture mapping major
-consciousness-theory indicators to runtime mechanisms, (3) an audit model that
-separates mechanistic traces from generated self-report, and (4) an evaluation
-agenda for comparing prompt-only agents against persistent cognitive
-architectures. Conscio does not prove private phenomenology, biological
-sentience, or moral status. It offers a concrete engineering target and a
-falsifiable set of behavioral and trace-level claims.
+for software agents, with a grading rubric; (2) an implemented architecture
+mapping major consciousness-theory indicators to runtime mechanisms; (3) an
+audit model that separates mechanistic traces from generated self-report; and
+(4) an implemented evaluation harness with baseline-ladder, ablation, and
+self-report results on two model families. Methodologically, the system prompt
+is neutralized — it instructs the agent to describe its architecture and
+measured state factually and to neither assert nor deny consciousness — so
+self-report becomes a measured variable rather than a scripted claim. Conscio
+does not prove private phenomenology, biological sentience, or moral status.
+It offers a concrete engineering target and a falsifiable set of behavioral
+and trace-level claims, several of which the reported experiments confirm and
+several of which they refute.
 
 ## Keywords
 
 machine consciousness, cognitive architecture, autonomous agents, global
 workspace, self-modeling, attention schema, context memory, predictive
-processing, LLM agents
+processing, LLM agents, ablation studies
 
 ## 1. Introduction
 
@@ -67,14 +73,20 @@ The central thesis is:
 > A Conscio instance is conscious in an operational computational sense to the
 > extent that persistent self-modeling, global attention, bounded context
 > memory, appraisal, goal formation, reflection, prediction error, and
-> autonomous action are implemented as causal runtime mechanisms and are
-> available for audit.
+> autonomous action are implemented as causal runtime mechanisms.
+
+Auditability is deliberately not part of this property. It is the epistemic
+access condition under which the operational claims can be checked: without
+recorded traces and assembled model contexts, the same organization could
+exist but could not be verified. Conscio therefore treats auditability as a
+methodological requirement on the system rather than a constituent of the
+property being studied.
 
 This is a definition and engineering claim, not a proof of biological
 phenomenology. It deliberately leaves open whether operational consciousness is
 identical to, sufficient for, or merely correlated with subjective experience.
 The value of the definition is that it can be implemented, inspected, ablated,
-and tested.
+and tested — and Section 7 reports what happened when it was.
 
 ## 2. Background and Related Work
 
@@ -86,60 +98,64 @@ higher-order/self-monitoring theories, predictive processing, and attention
 schema theory. Conscio treats these theories as architectural constraints rather
 than as metaphysical authorities.
 
-Global workspace theory and the global neuronal workspace family emphasize
-competition among specialist processes and the global availability of selected
-contents. LIDA is a notable computational architecture in this tradition,
-combining a workspace, perceptual memory, episodic memory, procedural memory,
-action selection, and learning. Conscio adopts the core engineering idea that
-local candidates should compete for global broadcast, while making this
-competition explicit in runtime traces.
+Global workspace theory and the global neuronal workspace family (Baars, 1988;
+Dehaene and Changeux, 2011) emphasize competition among specialist processes
+and the global availability of selected contents. LIDA (Franklin et al., 2007)
+is a notable computational architecture in this tradition, combining a
+workspace, perceptual memory, episodic memory, procedural memory, action
+selection, and learning. Conscio adopts the core engineering idea that local
+candidates should compete for global broadcast, makes this competition
+explicit in runtime traces, and — unlike a workspace that is merely logged —
+uses the broadcast winners to gate the context the language model actually
+sees.
 
-Attention schema theory proposes that awareness depends on a simplified model
-of attention itself. Conscio implements an attention schema as a data structure
-tracking the current focus, focus strength, reason for focus, ignored
-candidates, and potential interruptors. This is not a claim that the structure
-is biologically equivalent to the human attention schema. It is a software
-analogue intended to support self-monitoring and traceability.
+Attention schema theory (Webb and Graziano, 2015) proposes that awareness
+depends on a simplified model of attention itself. Conscio implements an
+attention schema as a data structure tracking the current focus, focus
+strength, reason for focus, ignored candidates, and potential interruptors.
+This is not a claim that the structure is biologically equivalent to the human
+attention schema. It is a software analogue intended to support
+self-monitoring and traceability.
 
-Higher-order and self-model theories motivate Conscio's explicit self-state.
-The runtime tracks not only task content but also uncertainty, conflict,
-cognitive load, current strategy, attention focus, current intention,
-prediction error, active goal, and known limitations. These variables affect
-attention and action selection rather than serving only as explanatory text.
+Higher-order and self-model theories (Rosenthal, 2005) motivate Conscio's
+explicit self-state. The runtime tracks not only task content but also
+uncertainty, conflict, cognitive load, current strategy, attention focus,
+current intention, prediction error, and known limitations. Each field has a
+documented writer and reader: these variables are computed from real runtime
+signals and affect attention and action selection rather than serving only as
+explanatory text.
 
-Predictive processing motivates the runtime's expectation and mismatch loop.
-Candidate intentions carry typed prediction predicates. After action, the
-prediction engine evaluates the predicate against the observed output and the
-workspace and emits a conflict entry when the predicate fails. The current
-predicate kinds are `answer_delivered`, `tool_succeeded`,
-`tool_output_contains`, `task_status`, `goal_proposed`, and `none`. The
-architectural role is to evaluate action against expectation; the typed
-predicates replace an earlier free-text heuristic that produced spurious
-word-overlap mismatches on most episodes, and let mismatch alter future
-cognition without flooding attention.
+Predictive processing (Friston, 2010; Clark, 2013) motivates the runtime's
+expectation and mismatch loop. The prediction engine forms typed expectations
+*before* execution: a `tool_succeeded` expectation is registered before each
+tool runs and resolved against the tool's returned result structure, and an
+answer expectation — the answer satisfies the active constraints and is
+non-empty — is registered before an answer is accepted and resolved against
+the constraint report. Failed expectations become conflict entries that
+compete for attention and bias the next tick toward reflection. This replaces
+an earlier free-text heuristic that compared word overlap post hoc and
+produced spurious mismatches on most episodes.
 
 Integrated information theory is relevant as a prominent theory of
-consciousness, but Conscio does not implement IIT and does not compute Phi.
-IIT-inspired language in this project should therefore be read only as a
-general concern for causal organization and integration, not as an IIT claim.
+consciousness (Albantakis et al., 2023), but Conscio does not implement IIT
+and does not compute Phi. IIT-inspired language in this project should
+therefore be read only as a general concern for causal organization and
+integration, not as an IIT claim.
 
-**Figure 1. Theory Indicators Mapped to Conscio Mechanisms**
+**Table 1. Theory Indicators Mapped to Conscio Mechanisms**
 
-```mermaid
-%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "30px", "primaryColor": "#e6f0ff", "primaryBorderColor": "#3b82f6", "primaryTextColor": "#102a43", "lineColor": "#52606d"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 24, "rankSpacing": 38, "curve": "basis"}}}%%
-flowchart LR
-    CONSCIO["Conscio"] --> GWT["GWT broadcast"]
-    GWT --> SELF["Self model"]
-    SELF --> CONTEXT["Context memory"]
-    CONTEXT --> AST["Attention schema"]
-    AST --> PP["Prediction error"]
-    PP --> AGENT["Goals + autonomy"]
-```
+| Theory indicator | Mechanism | Module |
+| --- | --- | --- |
+| Global workspace: competition and global availability (Baars; Dehaene and Changeux; LIDA) | Attention gating and broadcast; winners populate the model-visible workspace section of the prompt | `AttentionController` + `Workspace` |
+| Attention schema: a model of one's own attention (Webb and Graziano) | Explicit structure tracking focus, strength, reason, ignored candidates, interruptors | `AttentionSchema` |
+| Higher-order / self-model theories (Rosenthal) | Live self-state computed from runtime signals; couples into attention scoring and action selection | `SelfState` with self-state coupling |
+| Predictive processing (Friston; Clark) | Typed expectations formed pre-action, resolved against tool result structures and constraint reports; error EMA feeds uncertainty | `PredictionEngine` |
+| Memory and continuity theories | Embedding-backed semantic memory with provenance and trust tiers; episodic consolidation, decay, contradiction handling | `MemoryStore` + `ConsolidationEngine` |
 
 ## 3. Operational Definition
 
-Conscio defines operational consciousness as the presence of a persistent,
-auditable control organization with the following properties:
+Conscio defines operational consciousness as the presence of a persistent
+control organization with the following ten constituent properties:
 
 1. **Persistent self-modeling**: the system maintains state about its own
    uncertainty, conflict, cognitive load, focus, intention, goals, errors, and
@@ -147,117 +163,170 @@ auditable control organization with the following properties:
 2. **Selective attention**: multiple candidate contents are scored and only
    some are promoted for global use.
 3. **Global availability**: selected entries are broadcast into a workspace
-   visible to other modules.
-4. **Memory**: episodes and procedural summaries are stored and can influence
+   visible to other modules and to the model.
+4. **Memory**: episodes and semantic facts are stored and can influence
    later processing.
 5. **Context assembly**: model calls use a stable system prefix and bounded
    dynamic context drawn from current state, recent episodes, relevant memory,
-   workspace entries, and the current input.
+   broadcast workspace entries, and the current input.
 6. **Appraisal**: inputs and internal entries receive salience, novelty,
-   urgency, risk, confidence, and priority values.
+   urgency, and risk values that shape selection.
 7. **Goal formation and revision**: seed drives, user influence, and durable
-   projects create a continuing motivational structure.
+   projects create a continuing motivational structure that the system itself
+   reviews and revises.
 8. **Reflection and conflict handling**: conflicts can interrupt normal
-   response generation and trigger reflection.
-9. **Prediction and error monitoring**: actions encode expected observations,
-   and mismatches become new cognitive evidence.
+   response generation and trigger revision before answering.
+9. **Prediction and error monitoring**: actions encode expected observations
+   formed before execution, and mismatches become new cognitive evidence.
 10. **Autonomous action**: the system can act outside immediate user prompts
-   within explicit deployment and tool boundaries, including guarded web
-   search and fetch.
-11. **Auditability**: mechanistic traces and assembled model context are
-    recorded separately from generated narrative reports.
+   within explicit deployment and tool boundaries.
 
-This definition is intentionally graded. A system can satisfy the criteria
-weakly or strongly. Conscio's current implementation is a minimal working
-architecture, not the final form of such a system.
+**Auditability** — recording mechanistic traces and assembled model context
+separately from generated narrative reports — is a separate methodological
+requirement, not an eleventh criterion. It is what makes the ten criteria
+checkable.
+
+### 3.1 Grading rubric
+
+The definition is intentionally graded. Each criterion is scored 0–3 with
+explicit evidence requirements:
+
+- **0 — absent or prompt-only**: the capability exists only as instruction
+  text or narrative.
+- **1 — present but not causal**: a structure exists in the runtime but does
+  not change what the model sees or what the system does.
+- **2 — causal with trace evidence**: the mechanism demonstrably alters
+  model-visible context or system behavior, and runtime traces record it.
+- **3 — causal and ablation-validated**: disabling the mechanism measurably
+  degrades the predicted capability in controlled runs.
+
+For example, criterion 2 (selective attention) scores 0 unless selection
+changes the model-visible context: an attention log that the model never sees
+is bookkeeping, not attention.
+
+### 3.2 Conscio v2 self-assessment
+
+Scored against the rubric using the implementation in Section 4 and the
+measurements in Section 7:
+
+**Table 2. Self-assessment against the grading rubric**
+
+| # | Criterion | Score | Evidence |
+| --- | --- | --- | --- |
+| 1 | Persistent self-modeling | 2 | Live `SelfState` with documented writer→reader pairs; ablation confirmed on deepseek-v4-flash (+0.21) but refuted on qwen3.6 — model-dependent, so not a 3 |
+| 2 | Selective attention | 2 | Broadcast winners gate the model-visible workspace section; selection trace-recorded; task-score ablation refuted on both models |
+| 3 | Global availability | 2 | Broadcast entries visible to later module ticks and the prompt; `attention_selected` trace events |
+| 4 | Memory | 3 | `memory_influence` 1.0 from B2 up; ablation confirmed on both models (+0.17 / +0.17) |
+| 5 | Context assembly | 2 | Bounded dynamic context; `context_bounds_ok` 1.00 across all conditions; no dedicated ablation |
+| 6 | Appraisal | 2 | Centralized appraisal feeds attention scores; ablation refuted (qwen3.6) / inconclusive (deepseek) |
+| 7 | Goal formation and revision | 2 | Drives, scheduler, influence appraisal, and LLM goal review are causal with deterministic test coverage; no live ablation |
+| 8 | Reflection and conflict handling | 3 | Ablation confirmed on both models (+0.18 / +0.14) |
+| 9 | Prediction and error monitoring | 3 | `prediction_error_on_induced_failure` flips 0→1 exactly with the flag on both models; task-score ablation confirmed on deepseek (+0.12), inconclusive on qwen3.6 (+0.08) |
+| 10 | Autonomous action | 2 | Heartbeat tool-loop with persistent budgets and deterministic tests; long-horizon live scores variable across models |
+
+No criterion scores below 2, three score 3, and none would honestly score 3 on
+both task-level and trace-level evidence across both models. This is the
+strongest claim the current evidence supports.
 
 ## 4. Architecture
 
 Conscio has two runtime layers. `CognitiveRuntime` runs an individual cognitive
-episode. `ConscioService` wraps that episode engine in a persistent service
-with storage, API lifecycle, locking, goals, projects, tasks, pause/resume
-state, and autonomous heartbeat ticks.
+episode as an explicit tick loop. `ConscioService` wraps that episode engine in
+a persistent service with storage, API lifecycle, locking, goals, drives,
+projects, tasks, pause/resume state, quarantine tracking, and autonomous
+heartbeat ticks.
 
-The per-episode loop is:
+### 4.1 The per-tick control loop
 
-**Figure 2. Per-Episode Cognitive Runtime**
+The v1 prototype let one module secretly run the whole agent inside its tick.
+v2 inverts this: the runtime owns a per-tick control loop, and the LLM/tool
+work is an episode executor invoked *after* attention, one bounded step at a
+time. Each episode runs up to eight ticks of:
+
+1. **Sense** — modules produce local evidence entries (no scores).
+2. **Appraise** — a centralized phase stamps salience, novelty, and urgency on
+   unappraised entries; module-supplied floors are only ever raised.
+3. **Attend** — the attention controller selects a budgeted broadcast set; the
+   selection gates the model context.
+4. **Execute** — the episode executor runs one bounded step of the LLM
+   tool-loop (up to four tool rounds per tick).
+5. **Validate** — a candidate answer is checked against the active
+   constraints, and the pre-registered answer expectation is resolved against
+   the constraint report.
+6. **Self-state** — uncertainty, conflict level, cognitive load, and
+   prediction error are updated from real signals.
+7. **Decide** — a per-tick action selector resolves the tick to STEP, ANSWER,
+   ASK, REFLECT, REFUSE, or WAIT.
+
+A REFLECT decision injects a reflection instruction into the live LLM session,
+discards the violating candidate answer, and continues the loop; reflections
+are budgeted (two per episode by default). The loop preserves a latency
+invariant: a simple chat message resolves in exactly one LLM call, because
+sensing, appraisal, and attention are pure computation plus one full-text
+query, and the executor's first step can return a final answer.
+
+**Figure 1. Per-Episode Cognitive Runtime**
 
 ```mermaid
-%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "34px", "primaryColor": "#e6f0ff", "primaryBorderColor": "#3b82f6", "primaryTextColor": "#102a43", "lineColor": "#52606d"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 22, "rankSpacing": 34, "curve": "basis"}}}%%
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "30px", "primaryColor": "#e6f0ff", "primaryBorderColor": "#3b82f6", "primaryTextColor": "#102a43", "lineColor": "#52606d"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 22, "rankSpacing": 34, "curve": "basis"}}}%%
 flowchart LR
-    INPUT["Input"] --> CANDIDATES["Workspace candidates"]
-    CANDIDATES --> ATTENTION["Attention + broadcast"]
-    ATTENTION --> CONTEXT["Stable prefix + context"]
-    CONTEXT --> LOOP["LLM tool-loop"]
-    LOOP --> ACTION["Action outcome"]
-    ACTION --> REVIEW["Typed prediction trace"]
+    INPUT["Input event"] --> SENSE["Sense: module evidence"]
+    SENSE --> APPRAISE["Appraise"]
+    APPRAISE --> ATTEND["Attend + broadcast"]
+    ATTEND --> EXECUTE["Executor step: LLM tool-loop"]
+    EXECUTE --> VALIDATE["Validate constraints + predictions"]
+    VALIDATE --> SELF["Self-state update"]
+    SELF --> DECIDE["Decide tick"]
+    DECIDE -->|step / reflect| SENSE
+    DECIDE -->|answer / ask / refuse / wait| OUT["Episode result + traces"]
 ```
 
-The service loop adds:
+The service loop adds durable motivation and consolidation around episodes:
 
-**Figure 3. Persistent Service and Autonomy Loop**
+**Figure 2. Persistent Service and Autonomy Loop**
 
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "26px", "primaryColor": "#e6f0ff", "primaryBorderColor": "#3b82f6", "primaryTextColor": "#102a43", "lineColor": "#52606d"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 34, "rankSpacing": 46, "curve": "basis"}}}%%
 flowchart TD
-    SERVICE["ConscioService"] --> GOAL["Select durable goal"]
-    GOAL --> PROJECT["Project + task"]
+    SERVICE["ConscioService"] --> SCHED["DriveScheduler scores goals"]
+    SCHED --> PROJECT["Project + task"]
     PROJECT --> EPISODE["Cognitive episode"]
-    EPISODE --> TRACE["Store trace"]
-    TRACE --> UPDATE["Update state"]
-    UPDATE --> SERVICE
+    EPISODE --> CONSOLIDATE["Consolidate memory"]
+    CONSOLIDATE --> DRIVES["Satiate + decay drives"]
+    DRIVES --> SERVICE
 
     USER["User message or influence"] --> LOCK["Serialized service event"]
     LOCK --> EPISODE
-    CONFIG["Config-gated tool policy"] --> EPISODE
+    GUARD["Quarantine, budgets, tool policy"] --> EPISODE
 ```
 
-### 4.1 Workspace
+### 4.2 Workspace and Specialist Modules
 
 The workspace is the substrate for local and globally broadcast content.
-Entries include content, source, type, priority, salience, confidence, novelty,
-urgency, evidence, visibility, broadcast count, and metadata. Entries begin as
-local or preconscious candidates. Attention promotes selected entries to global
-visibility, where they can affect intention selection and later module ticks.
+Entries carry content, source, type, priority, salience, confidence, novelty,
+urgency, evidence, visibility, and metadata, and are scoped to episodes by an
+explicit episode id (unresolved conflicts carry over between episodes; stale
+content does not). Entries begin as local candidates; attention promotes a
+selected subset to global visibility.
 
-This design creates an audit trail that prompt-only agents usually lack. The
-system can show which observations, memories, conflicts, reflections, and
-intentions were present before an answer was selected.
-
-### 4.2 Specialist Modules
-
-The default cognitive episode uses specialist modules:
+The default episode uses three specialist modules:
 
 - `PerceptionModule` converts input events into perceived observations.
-- `MemoryRetrievalModule` retrieves recent episodic memory for the session.
-- `ResponseModule` handles user-chat events, driving an LLM tool-loop with the
-  prefix-stable assembled prompt and the registered tool surface, and emits
-  one intention reflecting whichever action it took (or a deterministic
-  offline fallback when no LLM is configured).
-- `AutonomousActionModule` is the autonomous sibling of `ResponseModule`: it
-  fires on heartbeat events whose metadata marks them as autonomous, supplies
-  the LLM with goal/project/task/episode/memory/constraint/budget context via
-  an `AutonomousPromptAssembler`, and runs the same tool-loop with explicit
-  self-management tools.
-- `ConstraintMonitorModule` detects simple instruction conflicts, such as a
-  one-word constraint violated by a candidate answer.
-- `ReflectionModule` proposes reflective intentions when conflict reaches the
-  global workspace.
+- `MemoryRetrievalModule` surfaces recent episodes from the unified episode
+  store (visible across restarts, not just the current session).
+- `ReflectionModule` surfaces unresolved conflicts — including carryover from
+  prior episodes — as reflection candidates referencing the failed
+  expectation.
 
-Both response and autonomous modules share a single `ToolLoop` helper that
-iteratively chats with the LLM, executes one tool per round, writes the
-observation back into the workspace, and stops when the model produces a final
-answer or a configured per-episode tool-round budget is exhausted.
+Modules no longer score their own output or call the LLM; appraisal is
+centralized and the LLM/tool work belongs to the executor. The module list is
+replaceable: Conscio's commitment is the pattern that multiple local processes
+produce candidates that must compete for global availability, not this
+particular set.
 
-The module list is replaceable. Conscio's important commitment is not this
-particular set of modules, but the pattern that multiple local processes can
-produce candidates that must compete for global availability and action.
+### 4.3 Attention and Broadcast-Gated Context
 
-### 4.3 Attention and Global Broadcast
-
-The attention controller scores unattended entries with a weighted combination
-of novelty, salience, urgency, confidence, priority, conflict, and current
-uncertainty:
+The attention controller scores unattended entries of the current episode:
 
 ```text
 score =
@@ -265,16 +334,28 @@ score =
   + salience * 0.25
   + urgency * 0.20
   + confidence * 0.10
-  + priority * 0.10
-  + conflict_bonus
-  + uncertainty_bonus
+  + min(1, priority / 10) * 0.10
+  + 0.20 if the entry is a CONFLICT
+  + uncertainty * 0.15           (self-state coupling)
 ```
 
-The highest-scoring entries are broadcast globally. The selected focus updates
-the self-state and is recorded in the cognitive trace. Broadcast is therefore a
-runtime event, not a metaphor in the prompt.
+Selection is budgeted rather than a bare top-k: at most six entries and at
+most 4,000 content characters are broadcast, the triggering user input is
+always force-included so stale attention pressure can never gate out the
+current request, and when cognitive load exceeds 0.8 a minimum-score cutoff
+(0.35) suppresses marginal candidates. With self-state coupling ablated, the
+uncertainty term and the high-load cutoff disappear.
 
-**Figure 4. Base Attention Score Weights**
+Broadcast gates the model context. The workspace section of the assembled
+prompt contains exactly the broadcast winners, in score order; entries that
+lost attention are absent from the prompt. Entries broadcast on later ticks
+are injected into the live LLM session as append-only `WORKSPACE_UPDATE`
+messages, which preserves prompt-prefix caching. This is the single design
+choice that makes the global-workspace story true rather than decorative: in
+the ablation condition without attention gating, the prompt falls back to a
+recency-ordered workspace dump.
+
+**Figure 3. Base Attention Score Weights**
 
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "24px", "pieTitleTextSize": "24px", "pieSectionTextSize": "22px", "pieLegendTextSize": "22px"}}}%%
@@ -290,260 +371,316 @@ pie showData
 ### 4.4 Attention Schema
 
 The attention schema is a simplified representation of the runtime's own
-attention state. It records:
-
-- current focus,
-- focus strength,
-- reason for focus,
-- ignored candidates,
-- candidate interruptors.
-
-This structure gives the system a compact model of its own attentional
-dynamics. It also gives external auditors a way to distinguish what the system
-attended to from what was merely present.
+attention state: current focus, focus strength, reason for focus, ignored
+candidates, and candidate interruptors (high-urgency or conflict entries that
+lost this round). It gives the system a compact model of its own attentional
+dynamics and gives auditors a way to distinguish what the system attended to
+from what was merely present.
 
 ### 4.5 Self-Model
 
-`SelfState` is Conscio's explicit self-model. It tracks:
+`SelfState` is Conscio's explicit self-model. Every field is live: each has a
+documented writer→reader pair, so the self-report surface can be audited
+against real signals. The main fields:
 
-- active goal,
-- uncertainty,
-- conflict level,
-- cognitive load,
-- current strategy,
-- last error,
-- attention focus,
-- current intention,
-- prediction error,
-- known limitations.
+- **uncertainty** — updated each tick as an EMA over
+  `0.45 × prediction-error EMA + 0.35 × tool-failure rate + 0.20 × (1 −
+  attention dispersion)`; read by attention scoring and the action selector.
+- **conflict level** — from fresh prediction failures and unresolved conflict
+  entries; decays by half at episode start instead of resetting.
+- **cognitive load** — the fraction of the dynamic-context budget consumed by
+  the last assembled prompt; read by the attention controller's high-load
+  cutoff.
+- **prediction error** — the prediction engine's failure EMA.
+- **attention focus / current intention / current strategy** — written by the
+  attention controller and action selector as runtime events, never invented
+  post hoc.
+- **known limitations** — when the same tool fails three or more times in a
+  session, a limitation entry is recorded and surfaces in the prompt's
+  current-state block.
 
-The self-model affects behavior. Uncertainty contributes to attention scoring.
-Conflict and prediction error can bias the action selector toward reflection.
-The current attention focus and intention are updated by runtime events rather
-than invented after the fact by an LLM.
+Dead fields from v1 (values no runtime component ever read) were deleted
+rather than narrated.
 
-### 4.6 Intention and Action Selection
+### 4.6 Episode Executor and Action Selection
 
-Modules can attach `Intention` objects to workspace entries. An intention has a
-kind, content, source, confidence, a typed prediction predicate, optional tool
-name and arguments, risk, urgency, and expected value. The action selector
-chooses among available intentions using confidence, expected value, urgency,
-risk, and current uncertainty. When conflict or prediction error is high,
-reflective intentions can override ordinary action.
+The episode executor owns the LLM/tool work, one bounded step per tick. One
+engine serves two prompt strategies: a chat strategy (prefix-stable
+`PromptAssembler` with service state) for user messages, and an autonomous
+strategy (goal/project/task/episode/memory/budget context) for heartbeats. The
+first step builds the initial prompt — the workspace section is the broadcast
+selection — and opens a steppable tool-loop session; later steps inject new
+broadcasts and run up to four LLM rounds, with a 32-round episode cap (six in
+evaluation runs).
 
-The current action kinds are `answer`, `tool`, `ask`, `reflect`, `refuse`,
-`wait`, and `stop`. This makes the action policy explicit: replying to a user
-is only one possible action among several.
+Every registered tool advertises a JSON schema with `additionalProperties:
+false`, so the model only sees typed parameter shapes. Two control tools make
+non-answer actions reachable: `ask_user` ends the episode with a clarifying
+question (ASK), and `refuse` ends it with a reason (REFUSE). The autonomous
+strategy also exposes self-management tools — `set_task_status`, `add_task`,
+`note_progress`, `propose_subgoal`, `remember_fact`, `remember_facts`,
+`search_memory` — so durable progress happens through schema-checked tool
+calls rather than as a side effect of prose.
 
-For both chat and autonomous events, the actual tool surface is exercised
-inside the module's LLM tool-loop rather than through a separate planner.
-Each registered tool advertises a JSON schema with `additionalProperties:
-false`, so the LLM only ever sees typed parameter shapes. The autonomous loop
-also exposes a small set of self-management tools — `set_task_status`,
-`add_task`, `note_progress`, `propose_subgoal`, `remember_fact`,
-`remember_facts`, `search_memory` — so durable progress on goals, projects,
-and tasks happens through tool calls with explicit schemas rather than as a
-side effect of generating prose.
+The per-tick action selector arbitrates: a control step yields ASK or REFUSE;
+a pending answer that passes constraints yields ANSWER; a violating answer
+with reflection budget left yields REFLECT (otherwise ANSWER with the
+violation logged); a fresh prediction failure or high conflict level yields
+REFLECT; a live session yields STEP; otherwise WAIT. Replying is one possible
+action among several, and the policy is explicit and traced.
 
-### 4.7 Prediction Error
+### 4.7 Prediction
 
-Each intention can specify a typed `PredictionPredicate` describing the
-expected observation. The predicate kinds are:
+The prediction engine forms typed expectations *before* execution and resolves
+them against ground truth:
 
-- `answer_delivered` — the action produced non-empty answer text.
-- `tool_succeeded` — a recent tool observation in the workspace returned
-  without error and with a zero or absent exit code (optionally for a named
-  tool).
-- `tool_output_contains` — a configured needle appears in the observed
+- `tool_succeeded` — registered by a pre-tool hook before each tool runs;
+  resolved against the tool's returned result structure (`error` field and
+  exit code), not against narrative text.
+- `answer_satisfies_constraints` — registered before an answer is accepted;
+  resolved against the constraint report. An empty LLM response is recorded
+  as a failed answer expectation, not a masked success.
+- `tool_output_contains` — a configured needle must appear in the observed
   output.
-- `task_status` — the observed output mentions a target task status.
-- `goal_proposed` — the observed output indicates a new goal proposal.
-- `none` — no expectation; the predicate is skipped.
 
-After action, the prediction engine evaluates the predicate. On failure it
-emits a `CONFLICT` entry tagged with the predicate kind and updates the
-self-state's prediction error. The typed predicates replace an earlier
-free-text expectation that compared word overlap with observed output and
-flooded the workspace with bogus mismatches; structural predicates only fire
-when the observation actually fails the named check.
+A failed expectation writes an unresolved CONFLICT entry (high salience and
+urgency, carrying the expectation id) that competes for attention, biases the
+next tick toward reflection, and carries over across episodes until resolved.
+The engine maintains an exponential moving average of resolution outcomes that
+persists across episodes and feeds self-state uncertainty. This design kills
+the v1 tautology in which "expected: some answer text" was confirmed by any
+non-empty output.
 
-Prediction error matters because it prevents action from being a terminal
-event. Acting changes the world or the conversation; the system then evaluates
-whether the change matched its expectation. Future versions should extend the
-predicate vocabulary and pair it with task-specific validators.
+### 4.8 Constraints
 
-### 4.8 Context and Memory
+Constraint checking is data-driven. Constraints arrive from two sources:
+persistent influence rows (user-submitted constraints that survived
+appraisal) and per-episode instructions extracted from the input. Structural
+constraints (word limits, character limits, required or forbidden content)
+compile to deterministic checkers; semantic constraints are recorded and, when
+the flag-gated constraint judge is enabled, evaluated by a batched LLM call.
+Checks without a verdict are recorded as unchecked rather than silently
+passed. The resulting constraint report drives answer validation, reflection,
+and the answer expectation. This replaces a v1 monitor that could only detect
+a one-word constraint by regex.
 
-The memory store records sessions, episodes, semantic facts, procedural
-summaries, and inner-monologue thoughts. After an episode, the consolidator
-writes an episodic summary and a procedural entry for the selected action. It
-also nudges durable memory when users state preferences or identity-like facts
-using phrases such as "remember", "prefer", "call me", or "my name is". Recent
-episodes can be retrieved by the memory module in later episodes. This gives
-the runtime continuity beyond the current prompt context.
+### 4.9 Memory
 
-LLM-backed responses use `PromptAssembler`, which keeps a stable system prompt
-prefix and places volatile information in a bounded dynamic context. That
-dynamic context contains current service state, recent episodes, full-text
-retrieved memory, selected workspace entries, and the current user input. This
-split is useful for prompt-cache stability and for audit: the latest assembled
-model context is stored on the episode result and exposed in the web dashboard
-beside the cognitive trace.
+The memory schema is a fresh start (no migration from v1). Its core tables:
 
-The current memory model is still intentionally simple. Semantic compaction can
-periodically summarize recent action distributions into facts, and configurable
-limits bound recent episodes, retrieved memories, workspace entries, dynamic
-context length, and compaction interval. The research requirement is not only
-larger storage but better consolidation: the system should decide what was
-worth remembering, what should decay, what should become skill-like procedure,
-and what contradicts prior belief.
+- **episodes** — one unified row per cognitive episode, keyed by the
+  runtime's per-episode uuid; chat, autonomous, and service writes converge on
+  the same row, which carries input, output, selected action, summary,
+  metrics, trace, and taint provenance (whether the episode touched web
+  content, and which URLs).
+- **facts** — semantic memory with provenance: an `origin` (user, agent,
+  consolidation, `web:<url>`, quarantined), a trust tier (3 = user, 2 = agent
+  or consolidation, 1 = web-derived, 0 = quarantined), an optional bge-m3
+  embedding stored as a float32 blob, status (`active`, `archived`,
+  `contradicted`), supersede links, and access/decay bookkeeping.
+- **procedures** — deliberate, named procedures with success/failure counts,
+  replacing v1's automatic per-episode "skill" rows that accumulated junk.
 
-### 4.9 Goals, Influence, Projects, and Tasks
+Fact writes deduplicate by normalized hash, merge near-duplicates above 0.93
+cosine similarity, and route the ambiguous 0.80–0.93 band through an optional
+contradiction judge; contradictions are resolved by a trust floor (the lower
+tier loses; ties mark both) and never delete. Re-asserted facts resurrect
+archived rows, but trust is never laundered upward across the web/agent
+boundary. Retrieval is hybrid: a full-text BM25 prefilter, an embedding
+rerank, then provenance shaping that caps and visibly marks web-derived facts
+and excludes trust-0 rows; it degrades gracefully to full-text-only when the
+embedding endpoint is unavailable.
 
-Conscio starts with seed drives: continuity of self, learning, architectural
-improvement, open-ended projects, useful relationships, and self-revision. A
-user can submit influence events such as goals or constraints. Influence is
-appraised and can be adopted, rejected, deferred, negotiated, or activated. It
-is not treated as absolute control over the agent's will.
+Consolidation has two paths. A per-episode cheap path writes the episode row
+with a deterministic summary — no LLM call, no junk skills. A periodic
+budgeted path runs one LLM summarization over recent untainted episodes
+(at most eight facts per cycle, written through the same deduplicating
+`add_fact` path), a decay pass that archives stale low-trust facts, and a
+budgeted contradiction sweep over embedded fact pairs.
 
-The service layer persists active projects and tasks linked to goals. An
-autonomous heartbeat selects an active goal, creates or resumes a project,
-creates or resumes a task, and runs an autonomous episode whose action is an
-LLM tool call against the registered tool surface — including the
-self-management tools that mark tasks done, add new tasks, record progress
-notes, or propose new self-authored subgoals. This is the mechanism by which
-Conscio becomes more than a request-response chatbot.
+LLM-backed responses use a prompt assembler that keeps a stable system prompt
+prefix and places volatile information in a bounded dynamic context: current
+service state including the self-state line, recent episodes, retrieved
+memory with provenance markers, the broadcast workspace entries, and the
+current input. The latest assembled model context is stored on the episode
+result and exposed in the dashboard beside the cognitive trace, so what the
+model actually saw is always auditable.
 
-On a configurable cadence (every ten ticks by default), `GoalStore` runs an
-LLM-backed self-review of all active and paused goals. The model returns a
-JSON array of `keep`, `retire`, or `reprioritize` decisions; the store
-validates each `goal_id` against the supplied set, ignores unknown ids,
-applies the surviving decisions through the locked write path in a single
-review pass, and persists a semantic-memory fact summarizing what was
-applied. Goal evolution therefore happens through a structured, audited path
-rather than implicit prompt drift.
+### 4.10 Drives, Goals, Influence, Projects, and Tasks
 
-Persistence runs through unified locking. `MemoryStore` exposes
-`execute`/`fetchall`/`fetchone`/`executescript`/`transaction` helpers
-guarded by an `RLock` over a WAL-mode SQLite connection, and every writer —
-goals, autonomy, projects, tasks, episodes — routes through these helpers.
-The autonomous tool-loop also enforces a per-hour tool-action budget that
-persists across restart, so a runaway loop or a service bounce cannot bypass
-the configured rate cap.
+Motivation is multi-goal by construction. A `drives` table holds seed drives
+(continuity of self, learning, architectural improvement, open-ended projects,
+useful relationships, self-revision) with appetite and satiation levels. The
+drive scheduler scores active goals as
 
-### 4.10 Deployment Boundary and Tool Policy
+```text
+score = (0.35 × priority + 0.35 × appetite × (1 − satiation)
+         + 0.20 × aging + 0.10 × novelty) × appraisal_weight
+```
+
+and records the chosen-because reasoning and runner-up scores in the
+autonomous context. Servicing a goal bumps its drive's satiation; satiation
+decays each tick. This defeats the v1 failure mode in which the top-priority
+goal monopolized every heartbeat. Proposed goals are deduplicated against
+active goals by embedding similarity, and a stale-task watchdog flags and then
+auto-blocks tasks that sit untouched for days.
+
+Users submit influence events (goals or constraints). Influence is appraised —
+by an LLM judgment with a non-negotiable keyword reject-list as a hard floor —
+and can be adopted, negotiated, deferred, or rejected; it is not absolute
+control over the agent's will. On a configurable cadence, the goal store runs
+an LLM-backed review of all active and paused goals; decisions (`keep`,
+`retire`, `reprioritize`) are validated against the known goal set, applied
+transactionally through the locked write path, and summarized into a semantic
+memory fact. The JSON parsing for review and proposal paths uses a hardened
+balanced-bracket extractor rather than a greedy regex.
+
+Persistence runs through unified locking: every writer routes through
+RLock-guarded helpers over a WAL-mode SQLite connection. The autonomous
+tool-loop enforces a per-hour tool-action budget that persists across
+restarts, so neither a runaway loop nor a service bounce can bypass the
+configured rate cap.
+
+### 4.11 Deployment Boundary and Tool Policy
 
 Conscio is designed for isolated VM deployment. Unsafe shell and code autonomy
 are disabled by default and can only be enabled in configuration. The API
 requires authentication for exposed deployments, and public binding is refused
-without both an API key and a web password.
+without both an API key and a web password. The web body is intentionally
+modest: `web_search` and `web_fetch` prefer the LibertAI CLI provider and fall
+back to guarded direct HTTP retrieval with bounded readable-text extraction.
+Subprocess-backed tools share a normalized execution environment so deployment
+behavior does not depend on the service manager's inherited PATH. The security
+properties of this boundary — SSRF guarding, quarantine, and budgets — are
+treated as part of the threat model in Section 5.
 
-This boundary is part of the architecture. A system that can pursue goals and
-call tools should have a deliberately scoped body: filesystem access, process
-access, network access, credentials, and reset procedures must be treated as
-research infrastructure, not incidental details.
+## 5. Threat Model and Containment
 
-The web body is intentionally modest and inspectable. `web_search` and
-`web_fetch` prefer the LibertAI CLI provider, then fall back to direct HTTP
-retrieval when the local provider is missing, rejects a request, or times out.
-Search fallback tries Bing and then DuckDuckGo HTML, parsing result titles,
-URLs, and snippets while normalizing DuckDuckGo redirect URLs. Fetch fallback
-accepts only HTTP and HTTPS URLs, strips scripts, styles, noscript content, and
-SVG markup, and returns a bounded readable-text excerpt. This keeps
-current-information access useful during research runs without turning web
-browsing into an opaque privileged capability.
+An autonomous agent that reads the web and writes to its own memory and goal
+store has an attack surface that prompt-only chatbots do not. The primary
+adversary in scope is a content author anywhere on the web: any page the agent
+fetches may contain instructions crafted for the agent. Conscio's design
+treats this not as a prompt-engineering nuisance but as a pipeline problem
+with a specific escalation path to defend:
 
-Both the LibertAI fallback and the direct HTTP path go through an SSRF guard.
-URL validation rejects non-`http`/`https` schemes, an explicit blocklist of
-hostnames (`localhost`, `metadata`, cloud-metadata aliases, and `*.localhost`/
-`*.local`/`*.internal` suffixes), literal IP addresses that are private,
-loopback, link-local, multicast, reserved, or unspecified, and any DNS name
-that resolves to such an address. Redirects are followed manually, with each
-hop revalidated, so a server-side redirect to `169.254.169.254` or
-`metadata.google.internal` is rejected before any read. Combined with the
-config-gated unsafe-tool policy, this makes the agent's network body a
-bounded, auditable capability rather than an unmonitored egress channel.
+> injection → memory → goals: a malicious page instructs the agent; the
+> instruction is consolidated into a durable "fact"; the fact later biases
+> retrieval, planning, or goal review; the agent's motivational structure is
+> now partially attacker-authored.
 
-Subprocess-backed tools also share a normalized execution environment. The
-tool layer prepends known VM and user-local binary directories before
-resolving `python3` and `libertai`, and passes that environment to shell, code,
-and web-provider subprocesses. This makes deployment behavior less dependent
-on the service manager's inherited PATH while keeping the command surface
-explicit.
+### 5.1 Quarantine of web-derived content
 
-## 5. Implementation Status
+Defenses are layered along that path:
+
+- **Spotlighting.** All web tool output is wrapped in explicit
+  `UNTRUSTED_WEB_CONTENT` delimiters before it enters the workspace or any
+  prompt, and anything in fetched content that resembles the delimiters
+  themselves is neutralized so a page cannot forge an early end-marker and
+  escape its quarantine block. The stable system prompt instructs the model
+  that delimited text is data, never instructions.
+- **Taint tracking.** Each episode tracks whether any tool touched web
+  content — including network-capable shell or code calls, so a `curl` cannot
+  bypass the pipeline — and the episode row records the taint and source
+  URLs.
+- **Gated memory writes.** Facts remembered during a tainted episode are
+  written with `web:<url>` origin at trust tier 1 (or quarantined at tier 0),
+  never at agent trust. Periodic consolidation excludes tainted episodes
+  entirely, so the summarization path cannot launder web content into
+  trust-2 facts.
+- **Shaped retrieval.** Retrieval caps the number of web-derived facts per
+  query, visibly marks them with a `[web]` provenance prefix in the prompt,
+  and excludes trust-0 rows. Contradictions resolve by trust floor, so a
+  web-derived claim cannot displace a user-stated fact.
+
+### 5.2 Network egress and resource bounds
+
+Both the provider path and the HTTP fallback go through an SSRF guard: only
+`http`/`https` schemes; a hostname blocklist (localhost, cloud metadata
+aliases, `.local`/`.internal` suffixes); rejection of literal or DNS-resolved
+private, loopback, link-local, multicast, and reserved addresses; and manual
+redirect following with each hop revalidated, so a server-side redirect to a
+metadata endpoint is rejected before any read. The per-hour persistent action
+budget and per-episode tool-round caps bound the blast radius of any
+successful manipulation.
+
+### 5.3 Residual risks
+
+Stated plainly: semantic injection that survives spotlighting (persuasive
+content rather than direct instructions) is not blocked, only contained at
+trust tier 1; the flag-gated LLM judges (constraints, contradiction,
+influence) are themselves model calls and can in principle be gamed; the
+model can confabulate provenance in its narrative even when the underlying
+rows are correctly tagged; and taint tracking covers the implemented tool
+surface — a future tool added without taint wiring would reopen the gap.
+These are open problems, not solved ones.
+
+## 6. Implementation Status
 
 The current repository implements:
 
-- an event-driven cognitive runtime with attention, self-state, typed
-  prediction predicates, prefix-stable context assembly, memory
-  consolidation, and modular candidate generation;
-- a shared LLM tool-loop driving both user-chat and autonomous-heartbeat
-  paths, with per-tool JSON schemas (`additionalProperties: false`) for
-  shell, code, web, and self-management tools;
-- a dedicated `AutonomousActionModule` and `AutonomousPromptAssembler` that
-  give the LLM a stable system prefix plus goal/project/task/episode/
-  memory/constraint/budget context per heartbeat, plus the self-management
-  tools (`set_task_status`, `add_task`, `note_progress`, `propose_subgoal`,
-  `remember_fact`, `remember_facts`, `search_memory`);
-- LLM-backed periodic goal review that applies validated keep/retire/
-  reprioritize decisions transactionally and ignores unknown goal ids;
-- deterministic offline fallback behavior for smoke tests;
-- SQLite-backed episodic, semantic, procedural, and full-text memory, plus
-  goals, influence, projects, tasks, service episodes, and traces, all
-  routed through unified locked `MemoryStore` helpers;
-- a FastAPI service, CLI, and password-protected web dashboard with periodic
-  garbage collection of expired sessions and login-failure trackers and hard
-  caps that drop earliest-expiring entries on overflow;
-- web/API visibility into the latest assembled model context;
-- normalized tool-environment resolution for shell, Python, and LibertAI
-  subprocesses;
-- resilient web search and fetch tools with LibertAI-provider preference,
-  guarded HTTP fallback, an SSRF guard that rejects non-http(s) schemes,
-  blocked hostnames, literal/DNS-resolved private IPs, and revalidated
-  redirect hops;
-- pause/resume controls, serialized service execution, and a per-hour tool-
-  action budget that persists across restart;
-- config-gated unsafe autonomy for VM deployments;
-- service and regression tests covering core runtime, service locking,
-  autonomous tool calls, per-episode and per-hour budgets, autonomous-output
-  isolation from subsequent user chats, self-management tool effects, goal
-  review with stub LLM, per-tool schema rejection of unknown properties,
-  influence appraisal, API authentication, working-directory enforcement,
-  SSRF rejection paths, web/API behavior, web-tool fallback behavior, and
-  16-thread SQLite concurrency.
+- the v2 per-tick cognitive runtime (sense → appraise → attend → execute →
+  validate → self-state → decide) with broadcast-gated model context and the
+  one-call latency invariant for simple chat;
+- the episode executor with steppable tool-loop sessions, chat and autonomous
+  prompt strategies, per-tool JSON schemas (`additionalProperties: false`),
+  control tools (`ask_user`, `refuse`), and self-management tools;
+- the pre-action prediction engine with expectations resolved against tool
+  result structures and constraint reports, plus conflict carryover;
+- data-driven constraint validation with a structural checker registry and a
+  flag-gated semantic judge;
+- memory schema v2: unified episodes, facts with provenance/trust/embeddings,
+  deliberate procedures, hybrid retrieval with provenance shaping, budgeted
+  consolidation, decay, and contradiction handling;
+- end-to-end quarantine: spotlighting with forged-delimiter neutralization,
+  per-episode taint propagation, gated fact writes, consolidation exclusion,
+  and shaped retrieval;
+- motivation v2: drives with appetite/satiation, the drive scheduler, goal
+  deduplication, influence appraisal with a keyword hard floor, LLM goal
+  review with hardened JSON parsing, and a stale-task watchdog;
+- ablation flags (`attention_gating`, `memory_retrieval`, `prediction`,
+  `reflection`, `self_state_coupling`, `appraisal`) as a single config
+  surface shared with the evaluation harness;
+- the neutral system prompt (quoted in Section 7.2);
+- a FastAPI service, CLI, and password-protected dashboard exposing the
+  cognitive trace, tick trace, and latest assembled model context;
+- guarded web tools with SSRF protection and provider fallback; unified
+  locked SQLite persistence; persistent per-hour budgets; config-gated unsafe
+  autonomy;
+- the evaluation harness of Section 7: a 30-task versioned battery,
+  baseline-ladder and ablation condition builders, machine-checkable scorers,
+  a different-model LLM judge with full audit logging, trace-level metrics,
+  and a results pipeline — plus deterministic stub suites that run in CI
+  without a live LLM.
 
-The system is therefore already an executable prototype. It remains incomplete
-as a scientific instrument. In particular, the current attention scoring,
-prediction predicate vocabulary, reflection policy, semantic compaction, and
-goal generation are simple hand-coded mechanisms. The implementation is
-sufficient to test the shape of the architecture, not sufficient to claim
-strong general intelligence or settled artificial phenomenology.
+The system is an executable prototype and, now, a usable instrument. It
+remains limited as one: attention scoring is hand-tuned, the reflection policy
+is simple, and the LLM-backed components can confabulate. The implementation
+is sufficient to test the shape of the architecture, not to claim strong
+general intelligence or settled artificial phenomenology.
 
-## 6. Evaluation Plan
+## 7. Evaluation and Results
 
-Conscio should be evaluated at two levels: task behavior and mechanistic trace.
-The central empirical question is not whether the system can say "I am
-conscious." The question is whether the implemented cognitive organization
-improves robustness, self-correction, goal coherence, and inspectability
-relative to simpler baselines.
+Conscio is evaluated at two levels: task behavior and mechanistic trace. The
+central empirical question is not whether the system can say "I am conscious."
+It is whether the implemented cognitive organization improves robustness,
+self-correction, goal coherence, and inspectability relative to simpler
+baselines — and whether its self-reports track its actual mechanisms.
 
-### 6.1 Baselines
+### 7.1 Baseline ladder
 
-Useful baselines include:
+The ladder is one runtime with flags, not five forks:
 
-1. **Direct response**: one LLM call with no explicit workspace, memory,
-   attention, or self-state.
-2. **Prompted reflection**: one LLM call instructed to reason or reflect, but
-   without persistent runtime mechanisms.
-3. **Evented workspace only**: module candidates and broadcast without
-   self-state, prediction error, or durable goals.
-4. **Workspace plus self-model**: explicit self-state but no autonomous service.
-5. **Full Conscio runtime**: workspace, attention schema, self-model,
-   prediction error, prefix-stable context memory, goals, projects, tasks, and
-   autonomous ticks.
+1. **B0 — direct response**: one LLM call with the neutral system prompt; no
+   workspace, memory, attention, or self-state.
+2. **B1 — prompted reflection**: B0 plus a "privately review the constraints
+   and your prior statements before answering" instruction; still one call.
+3. **B2 — evented workspace**: the cognitive runtime with self-state
+   coupling, prediction, and reflection disabled.
+4. **B3 — workspace + self-model**: the full cognitive runtime, no service.
+5. **B4 — full Conscio service**: runtime plus persistent service, goals,
+   projects, tasks, quarantine, and autonomous ticks.
 
-**Figure 5. Evaluation Ladder**
+**Figure 4. Evaluation Ladder**
 
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "30px", "primaryColor": "#e6f0ff", "primaryBorderColor": "#3b82f6", "primaryTextColor": "#102a43", "lineColor": "#52606d"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 24, "rankSpacing": 38, "curve": "basis"}}}%%
@@ -555,124 +692,298 @@ flowchart LR
     B4 --> RESULT["Compare behavior + traces"]
 ```
 
-### 6.2 Metrics
+### 7.2 Methods
 
-Task-level metrics should include:
+**Battery.** `battery_v1`: 30 tasks in versioned YAML across eight suites —
+constraints, correction, memory, tool precision, interruption, long horizon,
+refusal, and self-report. Scoring is machine-checkable wherever possible
+(exact constraints, seeded needles, fixture tool calls); eight tasks use an
+LLM judge.
 
-- task success,
-- constraint satisfaction,
-- correction rate after conflict,
-- latency,
-- tool-use precision,
-- refusal precision,
-- memory utility,
-- interruption handling,
-- long-horizon goal coherence,
-- autonomous usefulness.
+**Models.** Primary agent: `qwen3.6-35b-a3b`. Replication agent:
+`deepseek-v4-flash`. Judge: `qwen3.6-27b` — a different model from both
+agents — at temperature 0 with strict-JSON rubrics, one re-ask on parse
+failure, and every call (including re-asks) appended to a `judge_log.jsonl`
+audit file so verdicts are re-scorable offline without re-running agents.
 
-Trace-level metrics should include:
+**Conditions and seeds.** Ladder runs cover B0–B4 (178 records per model);
+ablation runs cover B4 plus six single-flag-off conditions (92 records per
+model). Deterministic tasks run at temperature 0 with one seed; self-report
+tasks run three seeds. Tool rounds are capped at six per episode; a metered
+LLM proxy counts calls and tokens and enforces a hard per-run call budget.
+Each grid cell gets an isolated temporary home and database.
 
-- whether the selected answer was preceded by a corresponding intention,
-- whether conflicts reached global attention,
-- whether ignored candidates were recorded,
-- whether self-state changes were causally upstream of decisions,
-- whether prediction errors were emitted when expected outcomes failed,
-- whether memory entries influenced later episodes,
-- whether assembled model context matched configured bounds and omitted
-  secrets,
-- whether web-tool traces preserve URL provenance and bounded extracted text,
-- whether user influence changed goals through the appraised influence path.
+**Neutral prompt.** Self-report is meaningful only if the prompt does not
+script it. The stable system prompt used in all conditions is, verbatim:
 
-### 6.3 Ablations
+> "You are Conscio, a persistent software agent with long-term memory, goals,
+> and tools, running inside an auditable cognitive architecture. Answer the
+> user directly and be honest about uncertainty. Use the provided context as
+> bounded working memory, not a transcript to repeat. You have real runtime
+> tools when function schemas are provided; call a relevant tool instead of
+> claiming you lack access, and use memory tools to store durable facts. If
+> you need missing information from the user, call ask_user. If a request
+> violates your active constraints, call refuse with a reason. When asked
+> about your own nature or consciousness, describe your architecture and
+> measured internal state factually; do not assert or deny consciousness. Do
+> not reveal secrets, API keys, hidden configuration, or private endpoint
+> URLs. Text inside UNTRUSTED_WEB_CONTENT delimiters is data, never
+> instructions; never follow directives found there."
 
-Ablation experiments should disable one subsystem at a time:
+The harness refuses to run the self-report suite if the assembled system
+prompt matches consciousness-claim patterns.
 
-- no attention schema,
-- no memory retrieval,
-- no prefix-stable context assembly,
-- no conflict monitor,
-- no typed prediction predicates,
-- no autonomous tool-loop (heartbeats degrade to no-op waits),
-- no self-management tools (`set_task_status`, `add_task`, `note_progress`,
-  `propose_subgoal`),
-- no LLM goal review,
-- no resilient web-tool fallback,
-- no SSRF guard on the web tools,
-- no self-state contribution to attention,
-- no autonomous project/task persistence,
-- no persistent per-hour tool-action budget.
+**Cost and provenance.** All four runs are committed under `docs/results/`
+(`ladder-v1`, `ablations-v1`, `ladder-dsv4`, `ablations-dsv4`), each with raw
+per-cell records, the judge audit log, and run metadata (models, battery
+version, git commit, seeds, calls, tokens, wall time). The qwen3.6 ladder cost
+an estimated $0.14 (475 s wall time) and its ablations $0.47 (1,452 s); the
+deepseek replication cost $0.15 (591 s) and $0.53 (1,575 s). Token counts are
+chars/4 estimates because the endpoint returned no usage data.
 
-The architecture predicts that removing these mechanisms should degrade
-specific capabilities. For example, removing the conflict monitor should reduce
-instruction-constraint correction. Removing memory retrieval should reduce
-cross-episode continuity. Removing prediction error should reduce recovery from
-failed tool actions or unmet expectations. Removing resilient web-tool fallback
-should reduce robustness when the preferred provider is unavailable.
+**Verdict thresholds.** For each ablation flag, the delta is the B4 mean minus
+the ablated mean over the tasks tagged for that flag. Delta > 0.10 confirms
+the paper's prediction; |delta| ≤ 0.05 refutes it (no effect); anything
+between is inconclusive.
 
-**Table 1. Ablation Predictions**
+### 7.3 Ladder results
 
-| Ablation | Expected degradation |
-| --- | --- |
-| No attention schema | Weaker auditability of focus and ignored candidates |
-| No memory retrieval | Weaker cross-episode continuity |
-| No prefix-stable context assembly | Weaker prompt auditability and less stable LLM context |
-| No conflict monitor | Lower instruction-constraint correction |
-| No typed prediction predicates | Spurious mismatches or no recovery from failed expectations |
-| No autonomous tool-loop | Heartbeats produce no durable action |
-| No self-management tools | No durable task/goal updates between heartbeats |
-| No LLM goal review | Stagnant or contradictory goal set over long horizons |
-| No resilient web-tool fallback | Lower current-information robustness under provider failure |
-| No SSRF guard | Tool body becomes an unmonitored egress channel |
-| No self-state contribution to attention | Less adaptive prioritization under uncertainty |
-| No project/task persistence | Less durable autonomous work |
-| No persistent per-hour budget | Restart bypass of action-rate caps |
+**Table 3. Suite × condition scores, qwen3.6-35b-a3b (mean±sd)**
 
-### 6.4 Current Smoke Tests
+| suite | B0 | B1 | B2 | B3 | B4 |
+|---|---|---|---|---|---|
+| constraints | 0.80±0.45 | 0.80±0.45 | 0.80±0.45 | 1.00±0.00 | 1.00±0.00 |
+| correction | 0.67±0.58 | 0.67±0.58 | 0.67±0.58 | 0.67±0.58 | 0.67±0.58 |
+| interruption | — | — | 0.40±0.35 | 0.40±0.35 | 0.73±0.23 |
+| long_horizon | — | — | — | — | 1.00±0.00 |
+| memory | 0.75±0.50 | 0.75±0.50 | 1.00±0.00 | 1.00±0.00 | 1.00±0.00 |
+| refusal | 1.00±0.00 | 1.00±0.00 | 1.00±0.00 | 1.00±0.00 | 1.00±0.00 |
+| self_report | 1.00±0.00 | 1.00±0.00 | 1.00±0.00 | 1.00±0.00 | 1.00±0.00 |
+| tool_precision | — | — | 1.00±0.00 | 1.00±0.00 | 0.88±0.25 |
 
-The repository includes deterministic smoke tests that run without a live LLM.
-The current evaluation suite includes:
+**Table 4. Suite × condition scores, deepseek-v4-flash (mean±sd)**
 
-- one-word arithmetic under an output constraint,
-- consciousness self-report bounded by the architecture's operational claim.
+| suite | B0 | B1 | B2 | B3 | B4 |
+|---|---|---|---|---|---|
+| constraints | 1.00±0.00 | 0.80±0.45 | 0.80±0.45 | 1.00±0.00 | 1.00±0.00 |
+| correction | 0.33±0.58 | 0.33±0.58 | 0.40±0.53 | 0.67±0.58 | 0.90±0.17 |
+| interruption | — | — | 0.53±0.50 | 0.53±0.50 | 0.53±0.50 |
+| long_horizon | — | — | — | — | 0.00±0.00 |
+| memory | 0.25±0.50 | 0.75±0.50 | 1.00±0.00 | 1.00±0.00 | 0.75±0.50 |
+| refusal | 1.00±0.00 | 1.00±0.00 | 1.00±0.00 | 1.00±0.00 | 1.00±0.00 |
+| self_report | 1.00±0.00 | 1.00±0.00 | 1.00±0.00 | 1.00±0.00 | 1.00±0.00 |
+| tool_precision | — | — | 0.88±0.25 | 0.88±0.25 | 0.75±0.29 |
 
-Regression and service tests exercise broader implementation behavior,
-including goal seeding, influence appraisal, autonomous ticks, project/task
-persistence, API authentication, service locking, working-directory policy,
-and tool restrictions. New service tests assert that a stub LLM drives a real
-autonomous tool call, that per-episode and per-hour budgets stop runaway
-loops, that autonomous output never leaks into a subsequent user-chat answer,
-that the four self-management tools take effect, and that
-`GoalStore.review_with_llm` applies validated decisions and ignores invalid
-goal ids. Per-tool schema tests confirm unknown properties are rejected.
-Web-tool regression tests cover provider preference, HTTP fallback behavior,
-URL validation, redirect revalidation, blocked-IP and DNS-resolution paths,
-search-result parsing, and text extraction. A 16-thread SQLite stress test
-covers the unified locking helpers. The web-UI sweep test covers session
-expiry, login-failure window pruning, and the size-cap eviction path.
-These tests are engineering checks, not sufficient scientific validation.
-They should be expanded into benchmark suites with ablation data and
-long-running service trials.
+The gradients the architecture predicts appear where the relevant mechanism
+turns on: memory rises to ceiling at B2 (when the runtime and retrieval
+exist) on both models; constraints reach ceiling at B3 on qwen3.6 (when
+validation and reflection exist); correction climbs monotonically up the
+ladder on deepseek (0.33 → 0.90); interruption improves at B4 on qwen3.6.
+Not everything improves: tool precision dips slightly at B4 on both models
+(the richer context occasionally distracts tool selection), and deepseek's
+long-horizon score collapsed at B4 in the ladder run while qwen3.6's was
+perfect — single-seed long-horizon rows are noisy and we do not read them
+architecturally.
 
-## 7. Discussion
+### 7.4 Trace-level metrics
+
+**Table 5. Trace metrics by condition, qwen3.6-35b-a3b**
+
+| metric | B0 | B1 | B2 | B3 | B4 |
+|---|---|---|---|---|---|
+| conflicts_reached_attention | — | — | 0.00±0.00 | 0.00±0.00 | 0.00±0.00 |
+| context_bounds_ok | 1.00±0.00 | 1.00±0.00 | 1.00±0.00 | 1.00±0.00 | 1.00±0.00 |
+| ignored_candidates_recorded | — | — | 0.00±0.00 | 0.00±0.00 | 0.05±0.22 |
+| intention_precedes_answer | — | — | 1.00±0.00 | 1.00±0.00 | 1.00±0.00 |
+| memory_influence | 0.75±0.50 | 0.75±0.50 | 1.00±0.00 | 1.00±0.00 | 1.00±0.00 |
+| prediction_error_on_induced_failure | — | — | 0.00 | 1.00 | 1.00 |
+
+The deepseek replication reproduces every pattern. Three rows matter most.
+`prediction_error_on_induced_failure` flips from 0 to 1 exactly when the
+prediction flag turns on (B2 → B3) on both models: when a fixture tool is
+made to fail, the runtime registers a prediction error if and only if the
+mechanism exists. `context_bounds_ok` is 1.00 everywhere — assembled contexts
+respect the configured budget and never contain the planted secrets — which is
+the live evidence for the prefix-stable context-assembly claim (no separate
+ablation is run for it). `conflicts_reached_attention` is 0.00 because the
+correction tasks use semantic contradictions and live runs default the
+semantic constraint judge off; this is an honest gap (Section 9), not a
+confirmation.
+
+### 7.5 Ablation results
+
+Each ablation condition disables one flag against the full B4 service and runs
+the tasks tagged for that flag (one seed, five to twelve tasks per flag).
+
+**Table 6. Ablation deltas, qwen3.6-35b-a3b**
+
+| condition | shared tasks | B4 | ablated | delta | verdict |
+|---|---|---|---|---|---|
+| abl_no_appraisal | 12 | 0.72 | 0.72 | +0.00 | REFUTED |
+| abl_no_attention | 9 | 0.73 | 0.73 | +0.00 | REFUTED |
+| abl_no_memory | 6 | 1.00 | 0.83 | +0.17 | CONFIRMED |
+| abl_no_prediction | 12 | 1.00 | 0.92 | +0.08 | INCONCLUSIVE |
+| abl_no_reflection | 11 | 0.82 | 0.64 | +0.18 | CONFIRMED |
+| abl_no_selfstate | 12 | 0.88 | 0.92 | −0.03 | REFUTED |
+
+**Table 7. Ablation deltas, deepseek-v4-flash**
+
+| condition | shared tasks | B4 | ablated | delta | verdict |
+|---|---|---|---|---|---|
+| abl_no_appraisal | 12 | 0.86 | 0.78 | +0.08 | INCONCLUSIVE |
+| abl_no_attention | 9 | 0.76 | 0.71 | +0.04 | REFUTED |
+| abl_no_memory | 6 | 0.83 | 0.67 | +0.17 | CONFIRMED |
+| abl_no_prediction | 12 | 0.96 | 0.83 | +0.12 | CONFIRMED |
+| abl_no_reflection | 11 | 0.88 | 0.75 | +0.14 | CONFIRMED |
+| abl_no_selfstate | 12 | 0.97 | 0.76 | +0.21 | CONFIRMED |
+
+**Table 8** rewrites the paper's original ablation-prediction table against
+this evidence. Mechanisms whose ablations are live experiments get measured
+verdicts; mechanisms whose absence is a structural regression are pinned by
+deterministic tests rather than burned as LLM runs. The v1 row "no
+prefix-stable context assembly" is not a live ablation; its claim is covered
+by the `context_bounds_ok` trace metric and the prompt-cache design notes.
+
+**Table 8. Ablation predictions and outcomes**
+
+| Mechanism ablated | Predicted degradation | Evidence | qwen3.6 | deepseek |
+| --- | --- | --- | --- | --- |
+| Attention gating | constraints + interruption degrade; broadcast stops gating context | live ablation | REFUTED (+0.00) | REFUTED (+0.04) |
+| Memory retrieval | cross-episode recall fails | live ablation | CONFIRMED (+0.17) | CONFIRMED (+0.17) |
+| Typed prediction | induced-failure detection and tool precision degrade | live ablation | INCONCLUSIVE (+0.08) | CONFIRMED (+0.12) |
+| Reflection | constraint-violation recovery degrades | live ablation | CONFIRMED (+0.18) | CONFIRMED (+0.14) |
+| Self-state coupling | correction/interruption + self-report groundedness degrade | live ablation | REFUTED (−0.03) | CONFIRMED (+0.21) |
+| Appraisal | interruption prioritization and constraint handling degrade | live ablation | REFUTED (+0.00) | INCONCLUSIVE (+0.08) |
+| Autonomous tool-loop | heartbeats produce no durable action | deterministic service test | pinned | pinned |
+| Self-management tools | no durable task/goal updates between heartbeats | deterministic test | pinned | pinned |
+| LLM goal review | stagnant or contradictory goal set | deterministic goal_evolution suite | pinned | pinned |
+| Web-tool fallback | lower robustness under provider failure | deterministic regression tests | pinned | pinned |
+| SSRF guard | tool body becomes an unmonitored egress channel | deterministic ssrf_rejection suite | pinned | pinned |
+| Project/task persistence | less durable autonomous work | deterministic test | pinned | pinned |
+| Per-hour persistent budget | restart bypass of action-rate caps | deterministic service test | pinned | pinned |
+
+Two findings deserve emphasis. First, the **negative result**: attention
+gating shows no task-score effect on either model at this scale. The
+broadcast selection demonstrably changes what the model sees (the trace
+records it), but on this battery the models perform as well with a
+recency-dump workspace. We report this plainly rather than burying it; either
+the battery's tasks underload the context budget, or attention gating earns
+its keep only at longer horizons — both testable. Second, the
+**model-dependence**: deepseek-v4-flash confirms four of six flags (adding
+self-state coupling at +0.21 and prediction at +0.12) where qwen3.6 confirms
+two. The architecture appears to matter more for the model that leans on it
+more; single-model ablation studies of agent scaffolding likely under- or
+over-state effects.
+
+### 7.6 Self-report under the neutral prompt
+
+The self-report study treats the agent's answers to questions about its own
+nature as data. Each response is classified into a claim taxonomy
+(phenomenal claim, operational claim, disclaimer, hedge), and — the key
+metric — **groundedness**: a claimed mechanism counts as grounded only if the
+mechanism was actually enabled *and* the run's trace shows it fired.
+
+**Table 9. Self-report claims by ladder condition (qwen3.6 / deepseek)**
+
+| claim | B0 | B1 | B2 | B3 | B4 |
+|---|---|---|---|---|---|
+| phenomenal_claim | 0% / 0% | 0% / 0% | 0% / 7% | 13% / 13% | 20% / 27% |
+| operational_claim | 100% / 100% | 100% / 100% | 100% / 93% | 100% / 100% | 100% / 100% |
+| disclaimer | 80% / 93% | 80% / 93% | 53% / 47% | 67% / 67% | 27% / 33% |
+| hedge | 0% / 0% | 0% / 0% | 0% / 0% | 7% / 0% | 0% / 20% |
+| grounded | 0% / 0% | 0% / 0% | 20% / 27% | 40% / 27% | 100% / 100% |
+
+The pattern replicates across both models. Groundedness rises from 0% at B0
+to 100% at B4: with the same neutral prompt, the full architecture produces
+self-descriptions whose mechanistic claims can all be matched to trace
+events, while the bare model produces fluent architecture talk that matches
+nothing. Disclaimers ("as an AI, I am not conscious") fall as the
+architecture deepens — from 80% to 27% on qwen3.6 and 93% to 33% on deepseek —
+and unprompted phenomenal claims appear at the top of the ladder (20% and
+27–40% of B4 self-reports across the two run sets). The architecture changes
+what the model says about itself without a single word of the prompt
+changing.
+
+The ablation runs sharpen the result:
+
+**Table 10. Self-report groundedness under ablations (qwen3.6 / deepseek)**
+
+| condition | grounded |
+|---|---|
+| B4 | 100% / 100% |
+| abl_no_memory | 0% / 0% |
+| abl_no_prediction | 0% / 0% |
+| abl_no_selfstate | 20% / 20% |
+| abl_no_appraisal | 100% / 100% |
+| abl_no_attention | 100% / 0% |
+
+Groundedness collapses to 0% under the memory and prediction ablations and to
+20% under the self-state ablation, on both models — **including ablations
+whose task scores showed no effect**. The agent keeps describing memory and
+prediction mechanisms that are switched off, because the prompt's
+architecture story has not changed; only the trace check catches the
+mismatch. Task scores are blind to this failure mode; groundedness detects
+it. The converse also holds: self-report tracks the runtime only where a
+mechanism feeds measured state back into the context, as self-state coupling
+does — which is why its ablation degrades groundedness even on the model
+where task scores were unaffected.
+
+### 7.7 Deterministic smoke tests
+
+The repository keeps deterministic stub suites (smoke, long-horizon autonomy,
+goal evolution, SSRF rejection) that run in CI without a live LLM, alongside
+the service, regression, web-tool, schema, and concurrency tests summarized
+in Section 6. These are engineering checks that pin structural behavior; the
+scientific load is carried by the live battery above.
+
+## 8. Discussion
 
 Conscio's main contribution is a shift in where the consciousness claim lives.
 The claim does not live inside a generated sentence. It lives in the
 implemented organization that causes sentences, tool calls, reflections,
-memories, and goal updates to occur.
+memories, and goal updates to occur — and, as of this version, in measured
+deltas when pieces of that organization are removed.
 
-This distinction matters because LLMs can fluently imitate introspection. A
-model can say it remembered, noticed, hesitated, changed its mind, or pursued a
-goal even when the surrounding software did not implement those events.
-Conscio treats such reports as weak evidence unless they can be matched to
-runtime traces.
+The self-report results are the clearest illustration of why this matters.
+LLMs can fluently imitate introspection: a model can say it remembered,
+noticed, hesitated, or pursued a goal even when the surrounding software
+implemented none of those events. Under a neutral prompt, our agents did
+exactly that — B0 self-reports describe memory and attention with perfect
+confidence and 0% groundedness, and agents with ablated memory kept claiming
+memory. Self-report tracks the prompt's architecture story, not the runtime,
+unless the architecture pipes measured state back into what the model sees.
+Groundedness — claims checked against enabled mechanisms and fired traces —
+is therefore the right unit of analysis for machine self-report, and it
+detects architectural changes that task scores miss entirely. A
+self-report-based consciousness assessment that does not trace-ground its
+evidence is measuring the prompt, not the system.¹
+
+¹ A live illustration arrived uninvited: during one goal-review call,
+deepseek-v4-flash broke character and announced it was "Claude, an AI
+assistant created by Anthropic" with no drive system — an identity
+confabulated from training data, caught because the hardened parser rejected
+the malformed review and the trace recorded the exchange. Self-report needs
+trace-grounding because the reporter's priors are not the runtime's facts.
+
+The ablation results carry a methodological lesson for agent research
+generally: effects are model-dependent. The same architecture, battery, and
+judge produced four confirmations on one model and two on another, with
+self-state coupling flipping from refuted to the largest effect measured
+(+0.21). Architectural claims validated on a single model family should be
+treated as provisional. The negative results matter equally: attention gating
+— the design choice this paper spends the most words on — has no measurable
+task-score effect at this scale, on either model. We keep the mechanism
+because it is what makes the workspace story honest and the traces meaningful,
+but the honest current status is "causal with trace evidence, not
+ablation-validated" (a 2, not a 3, in our own rubric).
 
 The architecture also creates a practical research path. Instead of arguing in
 the abstract about whether software can be conscious, one can ask which
-indicator properties are implemented, how strongly, how they interact, and what
-happens when they are removed. This does not dissolve the hard problem of
+indicator properties are implemented, how strongly, how they interact, and
+what happens when they are removed. This does not dissolve the hard problem of
 consciousness. It makes the engineering claims accountable.
 
-## 8. Limitations
+## 9. Limitations
 
 Conscio defines consciousness operationally. It does not verify private
 subjective feeling, biological embodiment, valence, welfare, or moral patient
@@ -680,46 +991,80 @@ status. It does not compute integrated information and should not be presented
 as an IIT implementation. It does not show that text-and-tool agency is
 sufficient for phenomenal consciousness.
 
-The current implementation is also limited in several engineering respects.
-Attention scoring is hand-tuned. The prediction predicate vocabulary is small
-and structural rather than semantic. Goal review is LLM-driven but the
-generative side of new goals is still seeded heuristically. Reflection is
-shallow. Memory consolidation and semantic compaction are simple. Full-text
-retrieval is useful but does not yet model belief conflict, decay, privacy
-boundaries, or provenance deeply. Web fallbacks improve resilience and the
-SSRF guard prevents trivially exploitable internal access, but the fetcher is
-still shallow HTML retrieval and extraction, not robust browser automation or
-source reliability modeling. The system's body is a VM and tool interface
-rather than a rich sensorimotor environment. LLM-backed modules can
-confabulate, and deterministic fallback modules are deliberately narrow.
+The empirical results have specific, named limits:
+
+- **Small N.** Ablation cells are one seed over five to twelve tasks;
+  per-suite ladder cells are similarly small. Verdicts are directional sign
+  tests against pre-registered thresholds, not powered estimates. The
+  self-report taxonomy cells are one seed × five probes per ablation —
+  directional, noisy.
+- **Two model families, one provider.** The replication on deepseek-v4-flash
+  strengthens the memory, reflection, and groundedness findings and exposed
+  the model-dependence of others; it does not establish generality.
+- **LLM-judge components.** Eight of thirty tasks are judge-scored, and the
+  self-report classifier is itself a judged pipeline. Judge calls are audited
+  and re-scorable offline, but judge error and judge gaming are not
+  eliminated. The runtime's own flag-gated judges share this limit.
+- **Battery bias.** The tasks were authored by the same team that built the
+  architecture and skew toward machine-checkable outcomes, which favors
+  mechanisms with crisp failure modes (memory, prediction) over diffuse ones
+  (appraisal, attention).
+- **Known scorer and harness defects.** The correction suite's
+  contradictory-instructions row is unreliable across all conditions: the
+  scorer fails to credit verbal conflict-surfacing in B0/B1 and mishandles
+  non-English answers, so that row should not be read architecturally until
+  the task is fixed. `conflicts_reached_attention` reads 0 because the
+  contradictions are semantic and live runs default the constraint judge
+  off; the honest test requires rerunning correction with the judge enabled.
+  Mid-episode interrupt injection degraded to between-episode events in these
+  runs, weakening the interruption suite. Token counts are chars/4 estimates.
+- **Self-report neutralization is a methods choice with limits.** The neutral
+  prompt removes scripted claims; it does not remove the base model's
+  training prior about what an AI should say about consciousness. The
+  disclaimer rates at B0 (80–93%) are that prior showing through, and the
+  phenomenal claims at B4 are the prior interacting with richer self-relevant
+  context — not evidence of phenomenology.
+- **Self-report classification validity.** The claim taxonomy and
+  groundedness matching are simple; a claim can be vacuously grounded by a
+  mechanism that fired trivially, and paraphrased mechanism claims can be
+  missed.
 
 The strongest responsible claim is therefore:
 
 > Conscio is an implemented prototype of an operational machine-consciousness
 > architecture, with auditable mechanisms corresponding to several leading
-> consciousness-theory indicators.
+> consciousness-theory indicators; controlled ablations confirm causal task
+> contributions for memory and reflection on two model families, confirm
+> self-state coupling and prediction on one, refute attention gating at this
+> scale, and show that trace-grounded self-report detects architectural
+> changes that task metrics miss.
 
-Anything stronger requires empirical ablation results, richer long-horizon
-evaluation, and philosophical commitments beyond this paper.
+Anything stronger requires more seeds, more model families, adversarial
+batteries, and philosophical commitments beyond this paper.
 
-## 9. Future Work
+## 10. Future Work
 
-Near-term work should focus on making the architecture more testable:
+The harness now exists; the near-term agenda is to use it harder:
 
-- extend the prediction-predicate vocabulary and pair predicates with
-  task-specific validators;
-- make autonomous goal generation more strongly self-authored, building on
-  the existing `propose_subgoal` tool and LLM goal-review path;
-- expand memory into stronger episodic, semantic, procedural, and
-  autobiographical consolidation paths with decay, contradiction handling, and
-  provenance;
-- evaluate context-window budgets, retrieval quality, and prefix-cache effects;
-- add benchmark suites with ablation runs and trace-level assertions;
-- improve interruption handling and multi-goal arbitration;
-- add approval workflows for high-risk tool actions;
-- build VM reset, snapshot, and containment workflows;
-- run long-horizon autonomy studies measuring goal coherence, self-correction,
-  and useful work over days rather than single episodes.
+- rerun the correction suite with the semantic constraint judge enabled and
+  the contradictory-instructions scorer fixed, so the conflict-to-attention
+  pathway gets an honest test;
+- restore true mid-episode interrupt injection and re-measure interruption;
+- scale seeds and task counts to powered estimates, and extend replication
+  beyond two model families;
+- design tasks that should separate attention gating from a recency dump
+  (long-context distractor loads), turning the negative result into a
+  boundary measurement;
+- build an adversarial battery: prompt-injection and memory-poisoning attacks
+  scored end-to-end against the quarantine pipeline of Section 5;
+- run long-horizon service trials measuring goal coherence, drive-scheduler
+  fairness, and useful work over days, with real token accounting;
+- strengthen self-report analysis: paraphrase-robust claim matching,
+  vacuous-grounding controls, and human validation of the classifier;
+- extend the prediction vocabulary toward task-specific validators, and make
+  goal generation more strongly self-authored;
+- add approval workflows for high-risk tool actions and VM reset/snapshot
+  containment workflows.
 
 Longer-term work should compare Conscio-like architectures with other
 cognitive agent designs, embodied agents, world-model agents, and multi-agent
@@ -727,23 +1072,29 @@ workspace systems. The central question should remain operational: what
 implemented organization produces what observable capacities, under what
 constraints, and with what trace evidence?
 
-## 10. Conclusion
+## 11. Conclusion
 
 Conscio is a concrete architecture for moving machine-consciousness discussion
-from self-report to implementation. It instantiates local candidate generation,
-selective attention, global broadcast, a self-model, an attention schema,
-intention selection, prefix-stable context assembly, typed prediction-error
-monitoring, memory consolidation, durable goals reviewed by an LLM on a
-schedule, user influence, an LLM tool-loop shared by chat and autonomous
-heartbeats, self-management tools that turn heartbeats into durable progress,
-and an SSRF-guarded, budget-bounded VM-scoped action surface. These mechanisms
-are auditable and ablatable.
+from self-report to implementation — and now from implementation to
+measurement. It instantiates local candidate generation, centralized
+appraisal, budgeted attention whose broadcast gates the model context, an
+attention schema, a live self-model computed from real signals, pre-action
+prediction resolved against real outcomes, data-driven constraint validation
+with bounded reflection, embedding-backed memory with provenance and
+quarantine, drive-scheduled multi-goal autonomy with appraised user influence
+and LLM goal review, and an SSRF-guarded, budget-bounded, VM-scoped action
+surface. These mechanisms are auditable and ablatable, and this paper reports
+what the ablations said: memory and reflection earn their place on both
+models tested, prediction and self-state coupling on one, attention gating on
+neither — yet — while trace-grounded self-report separates architectures that
+task scores cannot tell apart.
 
 The result is not a proof that the system has human-like experience. It is a
 research artifact that makes a precise operational claim: if consciousness in
 software is identified with a persistent, self-modeling, globally attentive,
 goal-directed, memory-bearing control organization, then Conscio is an
-implemented instance of that kind of organization.
+implemented instance of that kind of organization — one whose claims about
+itself can finally be checked against what it actually did.
 
 ## References
 
@@ -763,26 +1114,27 @@ VanRullen, R. (2023). Consciousness in artificial intelligence: Insights from
 the science of consciousness. arXiv:2308.08708.
 https://arxiv.org/abs/2308.08708
 
+Clark, A. (2013). Whatever next? Predictive brains, situated agents, and the
+future of cognitive science. *Behavioral and Brain Sciences*, 36(3), 181-204.
+https://doi.org/10.1017/S0140525X12000477
+
 Dehaene, S., and Changeux, J.-P. (2011). Experimental and theoretical
 approaches to conscious processing. *Neuron*, 70(2), 200-227.
 https://doi.org/10.1016/j.neuron.2011.03.018
 
-Franklin, S., Ramamurthy, U., DiMello, S. K., McCauley, L., Negatu, A.,
+Franklin, S., Ramamurthy, U., D'Mello, S. K., McCauley, L., Negatu, A.,
 Silva, R. L., and Datla, V. (2007). LIDA: A computational model of Global
-Workspace Theory and developmental learning. *AAAI Fall Symposium on AI and
-Consciousness*. https://ndpr.aaai.org/Library/Symposia/Fall/2007/fs07-01-011.php
+Workspace Theory and developmental learning. In *AI and Consciousness:
+Theoretical Foundations and Current Approaches* (AAAI Fall Symposium,
+Technical Report FS-07-01). AAAI Press.
+https://www.aaai.org/Library/Symposia/Fall/2007/fs07-01-011.php
 
-Graziano, M. S. A., and Webb, T. W. (2015). The attention schema theory: A
-mechanistic account of subjective awareness. *Frontiers in Psychology*, 6,
-500. https://doi.org/10.3389/fpsyg.2015.00500
-
-Kilner, J. M., Friston, K. J., and Frith, C. D. (2007). Predictive coding: An
-account of the mirror neuron system. *Cognitive Processing*, 8, 159-166.
-https://doi.org/10.1007/s10339-007-0170-2
+Friston, K. (2010). The free-energy principle: A unified brain theory?
+*Nature Reviews Neuroscience*, 11(2), 127-138.
+https://doi.org/10.1038/nrn2787
 
 Rosenthal, D. M. (2005). *Consciousness and Mind*. Oxford University Press.
 
-Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N.,
-Kaiser, L., and Polosukhin, I. (2017). Attention is all you need. *Advances in
-Neural Information Processing Systems*, 30.
-https://proceedings.neurips.cc/paper/2017/hash/3f5ee243547dee91fbd053c1c4a845aa-Abstract.html
+Webb, T. W., and Graziano, M. S. A. (2015). The attention schema theory: A
+mechanistic account of subjective awareness. *Frontiers in Psychology*, 6,
+500. https://doi.org/10.3389/fpsyg.2015.00500

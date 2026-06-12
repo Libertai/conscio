@@ -1,7 +1,11 @@
-%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "34px", "primaryColor": "#e6f0ff", "primaryBorderColor": "#3b82f6", "primaryTextColor": "#102a43", "lineColor": "#52606d"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 22, "rankSpacing": 34, "curve": "basis"}}}%%
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "30px", "primaryColor": "#e6f0ff", "primaryBorderColor": "#3b82f6", "primaryTextColor": "#102a43", "lineColor": "#52606d"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 22, "rankSpacing": 34, "curve": "basis"}}}%%
 flowchart LR
-    INPUT["Input"] --> CANDIDATES["Workspace candidates"]
-    CANDIDATES --> ATTENTION["Attention + broadcast"]
-    ATTENTION --> CONTEXT["Stable prefix + context"]
-    CONTEXT --> ACTION["Action outcome"]
-    ACTION --> REVIEW["Prediction memory trace"]
+    INPUT["Input event"] --> SENSE["Sense: module evidence"]
+    SENSE --> APPRAISE["Appraise"]
+    APPRAISE --> ATTEND["Attend + broadcast"]
+    ATTEND --> EXECUTE["Executor step: LLM tool-loop"]
+    EXECUTE --> VALIDATE["Validate constraints + predictions"]
+    VALIDATE --> SELF["Self-state update"]
+    SELF --> DECIDE["Decide tick"]
+    DECIDE -->|step / reflect| SENSE
+    DECIDE -->|answer / ask / refuse / wait| OUT["Episode result + traces"]

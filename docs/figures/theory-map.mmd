@@ -1,8 +1,0 @@
-%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "30px", "primaryColor": "#e6f0ff", "primaryBorderColor": "#3b82f6", "primaryTextColor": "#102a43", "lineColor": "#52606d"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 24, "rankSpacing": 38, "curve": "basis"}}}%%
-flowchart LR
-    CONSCIO["Conscio"] --> GWT["GWT broadcast"]
-    GWT --> SELF["Self model"]
-    SELF --> CONTEXT["Context memory"]
-    CONTEXT --> AST["Attention schema"]
-    AST --> PP["Prediction error"]
-    PP --> AGENT["Goals + autonomy"]

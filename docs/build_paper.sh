@@ -39,13 +39,11 @@ render_mermaid() {
 }
 
 render_all_figures() {
-    render_mermaid "$FIGURES/theory-map.mmd" "$MERMAID_OUT/theory-map.svg"
     render_mermaid "$FIGURES/runtime-loop.mmd" "$MERMAID_OUT/runtime-loop.svg"
     render_mermaid "$FIGURES/service-loop.mmd" "$MERMAID_OUT/service-loop.svg"
     render_mermaid "$FIGURES/attention-weights.mmd" "$MERMAID_OUT/attention-weights.svg"
     render_mermaid "$FIGURES/evaluation-ladder.mmd" "$MERMAID_OUT/evaluation-ladder.svg"
     local png_args=(-s "$MERMAID_PNG_SCALE" -w "$MERMAID_PNG_WIDTH" -H "$MERMAID_PNG_HEIGHT")
-    render_mermaid "$FIGURES/theory-map.mmd" "$MERMAID_PDF_OUT/theory-map.png" "${png_args[@]}"
     render_mermaid "$FIGURES/runtime-loop.mmd" "$MERMAID_PDF_OUT/runtime-loop.png" "${png_args[@]}"
     render_mermaid "$FIGURES/service-loop.mmd" "$MERMAID_PDF_OUT/service-loop.png" "${png_args[@]}"
     render_mermaid "$FIGURES/attention-weights.mmd" "$MERMAID_PDF_OUT/attention-weights.png" "${png_args[@]}"
@@ -58,22 +56,21 @@ write_pdf_markdown() {
             n = 0
             in_mermaid = 0
             skip_header = 1
-            images[1] = "![Figure 1. Theory Indicators Mapped to Conscio Mechanisms](docs/build/figures-pdf/theory-map.png)"
-            images[2] = "![Figure 2. Per-Episode Cognitive Runtime](docs/build/figures-pdf/runtime-loop.png)"
-            images[3] = "![Figure 3. Persistent Service and Autonomy Loop](docs/build/figures-pdf/service-loop.png)"
-            images[4] = "![Figure 4. Base Attention Score Weights](docs/build/figures-pdf/attention-weights.png)"
-            images[5] = "![Figure 5. Evaluation Ladder](docs/build/figures-pdf/evaluation-ladder.png)"
+            images[1] = "![Figure 1. Per-Episode Cognitive Runtime](docs/build/figures-pdf/runtime-loop.png)"
+            images[2] = "![Figure 2. Persistent Service and Autonomy Loop](docs/build/figures-pdf/service-loop.png)"
+            images[3] = "![Figure 3. Base Attention Score Weights](docs/build/figures-pdf/attention-weights.png)"
+            images[4] = "![Figure 4. Evaluation Ladder](docs/build/figures-pdf/evaluation-ladder.png)"
 
             print "<section class=\"cover-page\">"
             print "<div class=\"cover-kicker\">Conscio Research Draft</div>"
             print "<h1>Conscio</h1>"
-            print "<p class=\"cover-subtitle\">An Operational Architecture for Auditable Machine Consciousness</p>"
+            print "<p class=\"cover-subtitle\">An Operational Architecture and Evaluation for Auditable Machine Consciousness</p>"
             print "<div class=\"cover-rule\"></div>"
             print "<p class=\"cover-author\">Jonathan Schemoul<br/><span>LibertAI</span></p>"
-            print "<p class=\"cover-thesis\">A persistent agent runtime for studying operational consciousness through inspectable mechanisms: attention, self-modeling, memory, appraisal, goals, prediction error, reflection, and autonomous action.</p>"
+            print "<p class=\"cover-thesis\">A persistent agent runtime for studying operational consciousness through inspectable mechanisms: attention, self-modeling, memory, appraisal, goals, prediction error, reflection, and autonomous action — with baseline-ladder, ablation, and trace-grounded self-report results on two model families.</p>"
             print "<div class=\"cover-meta\">"
-            print "<div><span>Version</span><strong>Draft v1.0</strong></div>"
-            print "<div><span>Date</span><strong>May 2026</strong></div>"
+            print "<div><span>Version</span><strong>Draft v2.0</strong></div>"
+            print "<div><span>Date</span><strong>June 2026</strong></div>"
             print "<div><span>Affiliation</span><strong>LibertAI</strong></div>"
             print "</div>"
             print "</section>"
@@ -86,14 +83,15 @@ write_pdf_markdown() {
             print "<div><span>2</span>Background and Related Work</div>"
             print "<div><span>3</span>Operational Definition</div>"
             print "<div><span>4</span>Architecture</div>"
-            print "<div><span>5</span>Implementation Status</div>"
+            print "<div><span>5</span>Threat Model and Containment</div>"
+            print "<div><span>6</span>Implementation Status</div>"
             print "</div>"
             print "<div class=\"toc-list\">"
-            print "<div><span>6</span>Evaluation Plan</div>"
-            print "<div><span>7</span>Discussion</div>"
-            print "<div><span>8</span>Limitations</div>"
-            print "<div><span>9</span>Future Work</div>"
-            print "<div><span>10</span>Conclusion</div>"
+            print "<div><span>7</span>Evaluation and Results</div>"
+            print "<div><span>8</span>Discussion</div>"
+            print "<div><span>9</span>Limitations</div>"
+            print "<div><span>10</span>Future Work</div>"
+            print "<div><span>11</span>Conclusion</div>"
             print "</div>"
             print "</div>"
             print "<div class=\"toc-note\">Figures and tables are generated from editable Mermaid and Markdown sources during the PDF build.</div>"
@@ -145,7 +143,7 @@ build_pdf() {
         --from gfm+raw_html \
         --standalone \
         --resource-path "$DOCS" \
-        --metadata pagetitle="Conscio: An Operational Architecture for Auditable Machine Consciousness" \
+        --metadata pagetitle="Conscio: An Operational Architecture and Evaluation for Auditable Machine Consciousness" \
         "${pdf_engine[@]}" \
         -o "$PDF_OUT"
 }
