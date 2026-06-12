@@ -87,7 +87,9 @@ def check_password(service: ConscioService, supplied: str) -> bool:
     expected = service.config.web_password
     if not expected:
         return False
-    return hmac.compare_digest(supplied, expected)
+    # Compare as bytes: compare_digest raises TypeError on non-ASCII str,
+    # which would turn a login attempt into a 500 and bypass failure tracking.
+    return hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
 
 
 def record_login_failure(failures: dict[str, list[float]], client: str, now: float) -> int:

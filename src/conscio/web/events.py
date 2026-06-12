@@ -67,6 +67,11 @@ class WorkspaceEventBroker:
         if self._unsubscribe is not None:
             self._unsubscribe()
             self._unsubscribe = None
+        # Signal connected stream generators to finish; otherwise they would
+        # sit on orphaned queues emitting heartbeats forever and block uvicorn's
+        # graceful shutdown while a dashboard tab is open.
+        for client in self._clients:
+            self._enqueue(client, {"type": "stream.close", "ts": time.time()})
         self._clients.clear()
 
     # ── client registration ──────────────────────────────────────
@@ -213,8 +218,12 @@ async def stream_events(
             try:
                 payload = await asyncio.wait_for(client.queue.get(), timeout=HEARTBEAT_SECONDS)
             except asyncio.TimeoutError:
-                yield b": ping\n\n"
+                # A named event, not an SSE comment: comments never reach JS,
+                # so the client's stall detector could not see comment pings.
+                yield encode_sse({"type": "ping", "ts": time.time()}).encode("utf-8")
                 continue
             yield encode_sse(payload, event=payload.get("type")).encode("utf-8")
+            if payload.get("type") == "stream.close":
+                break
     finally:
         broker.unregister(client)

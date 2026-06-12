@@ -63,9 +63,12 @@ export async function sendMessage(content: string): Promise<void> {
     await loadHistory(sessionId);
     void reply;
   } catch (err) {
-    // Roll back optimistic on failure.
-    messages = messages.filter((m) => m.id !== optimistic.id);
-    loadError = err instanceof Error ? err.message : "send failed";
+    const msg = err instanceof Error ? err.message : "send failed";
+    // The server persists the user message before invoking the agent, so on
+    // failure it may already be stored — reconcile with server state instead
+    // of rolling back a message that will reappear on the next load.
+    await loadHistory(sessionId);
+    loadError = msg;
   } finally {
     sending = false;
   }

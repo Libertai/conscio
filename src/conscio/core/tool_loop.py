@@ -72,6 +72,7 @@ class ToolLoop:
             return ToolLoopResult(final_text=content or None, rounds=1)
 
         tool_requests: list[ToolRequest] = []
+        known_names = _schema_tool_names(tool_schemas)
         rounds = 0
         for _ in range(self.max_rounds):
             rounds += 1
@@ -81,7 +82,7 @@ class ToolLoop:
                 max_tokens=self.max_tokens,
                 tools=tool_schemas,
             )
-            request = self._tool_request(response)
+            request = self._tool_request(response, known_names)
             if request is None:
                 content = str(response.get("content") or "").strip()
                 return ToolLoopResult(final_text=content or None, tool_requests=tool_requests, rounds=rounds)
@@ -139,10 +140,10 @@ class ToolLoop:
         return result
 
     @staticmethod
-    def _tool_request(response: dict[str, Any]) -> ToolRequest | None:
+    def _tool_request(response: dict[str, Any], known_names: set[str] | None = None) -> ToolRequest | None:
         calls = response.get("tool_calls") or []
         if not calls:
-            return _parse_dsml_tool_call(str(response.get("content") or ""))
+            return _parse_dsml_tool_call(str(response.get("content") or ""), known_names=known_names)
         call = calls[0]
         function = call.get("function") or {}
         name = str(function.get("name") or "").strip()
@@ -195,17 +196,35 @@ def latest_tool_observation(workspace: Workspace, name: str) -> WorkspaceEntry |
 _DSML_SEP = re.compile(r"<\s*[｜|]\s*tool[_ ]?sep\s*[｜|]\s*>", re.IGNORECASE)
 _DSML_CALL_BEGIN = re.compile(r"<\s*[｜|]\s*tool[_ ]?call[_ ]?begin\s*[｜|]\s*>", re.IGNORECASE)
 _DSML_CALL_END = re.compile(r"<\s*[｜|]\s*tool[_ ]?call[_ ]?end\s*[｜|]\s*>", re.IGNORECASE)
-_DSML_HINT = re.compile(r"<\s*[｜|]\s*(?:dsml\s*)?tool[_ ]?calls?", re.IGNORECASE)
+_DSML_CALLS_BEGIN = re.compile(r"<\s*[｜|]\s*tool[_ ]?calls[_ ]?begin\s*[｜|]\s*>", re.IGNORECASE)
+_DSML_CALLS_END = re.compile(r"<\s*[｜|]\s*tool[_ ]?calls[_ ]?end\s*[｜|]\s*>", re.IGNORECASE)
+_DSML_HINT = re.compile(r"<\s*[｜|]\s*(?:dsml\s*[｜|]?\s*)?tool[_ ]?calls?", re.IGNORECASE)
+_DSML_MARKER = re.compile(r"<\s*[｜|][^<>]*>")
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
 
 
-def _parse_dsml_tool_call(content: str) -> ToolRequest | None:
+def _schema_tool_names(tool_schemas: list[dict[str, Any]] | None) -> set[str] | None:
+    """Tool names offered to the model this round — the only names a recovered
+    DSML call may legitimately carry."""
+    if not tool_schemas:
+        return None
+    names: set[str] = set()
+    for schema in tool_schemas:
+        function = schema.get("function") or {}
+        name = str(function.get("name") or schema.get("name") or "").strip()
+        if name:
+            names.add(name)
+    return names or None
+
+
+def _parse_dsml_tool_call(content: str, known_names: set[str] | None = None) -> ToolRequest | None:
     if not content or not _DSML_HINT.search(content):
         return None
-    # Restrict to the first call's region if both call_begin and call_end are present.
-    begin_match = _DSML_CALL_BEGIN.search(content)
+    # Restrict to the first call's region: prefer per-call markers, fall back
+    # to the plural wrapper so prose before the leak never enters the parse.
+    begin_match = _DSML_CALL_BEGIN.search(content) or _DSML_CALLS_BEGIN.search(content)
     region = content[begin_match.end():] if begin_match else content
-    end_match = _DSML_CALL_END.search(region)
+    end_match = _DSML_CALL_END.search(region) or _DSML_CALLS_END.search(region)
     if end_match:
         region = region[: end_match.start()]
     sep_match = _DSML_SEP.search(region)
@@ -226,8 +245,17 @@ def _parse_dsml_tool_call(content: str) -> ToolRequest | None:
         args_raw = _extract_balanced_json(name_and_args, brace)
         if args_raw is None:
             return None
-    name = (prefix.splitlines() or [""])[0].strip().strip("`").strip()
+    # Leftover marker tokens (e.g. a stray plural wrapper) are noise, not names.
+    prefix = _DSML_MARKER.sub("\n", prefix)
+    name = next(
+        (line.strip().strip("`").strip() for line in prefix.splitlines() if line.strip()),
+        "",
+    )
     if not name:
+        return None
+    if known_names is not None and name not in known_names:
+        # A final text answer that merely mentions the markers parses into
+        # garbage here; never convert it into a phantom tool call.
         return None
     try:
         args = json.loads(args_raw)

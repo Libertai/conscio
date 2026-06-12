@@ -4,11 +4,13 @@
 
   type Fact = { fact: string; source: string; confidence: string; created_at?: number; updated_at?: number };
   type Skill = { skill: string; description?: string; steps?: string; use_count?: number };
+  // FTS rows from /ui/api/memory/search (MemoryStore.search) — not Fact-shaped.
+  type SearchResult = { content: string; memory_type: string; source: string | null; rank: number };
 
   let recentFacts = $state<Fact[]>([]);
   let skills = $state<Skill[]>([]);
   let q = $state("");
-  let results = $state<Fact[]>([]);
+  let results = $state<SearchResult[]>([]);
   let searching = $state(false);
   let error = $state<string | null>(null);
 
@@ -33,7 +35,7 @@
     searchTimer = setTimeout(async () => {
       searching = true;
       try {
-        results = await api<Fact[]>(`/ui/api/memory/search?q=${encodeURIComponent(query)}&limit=30`);
+        results = await api<SearchResult[]>(`/ui/api/memory/search?q=${encodeURIComponent(query)}&limit=30`);
       } catch (err) {
         error = err instanceof Error ? err.message : "search failed";
       } finally {
@@ -76,11 +78,11 @@
           {searching ? "searching…" : `${results.length} matches`}
         </p>
         <ul class="mt-2 space-y-1.5">
-          {#each results as r (r.fact)}
+          {#each results as r, i (i)}
             <li class="px-3 py-2 rounded-md border text-sm" style="background: var(--color-bg-elev)">
-              <p style="color: var(--color-fg)">{r.fact}</p>
+              <p style="color: var(--color-fg)">{r.content}</p>
               <p class="mt-1 font-mono text-[10px] tabular smallcaps" style="color: var(--color-fg-faint)">
-                {r.source ?? "agent"} · {r.confidence ?? "MEDIUM"}
+                {r.source ?? "agent"} · {r.memory_type}
               </p>
             </li>
           {/each}

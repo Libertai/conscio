@@ -309,8 +309,12 @@ class GoalStore:
         if not decisions:
             if raw:
                 logger.warning("goal_review: parse miss, raw=%r", raw[:2000])
+                # Strip tool-call marker tokens before storing: facts re-enter
+                # model context, and leaked markers there can trip the DSML
+                # recovery parser in ToolLoop on later turns.
+                sanitized = re.sub(r"<\s*[｜|][^<>]*>", "", raw)
                 await self.memory.add_fact(
-                    f"Goal review parse miss; raw response head: {raw[:200]}",
+                    f"Goal review parse miss; raw response head: {sanitized[:200]}",
                     source="goal_review",
                     confidence="LOW",
                 )

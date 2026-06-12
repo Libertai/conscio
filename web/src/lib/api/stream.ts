@@ -23,17 +23,25 @@ export class EventStream {
   private health: StreamHealth = "connecting";
   private stallTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly stallMs = 30_000;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectDelayMs = 1_000;
+  private readonly reconnectMaxMs = 30_000;
+  private stopped = false;
 
   constructor(private readonly url: string) {}
 
   start(): void {
+    this.stopped = false;
     if (this.es) return;
     this.connect();
   }
 
   stop(): void {
+    this.stopped = true;
     if (this.stallTimer) clearTimeout(this.stallTimer);
     this.stallTimer = null;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
     if (this.es) {
       this.es.close();
       this.es = null;
@@ -50,9 +58,11 @@ export class EventStream {
     if (!bucket) {
       bucket = new Set();
       this.listeners.set(eventName, bucket);
+      // One DOM handler per event name: dispatch() fans out to the bucket,
+      // so attaching per-listener would double-fire everything.
+      this.es?.addEventListener(eventName, this.handlerFor(eventName));
     }
     bucket.add(listener);
-    this.es?.addEventListener(eventName, this.handlerFor(eventName));
     return () => bucket!.delete(listener);
   }
 
@@ -68,14 +78,22 @@ export class EventStream {
     this.es = es;
 
     es.addEventListener("stream.open", () => {
+      this.reconnectDelayMs = 1_000;
       this.setHealth("live");
       this.bump();
     });
 
+    // Server heartbeat: keeps the stall detector honest while the agent is quiet.
+    es.addEventListener("ping", () => this.bump());
+
     es.addEventListener("error", () => {
-      // EventSource auto-reconnects on its own; we only adjust health.
       if (es.readyState === EventSource.CLOSED) {
+        // The browser gives up permanently on HTTP errors (502 during a
+        // deploy, 401 after session expiry) — recreate the source ourselves.
         this.setHealth("disconnected");
+        es.close();
+        if (this.es === es) this.es = null;
+        this.scheduleReconnect();
       } else {
         this.setHealth("connecting");
       }
@@ -87,6 +105,15 @@ export class EventStream {
     }
     // Generic message handler for unnamed messages + wildcard.
     es.onmessage = (e: MessageEvent) => this.dispatch("message", e.data);
+  }
+
+  private scheduleReconnect(): void {
+    if (this.stopped || this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (!this.stopped && !this.es) this.connect();
+    }, this.reconnectDelayMs);
+    this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, this.reconnectMaxMs);
   }
 
   private handlerFor(name: string) {

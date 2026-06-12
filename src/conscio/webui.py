@@ -195,6 +195,9 @@ def create_web_router(service: ConscioService) -> APIRouter:
         conscio_web_session: str | None = Cookie(default=None),
     ) -> list[dict[str, Any]]:
         _require_web_auth(service, sessions, conscio_web_session)
+        await chat_store.ensure_default_session()
+        if await chat_store.get_session(session_id) is None:
+            raise HTTPException(status_code=404, detail="unknown chat session")
         return await chat_store.get_messages(session_id, limit=limit, before_id=before_id)
 
     @router.post("/ui/api/chat/sessions/{session_id}/messages", include_in_schema=False)
@@ -205,8 +208,18 @@ def create_web_router(service: ConscioService) -> APIRouter:
     ) -> dict[str, Any]:
         _require_web_auth(service, sessions, conscio_web_session)
         await chat_store.ensure_default_session()
+        if await chat_store.get_session(session_id) is None:
+            # Without this check append_message's upsert silently resurrects
+            # deleted sessions (or creates ghosts for mistyped ids).
+            raise HTTPException(status_code=404, detail="unknown chat session")
         await chat_store.append_message(session_id, "user", req.content)
-        result = await service.submit_message(req.content)
+        try:
+            result = await service.submit_message(req.content)
+        except Exception as exc:  # noqa: BLE001 — surface as HTTP, keep the user message
+            raise HTTPException(
+                status_code=502,
+                detail=f"agent failed to respond: {exc}",
+            ) from exc
         agent_msg = await chat_store.append_message(
             session_id,
             "agent",

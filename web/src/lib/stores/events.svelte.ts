@@ -27,18 +27,31 @@ let entries = $state<ActivityEntry[]>([]);
 let health = $state<StreamHealth>("connecting");
 let totalReceived = $state(0);
 
+// The server replays its backlog on every (re)connect; remember what we've
+// already shown so reconnects don't duplicate rows. `seq` keeps entry ids
+// unique even when two events share a timestamp.
+let seq = 0;
+const seen = new Set<string>();
+
 function summarise(payload: any): string {
   if (typeof payload?.content === "string") return payload.content;
   if (typeof payload?.output === "string") return payload.output;
   if (typeof payload?.input === "string") return payload.input;
   if (typeof payload?.user === "string") return payload.user;
   if (typeof payload?.agent === "string") return payload.agent;
+  if (payload?.goal_id) return `goal ${payload.goal_id} ${payload.action ?? "changed"}`;
   if (payload?.project_id) return `project ${payload.project_id} → ${payload.status ?? "updated"}`;
   if (payload?.paused !== undefined) return payload.paused ? "paused" : "resumed";
   return "—";
 }
 
-function push(entry: ActivityEntry) {
+function push(key: string, entry: ActivityEntry) {
+  if (seen.has(key)) return;
+  seen.add(key);
+  if (seen.size > RING_SIZE * 2) {
+    const oldest = seen.values().next().value;
+    if (oldest !== undefined) seen.delete(oldest);
+  }
   entries = [entry, ...entries].slice(0, RING_SIZE);
   totalReceived += 1;
 }
@@ -56,8 +69,8 @@ export function startEventStream(): void {
   ];
   for (const kind of channels) {
     _stream.on(`workspace.${kind}`, (e: any) => {
-      push({
-        id: `ws-${e.ts}-${entries.length}`,
+      push(`${e.type}:${e.ts}`, {
+        id: `ws-${e.ts}-${seq++}`,
         type: e.type,
         kind,
         ts: e.ts,
@@ -71,10 +84,10 @@ export function startEventStream(): void {
   }
 
   // Service-level events.
-  for (const t of ["chat.message", "episode.created", "project.updated", "control.paused"]) {
+  for (const t of ["chat.message", "episode.created", "project.updated", "goal.changed", "control.paused"]) {
     _stream.on(t, (e: any) => {
-      push({
-        id: `${t}-${e.ts}-${entries.length}`,
+      push(`${t}:${e.ts}`, {
+        id: `${t}-${e.ts}-${seq++}`,
         type: t,
         kind: t.split(".")[0],
         ts: e.ts,
