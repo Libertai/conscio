@@ -129,9 +129,10 @@ async def _run_interactive(
                 console.print("[dim]Workspace cleared.[/]")
                 continue
             if user_input.strip().lower() == "/memory":
-                episodes = await agent.memory.recent_episodes(agent.session_id, 10)
+                episodes = await agent.memory.recent_episodes(10)
                 for ep in episodes:
-                    console.print(f"[dim]- {ep['summary'][:100]}[/]")
+                    summary = ep.get("summary") or ep.get("input", "")
+                    console.print(f"[dim]- {summary[:100]}[/]")
                 continue
             console.print("[dim]Thinking...[/]")
             try:

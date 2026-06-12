@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from conscio.core.context import ContextSettings, PromptAssembler
@@ -24,6 +24,7 @@ from conscio.core.autonomy_module import AutonomousActionModule, AutonomousPromp
 from conscio.core.tool_loop import ToolLoop, ToolLoopResult, ToolRequest
 from conscio.core.workspace import EntryType, Workspace, WorkspaceEntry
 from conscio.llm.client import LLMClient
+from conscio.memory.consolidation import ConsolidationEngine
 from conscio.memory.store import MemoryStore
 from conscio.tools import ToolRegistry
 
@@ -51,6 +52,7 @@ class EpisodeResult:
     tool_results: list[dict[str, Any]] = field(default_factory=list)
     memory_ids: list[str] = field(default_factory=list)
     model_context: str = ""
+    episode_id: str = ""
 
 
 class PerceptionModule:
@@ -83,7 +85,10 @@ class PerceptionModule:
 class MemoryRetrievalModule:
     name = "memory"
 
-    def __init__(self, memory: MemoryStore, session_id: str) -> None:
+    def __init__(self, memory: MemoryStore, session_id: str = "") -> None:
+        # Reads the unified episodes table globally (no session_id filter):
+        # prior-process episodes stay visible across restarts. session_id is
+        # kept for constructor compatibility only.
         self.memory = memory
         self.session_id = session_id
         self._ran = False
@@ -95,19 +100,20 @@ class MemoryRetrievalModule:
         if self._ran:
             return []
         self._ran = True
-        episodes = await self.memory.recent_episodes(self.session_id, 3)
+        episodes = await self.memory.recent_episodes(3)
         produced: list[WorkspaceEntry] = []
         for episode in episodes:
+            summary = episode.get("summary") or episode.get("input", "")
             produced.append(
                 workspace.write(
-                    f"Relevant recent episode: {episode['summary']}",
+                    f"Relevant recent episode: {summary}",
                     source=self.name,
                     type=EntryType.MEMORY,
                     priority=4,
                     salience=0.45,
                     confidence=0.65,
                     novelty=0.25,
-                    evidence=[episode.get("outcome", "")],
+                    evidence=[episode.get("output", "")],
                 )
             )
         return produced
@@ -311,6 +317,13 @@ class ResponseModule:
 
 
 class MemoryConsolidator:
+    """Thin adapter over memory.consolidation.ConsolidationEngine.
+
+    Per-episode cheap path only: writes the unified episodes row (no LLM,
+    no junk skills, no compaction facts). Periodic budgeted consolidation
+    runs via ConsolidationEngine.consolidate_cycle on the service cadence.
+    """
+
     name = "consolidator"
 
     def __init__(self, settings: ContextSettings | None = None) -> None:
@@ -323,67 +336,18 @@ class MemoryConsolidator:
         event: InputEvent,
         result: EpisodeResult,
     ) -> list[str]:
-        ids: list[str] = []
-        summary = (
-            f"Input: {event.content[:120]} -> action={result.selected_action}; "
-            f"output={result.output[:180]}"
+        engine = ConsolidationEngine(memory)
+        episode_id = result.episode_id or uuid.uuid4().hex
+        await engine.record_episode(
+            episode_id=episode_id,
+            source=event.source,
+            event_type=event.event_type,
+            input_text=event.content,
+            output=result.output,
+            selected_action=result.selected_action,
+            metrics=asdict(result.metrics),
         )
-        await memory.add_episode(
-            session_id=session_id,
-            summary=summary,
-            outcome=result.output[:240],
-            confidence=str(1.0 - result.self_state.get("uncertainty", 0.5)),
-        )
-        ids.append("episodic")
-        await self._nudge_memory(memory, event, result)
-        if result.selected_action:
-            await memory.add_skill(
-                skill=f"select_{result.selected_action}",
-                description=f"Selected {result.selected_action} in a cognitive episode.",
-                steps=result.cognitive_trace[:500],
-            )
-            ids.append("procedural")
-        count = await memory.count_episodes(session_id)
-        if (
-            self.settings.enable_semantic_compaction
-            and self.settings.compaction_interval > 0
-            and count > 0
-            and count % self.settings.compaction_interval == 0
-        ):
-            await self._compact_recent(memory, session_id)
-            ids.append("semantic_compaction")
-        return ids
-
-    async def _nudge_memory(self, memory: MemoryStore, event: InputEvent, result: EpisodeResult) -> None:
-        text = event.content.strip()
-        if event.source == "user" and result.selected_action == "answer":
-            await memory.add_skill(
-                skill=f"answer_{_slug(text or result.output)}",
-                description=f"Reusable response pattern for: {text[:120] or result.output[:120]}",
-                steps=result.output[:500],
-            )
-        if result.selected_action == "wait" or "No stable intention emerged" in result.output:
-            await memory.add_fact(
-                "Runtime failure pattern: no stable intention emerged; prioritize current-episode responder intentions.",
-                source="runtime",
-                confidence="MEDIUM",
-            )
-
-    async def _compact_recent(self, memory: MemoryStore, session_id: str) -> None:
-        episodes = await memory.recent_episodes(session_id, self.settings.compaction_interval)
-        actions: dict[str, int] = {}
-        for episode in episodes:
-            summary = str(episode.get("summary", ""))
-            if "action=" in summary:
-                action = summary.split("action=", 1)[1].split(";", 1)[0].strip()
-                actions[action] = actions.get(action, 0) + 1
-        if actions:
-            top = ", ".join(f"{name}:{count}" for name, count in sorted(actions.items()))
-            await memory.add_fact(
-                f"Recent episode compaction: action distribution over latest {len(episodes)} episodes is {top}.",
-                source="compaction",
-                confidence="MEDIUM",
-            )
+        return [episode_id]
 
 
 class CognitiveRuntime:
@@ -464,6 +428,7 @@ class CognitiveRuntime:
     async def run_episode(self, event: InputEvent | str) -> EpisodeResult:
         if isinstance(event, str):
             event = InputEvent(content=event)
+        episode_id = uuid.uuid4().hex  # canonical episode id (memory provenance)
         self._reset_modules_for_episode()
         start = time.time()
         self._current_episode_start = start
@@ -558,6 +523,7 @@ class CognitiveRuntime:
             metrics=metrics,
             tool_results=tool_results,
             model_context=self.last_model_context,
+            episode_id=episode_id,
         )
         result.memory_ids = await self.consolidator.consolidate(self.memory, self.session_id, event, result)
         self.trace.record("episode_completed", "runtime", action=result.selected_action)
@@ -626,6 +592,3 @@ class CognitiveRuntime:
                 reset()
 
 
-def _slug(text: str) -> str:
-    value = "".join(ch.lower() if ch.isalnum() else "_" for ch in text[:48]).strip("_")
-    return value or "episode"

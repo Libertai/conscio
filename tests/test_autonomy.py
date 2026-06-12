@@ -211,7 +211,7 @@ class GoalReviewWithLLMTests(unittest.IsolatedAsyncioTestCase):
                     recent_influences=[],
                 )
             facts = service.memory.fetchall(
-                "SELECT fact FROM semantic WHERE source = 'goal_review' ORDER BY id DESC LIMIT 5"
+                "SELECT fact FROM facts WHERE origin = 'goal_review' ORDER BY id DESC LIMIT 5"
             )
         finally:
             await service.stop()

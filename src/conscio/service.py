@@ -15,6 +15,7 @@ from conscio.core.cognition import InputEvent
 from conscio.core.runtime import CognitiveRuntime, EpisodeResult
 from conscio.goals import GoalStore
 from conscio.llm.client import LLMClient
+from conscio.memory.embeddings import LibertAIEmbedder
 from conscio.memory.store import MemoryStore
 from conscio.tools import PolicyToolRegistry
 
@@ -123,6 +124,7 @@ class ConscioService:
                 api_key=self.config.llm_api_key,
                 model=self.config.llm_model,
             )
+            self.memory.embedder = LibertAIEmbedder(llm)
         context_settings = ContextSettings(
             recent_episodes=self.config.context_recent_episodes,
             retrieved_memories=self.config.context_retrieved_memories,
@@ -240,12 +242,6 @@ class ConscioService:
                 return {"output": "No content provided.", "error": True}
             note = f"[project={project_id or 'none'}] {text[:1500]}"
             await self.autonomy.note_progress(None, note)
-            await self.memory.add_episode(
-                session_id=self.runtime.session_id,
-                summary=f"autonomous note: {text[:160]}",
-                outcome=text[:240],
-                confidence="HIGH",
-            )
             await self.autonomy.record_action("self_management")
             return {"output": "Progress note recorded.", "error": False}
 
@@ -569,7 +565,7 @@ class ConscioService:
                 await self.autonomy.record_action("goal_review_attempt")
                 applied = await self.goals.review_with_llm(
                     self.runtime._autonomous_module.llm,
-                    recent_episodes=await self.autonomy.recent_episodes(15),
+                    recent_episodes=await self.memory.recent_episodes(15),
                     recent_influences=await self.goals.list_influences(15),
                 )
                 if not applied:
@@ -594,7 +590,7 @@ class ConscioService:
             pending = [t for t in tasks if t["status"] == "pending"]
             recently_completed = [t for t in tasks if t["status"] in {"done", "blocked"}][-3:]
         constraints = await self.goals.active_constraints()
-        recent_episodes = await self.autonomy.recent_episodes(5)
+        recent_episodes = await self.memory.recent_episodes(5)
         relevant_memory: list[dict[str, Any]] = []
         if goal:
             try:
@@ -649,16 +645,25 @@ class ConscioService:
         )
 
     async def recent_episodes(self, limit: int = 20) -> list[dict[str, Any]]:
-        stored = await self.autonomy.recent_episodes(limit)
+        stored = await self.memory.recent_episodes(limit)
         if stored:
             return stored
         return [asdict(ep) for ep in self._episodes[-limit:]][::-1]
 
     async def episodes_before(self, cursor_ts: float, limit: int = 20) -> list[dict[str, Any]]:
-        return await self.autonomy.episodes_before(cursor_ts, limit)
+        return await self.memory.episodes_before(cursor_ts, limit)
 
     async def recent_trace(self) -> str:
-        stored = await self.autonomy.recent_trace()
+        episodes = await self.memory.recent_episodes(20)
+        notes = await self.autonomy.recent_notes(20)
+        items = [
+            (float(e.get("created_at") or 0.0), e.get("trace") or "")
+            for e in episodes
+            if e.get("trace")
+        ]
+        items += [(float(n.get("created_at") or 0.0), n["content"]) for n in notes]
+        items.sort(key=lambda item: item[0])
+        stored = "\n\n".join(content for _, content in items[-20:])
         return stored or self.runtime.trace.format(limit=120)
 
     async def search_memory(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
@@ -667,8 +672,13 @@ class ConscioService:
     async def recent_facts(self, limit: int = 10) -> list[dict[str, Any]]:
         return await self.memory.recent_facts(limit)
 
-    async def list_skills(self) -> list[dict[str, Any]]:
-        return await self.memory.list_skills()
+    async def list_procedures(self) -> list[dict[str, Any]]:
+        rows = await self.memory.list_procedures()
+        # v1 UI compat: keep `skill`/`use_count` aliases alongside v2 columns.
+        return [
+            {**row, "skill": row["name"], "use_count": row["success_count"]}
+            for row in rows
+        ]
 
     async def list_projects(self) -> list[dict[str, Any]]:
         return await self.autonomy.list_projects()
@@ -704,7 +714,7 @@ class ConscioService:
 
     async def _store_episode(self, event: InputEvent, result: EpisodeResult) -> None:
         ep = StoredEpisode(
-            id=f"{int(time.time() * 1000)}-{len(self._episodes) + 1}",
+            id=result.episode_id or f"{int(time.time() * 1000)}-{len(self._episodes) + 1}",
             source=event.source,
             event_type=event.event_type,
             input=event.content,
@@ -716,7 +726,7 @@ class ConscioService:
         self._episodes.append(ep)
         path = self.config.home / "events" / f"{ep.id}.json"
         path.write_text(json.dumps(asdict(ep), indent=2), encoding="utf-8")
-        await self.autonomy.store_episode(
+        await self.memory.record_episode(
             episode_id=ep.id,
             source=ep.source,
             event_type=ep.event_type,

@@ -409,7 +409,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Heartbeat complete", user.output)
         self.assertNotIn("autonomous step", user.output)
 
-    async def test_memory_consolidation_creates_skills(self) -> None:
+    async def test_memory_consolidation_creates_no_junk_skills(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime = CognitiveRuntime(
                 llm=None,
@@ -418,13 +418,31 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
             await runtime.initialize()
             try:
-                await runtime.run_episode(InputEvent(content="Remember that I prefer concise answers.", source="user"))
-                await runtime.run_episode(InputEvent(content="hello!", source="user"))
-                skills = await runtime.memory.list_skills()
+                first = await runtime.run_episode(
+                    InputEvent(content="Remember that I prefer concise answers.", source="user")
+                )
+                second = await runtime.run_episode(InputEvent(content="hello!", source="user"))
+                procedures = await runtime.memory.list_procedures()
+                episodes = await runtime.memory.recent_episodes(10)
+                # Deliberate procedure writes still work (learn_procedure path).
+                await runtime.memory.upsert_procedure(
+                    "triage-logs",
+                    "Check the service logs for recent errors.",
+                    "1. journalctl -u conscio\n2. grep ERROR",
+                )
+                deliberate = await runtime.memory.list_procedures()
             finally:
                 await runtime.close()
 
-        self.assertTrue(any(skill["skill"].startswith("answer_") for skill in skills))
+        # No select_/answer_ junk skills are written by consolidation.
+        self.assertEqual(procedures, [])
+        # Each episode produces exactly one unified episodes row.
+        self.assertEqual(len(episodes), 2)
+        self.assertEqual(
+            {first.episode_id, second.episode_id}, {ep["id"] for ep in episodes}
+        )
+        self.assertTrue(all(ep["summary"] for ep in episodes))
+        self.assertEqual([p["name"] for p in deliberate], ["triage-logs"])
 
     async def test_semantic_fact_reindex_does_not_duplicate_fts_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -434,11 +452,14 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await memory.add_fact("Agent self/context: You have a memory tool.", source="user")
                 await memory.add_fact("Agent self/context: You have a memory tool.", source="user")
                 rows = await memory.search("memory tool", limit=10)
+                fact_rows_db = memory.fetchall("SELECT id FROM facts")
             finally:
                 await memory.close()
 
-        semantic_rows = [row for row in rows if row["memory_type"] == "semantic"]
-        self.assertEqual(len(semantic_rows), 1)
+        # norm_hash dedup keeps a single facts row and a single FTS mirror row.
+        fact_rows = [row for row in rows if row["memory_type"] == "fact"]
+        self.assertEqual(len(fact_rows), 1)
+        self.assertEqual(len(fact_rows_db), 1)
 
     async def test_llm_tool_result_feeds_final_answer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

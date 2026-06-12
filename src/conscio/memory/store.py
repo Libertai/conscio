@@ -1,48 +1,99 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from conscio.memory import embeddings as _embeddings
+from conscio.memory.embeddings import Embedder
 
 _HOME_DIR = Path.home() / ".conscio"
 _DB_PATH = _HOME_DIR / "sessions.db"
 
+# Near-duplicate facts above this cosine are merged into the existing row.
+MERGE_THRESHOLD = 0.93
+# Cosine band [CONTRADICTION_LOW, MERGE_THRESHOLD) is "same topic, maybe
+# divergent claim" — only there do we consult the (flag-gated) LLM judge.
+CONTRADICTION_LOW = 0.80
+
+# Trust tiers by fact origin: 3=user, 2=agent/consolidation, 1=web, 0=quarantined.
+_TRUST_BY_ORIGIN = {
+    "user": 3,
+    "agent": 2,
+    "consolidation": 2,
+    "goal_review": 2,
+    "runtime": 2,
+    "compaction": 2,
+    "quarantined": 0,
+}
+_CONF_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+
+# Schema v2 (fresh-start DB, no migration from v1):
+# - unified `episodes` keyed by the runtime's per-episode uuid (canonical id),
+#   replacing v1 `episodic` + `service_episodes`/`service_traces`;
+# - `facts` with provenance/trust/embedding/decay/contradiction links,
+#   replacing v1 `semantic`;
+# - deliberate `procedures`, replacing v1 junk-skill `procedural`;
+# - `memory_fts` mirrors facts + episodes by ref_id.
+# Embeddings are float32 little-endian BLOBs reranked with brute-force cosine
+# over FTS candidates — fine up to ~50k facts (see memory/embeddings.py).
 _SCHEMA = """
-CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
-    name TEXT,
-    created_at REAL NOT NULL,
-    ended_at REAL,
-    summary TEXT
+CREATE TABLE IF NOT EXISTS episodes (
+    id            TEXT PRIMARY KEY,
+    source        TEXT NOT NULL,
+    event_type    TEXT NOT NULL,
+    goal_id       TEXT,
+    project_id    TEXT,
+    input         TEXT NOT NULL,
+    output        TEXT NOT NULL,
+    selected_action TEXT NOT NULL DEFAULT '',
+    summary       TEXT NOT NULL DEFAULT '',
+    tainted       INTEGER NOT NULL DEFAULT 0,
+    web_origins   TEXT NOT NULL DEFAULT '[]',
+    metrics       TEXT NOT NULL DEFAULT '{}',
+    trace         TEXT NOT NULL DEFAULT '',
+    created_at    REAL NOT NULL
 );
-CREATE TABLE IF NOT EXISTS episodic (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL,
-    summary TEXT NOT NULL,
-    outcome TEXT,
-    confidence TEXT,
-    created_at REAL NOT NULL
+CREATE INDEX IF NOT EXISTS idx_episodes_created ON episodes (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_episodes_goal ON episodes (goal_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS facts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    fact          TEXT NOT NULL,
+    norm_hash     TEXT NOT NULL,
+    origin        TEXT NOT NULL,
+    trust         INTEGER NOT NULL,
+    episode_id    TEXT,
+    confidence    TEXT NOT NULL DEFAULT 'MEDIUM',
+    status        TEXT NOT NULL DEFAULT 'active',
+    supersedes    INTEGER,
+    superseded_by INTEGER,
+    embedding     BLOB,
+    embedding_model TEXT,
+    access_count  INTEGER NOT NULL DEFAULT 0,
+    last_accessed REAL,
+    created_at    REAL NOT NULL,
+    updated_at    REAL NOT NULL
 );
-CREATE TABLE IF NOT EXISTS semantic (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    fact TEXT NOT NULL UNIQUE,
-    source TEXT,
-    confidence TEXT DEFAULT 'MEDIUM',
-    created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
+CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_norm ON facts (norm_hash);
+CREATE INDEX IF NOT EXISTS idx_facts_status ON facts (status, trust, last_accessed);
+CREATE TABLE IF NOT EXISTS procedures (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT NOT NULL UNIQUE,
+    description   TEXT NOT NULL,
+    steps         TEXT NOT NULL,
+    trigger       TEXT NOT NULL DEFAULT '',
+    success_count INTEGER NOT NULL DEFAULT 0,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    origin        TEXT NOT NULL DEFAULT 'agent',
+    created_at    REAL NOT NULL,
+    updated_at    REAL NOT NULL
 );
-CREATE TABLE IF NOT EXISTS procedural (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    skill TEXT NOT NULL UNIQUE,
-    description TEXT,
-    steps TEXT,
-    created_at REAL NOT NULL,
-    updated_at REAL NOT NULL,
-    use_count INTEGER NOT NULL DEFAULT 0
-);
-CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(content, memory_type, source);
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(content, memory_type, ref_id UNINDEXED);
 CREATE TABLE IF NOT EXISTS thoughts (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
@@ -74,6 +125,33 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_session
 """
 
 
+def trust_for_origin(origin: str) -> int:
+    if origin.startswith("web:") or origin == "web":
+        return 1
+    return _TRUST_BY_ORIGIN.get(origin, 2)
+
+
+def normalize_fact(text: str) -> str:
+    return " ".join(str(text).split())
+
+
+def norm_hash(text: str) -> str:
+    return hashlib.sha1(normalize_fact(text).casefold().encode("utf-8")).hexdigest()
+
+
+@dataclass
+class FactWriteResult:
+    """Outcome of MemoryStore.add_fact.
+
+    action: "inserted" | "merged" | "contradiction" | "skipped".
+    """
+
+    action: str
+    fact_id: int = 0
+    merged_with: int | None = None
+    contradicted: list[int] = field(default_factory=list)
+
+
 def _get_conn(db_path: str) -> sqlite3.Connection:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -89,12 +167,15 @@ class MemoryStore:
 
     Exposes an async API while performing small SQLite operations synchronously.
     Each store owns its connection so tests and callers can isolate db_path.
+    All SQLite access (including from goals/autonomy/retrieval/consolidation)
+    routes through this class's RLock-guarded helpers — the locking invariant.
     """
 
-    def __init__(self, db_path: str | None = None) -> None:
+    def __init__(self, db_path: str | None = None, embedder: Embedder | None = None) -> None:
         self._db_path = db_path or str(_DB_PATH)
         self._conn_obj: sqlite3.Connection | None = None
         self._lock = threading.RLock()
+        self.embedder = embedder
 
     def _conn(self) -> sqlite3.Connection:
         if self._conn_obj is None:
@@ -148,118 +229,401 @@ class MemoryStore:
     _execute = execute
     _execute_many = transaction
 
-    # ── Sessions ─────────────────────────────────────────────────
+    # ── Sessions (v1 compat no-ops; the sessions table is gone in v2) ────
 
     async def create_session(self, session_id: str, name: str = "") -> None:
-        self._execute(
-            "INSERT OR IGNORE INTO sessions (id, name, created_at) VALUES (?, ?, ?)",
-            (session_id, name, time.time()),
-        )
+        return None
 
     async def end_session(self, session_id: str, summary: str = "") -> None:
-        self._execute(
-            "UPDATE sessions SET ended_at = ?, summary = ? WHERE id = ?",
-            (time.time(), summary, session_id),
-        )
+        return None
 
     async def list_sessions(self, limit: int = 20) -> list[dict]:
-        return self._fetchall(
-            "SELECT * FROM sessions ORDER BY created_at DESC LIMIT ?",
+        return []
+
+    # ── Episodes (unified: chat + autonomous + service) ──────────────────
+
+    async def record_episode(
+        self,
+        *,
+        episode_id: str,
+        source: str,
+        event_type: str,
+        input: str,
+        output: str,
+        selected_action: str = "",
+        summary: str = "",
+        tainted: bool = False,
+        web_origins: list[str] | None = None,
+        metrics: dict[str, Any] | None = None,
+        trace: str = "",
+        goal_id: str | None = None,
+        project_id: str | None = None,
+    ) -> None:
+        """Upsert one unified episode row keyed by the runtime's per-episode uuid.
+
+        Both the per-episode consolidator (cheap path: summary/taint) and the
+        service layer (trace/metrics) write the same row; non-default fields
+        from an earlier write are preserved when the later write omits them.
+        """
+        now = time.time()
+        with self._lock:
+            conn = self._conn()
+            conn.execute(
+                "INSERT INTO episodes (id, source, event_type, goal_id, project_id, input, output, "
+                "selected_action, summary, tainted, web_origins, metrics, trace, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "source = excluded.source, "
+                "event_type = excluded.event_type, "
+                "goal_id = COALESCE(excluded.goal_id, episodes.goal_id), "
+                "project_id = COALESCE(excluded.project_id, episodes.project_id), "
+                "input = excluded.input, "
+                "output = excluded.output, "
+                "selected_action = CASE WHEN excluded.selected_action != '' "
+                "THEN excluded.selected_action ELSE episodes.selected_action END, "
+                "summary = CASE WHEN excluded.summary != '' THEN excluded.summary ELSE episodes.summary END, "
+                "tainted = MAX(episodes.tainted, excluded.tainted), "
+                "web_origins = CASE WHEN excluded.web_origins != '[]' "
+                "THEN excluded.web_origins ELSE episodes.web_origins END, "
+                "metrics = CASE WHEN excluded.metrics != '{}' THEN excluded.metrics ELSE episodes.metrics END, "
+                "trace = CASE WHEN excluded.trace != '' THEN excluded.trace ELSE episodes.trace END",
+                (
+                    episode_id,
+                    source,
+                    event_type,
+                    goal_id,
+                    project_id,
+                    input,
+                    output,
+                    selected_action,
+                    summary,
+                    int(bool(tainted)),
+                    json.dumps(list(web_origins or [])),
+                    json.dumps(metrics or {}),
+                    trace,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT summary, input, output FROM episodes WHERE id = ?", (episode_id,)
+            ).fetchone()
+            fts_content = (row["summary"] or f"{row['input'][:300]} -> {row['output'][:300]}").strip()
+            conn.execute(
+                "DELETE FROM memory_fts WHERE memory_type = ? AND ref_id = ?",
+                ("episode", episode_id),
+            )
+            conn.execute(
+                "INSERT INTO memory_fts (content, memory_type, ref_id) VALUES (?, ?, ?)",
+                (fts_content, "episode", episode_id),
+            )
+            conn.commit()
+
+    async def recent_episodes(self, limit: int = 10) -> list[dict]:
+        rows = self._fetchall(
+            "SELECT * FROM episodes ORDER BY created_at DESC LIMIT ?",
             (limit,),
         )
+        return [self._episode_from_row(row) for row in rows]
 
-    # ── Episodic Memory ──────────────────────────────────────────
-
-    async def add_episode(
-        self,
-        session_id: str,
-        summary: str,
-        outcome: str = "",
-        confidence: str = "",
-    ) -> None:
-        ops = [
-            (
-                "INSERT INTO episodic (session_id, summary, outcome, confidence, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (session_id, summary, outcome, confidence, time.time()),
-            ),
-            (
-                "INSERT INTO memory_fts (content, memory_type, source) VALUES (?, ?, ?)",
-                (summary, "episodic", session_id),
-            ),
-        ]
-        self._execute_many(ops)
-
-    async def recent_episodes(self, session_id: str, limit: int = 10) -> list[dict]:
-        return self._fetchall(
-            "SELECT * FROM episodic WHERE session_id = ? ORDER BY created_at DESC LIMIT ?",
-            (session_id, limit),
-        )
-
-    async def count_episodes(self, session_id: str) -> int:
+    async def episodes_before(self, cursor_ts: float, limit: int = 20) -> list[dict]:
+        """Cursor pagination — return episodes older than ``cursor_ts``."""
         rows = self._fetchall(
-            "SELECT COUNT(*) AS count FROM episodic WHERE session_id = ?",
-            (session_id,),
+            "SELECT * FROM episodes WHERE created_at < ? ORDER BY created_at DESC LIMIT ?",
+            (cursor_ts, limit),
         )
+        return [self._episode_from_row(row) for row in rows]
+
+    async def recent_episodes_for_goal(self, goal_id: str, limit: int = 10) -> list[dict]:
+        rows = self._fetchall(
+            "SELECT * FROM episodes WHERE goal_id = ? ORDER BY created_at DESC LIMIT ?",
+            (goal_id, limit),
+        )
+        return [self._episode_from_row(row) for row in rows]
+
+    async def get_episode(self, episode_id: str) -> dict | None:
+        row = self.fetchone("SELECT * FROM episodes WHERE id = ?", (episode_id,))
+        return self._episode_from_row(row) if row else None
+
+    async def count_episodes(self) -> int:
+        rows = self._fetchall("SELECT COUNT(*) AS count FROM episodes")
         return int(rows[0]["count"]) if rows else 0
 
-    # ── Semantic Memory ──────────────────────────────────────────
+    def _episode_from_row(self, row: dict) -> dict:
+        data = dict(row)
+        data["metrics"] = json.loads(data.get("metrics") or "{}")
+        data["web_origins"] = json.loads(data.get("web_origins") or "[]")
+        data["tainted"] = bool(data.get("tainted"))
+        return data
 
-    async def add_fact(self, fact: str, source: str = "", confidence: str = "MEDIUM") -> None:
+    # ── Facts (semantic memory with provenance + embeddings) ─────────────
+
+    async def add_fact(
+        self,
+        fact: str,
+        source: str | None = None,
+        confidence: str = "MEDIUM",
+        *,
+        origin: str | None = None,
+        trust: int | None = None,
+        episode_id: str | None = None,
+        contradiction_judge: Any | None = None,
+    ) -> FactWriteResult:
+        """Write one fact with dedup/merge/contradiction semantics.
+
+        Back-compat: positional ``source`` maps to ``origin``. Steps:
+        exact-dup merge via norm_hash; embed (best-effort); near-dup cosine
+        merge above MERGE_THRESHOLD; flag-gated contradiction judge on the
+        ambiguous band; else insert (INSERT OR IGNORE on norm_hash races).
+        """
+        text = normalize_fact(fact)
+        if not text:
+            return FactWriteResult(action="skipped")
+        resolved_origin = (origin or source or "").strip() or "agent"
+        resolved_trust = trust_for_origin(resolved_origin) if trust is None else int(trust)
+        nh = norm_hash(text)
+
+        existing = self.fetchone(
+            "SELECT id, trust, confidence FROM facts WHERE norm_hash = ?", (nh,)
+        )
+        if existing:
+            return self._merge_into(existing, trust=resolved_trust, confidence=confidence)
+
+        vec: list[float] | None = None
+        if self.embedder is not None:
+            try:
+                vec = await self.embedder.embed(text)
+            except Exception:  # noqa: BLE001 — embedding is best-effort
+                vec = None
+
+        if vec is not None:
+            candidates = self._embedded_fact_candidates(text, limit=20)
+            best: dict | None = None
+            best_cos = 0.0
+            for candidate in candidates:
+                cos = _embeddings.cosine(vec, _embeddings.unpack(candidate["embedding"]))
+                if cos > best_cos:
+                    best_cos = cos
+                    best = candidate
+            if best is not None and best_cos > MERGE_THRESHOLD:
+                return self._merge_into(best, trust=resolved_trust, confidence=confidence)
+            if (
+                best is not None
+                and contradiction_judge is not None
+                and CONTRADICTION_LOW <= best_cos < MERGE_THRESHOLD
+            ):
+                contradicts = False
+                try:
+                    contradicts = bool(await contradiction_judge(text, best["fact"]))
+                except Exception:  # noqa: BLE001 — judge is best-effort
+                    contradicts = False
+                if contradicts:
+                    fact_id = self._insert_fact_row(
+                        text, nh, resolved_origin, resolved_trust, episode_id, confidence, vec
+                    )
+                    if fact_id is None:
+                        refetched = self.fetchone(
+                            "SELECT id, trust, confidence FROM facts WHERE norm_hash = ?", (nh,)
+                        )
+                        if refetched:
+                            return self._merge_into(
+                                refetched, trust=resolved_trust, confidence=confidence
+                            )
+                        return FactWriteResult(action="skipped")
+                    losers = await self.mark_contradiction(fact_id, int(best["id"]))
+                    return FactWriteResult(
+                        action="contradiction", fact_id=fact_id, contradicted=losers
+                    )
+
+        fact_id = self._insert_fact_row(
+            text, nh, resolved_origin, resolved_trust, episode_id, confidence, vec
+        )
+        if fact_id is None:
+            # norm_hash race or legitimate normalization collision: merge instead of failing.
+            refetched = self.fetchone(
+                "SELECT id, trust, confidence FROM facts WHERE norm_hash = ?", (nh,)
+            )
+            if refetched:
+                return self._merge_into(refetched, trust=resolved_trust, confidence=confidence)
+            return FactWriteResult(action="skipped")
+        return FactWriteResult(action="inserted", fact_id=fact_id)
+
+    def _merge_into(self, row: dict, *, trust: int, confidence: str) -> FactWriteResult:
         now = time.time()
-        ops = [
-            (
-                "INSERT INTO semantic (fact, source, confidence, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(fact) DO UPDATE SET updated_at = ?, confidence = ?",
-                (fact, source, confidence, now, now, now, confidence),
-            ),
-            (
-                "DELETE FROM memory_fts WHERE content = ? AND memory_type = ? AND source = ?",
-                (fact, "semantic", source),
-            ),
-            (
-                "INSERT INTO memory_fts (content, memory_type, source) VALUES (?, ?, ?)",
-                (fact, "semantic", source),
-            ),
-        ]
-        self._execute_many(ops)
+        old_conf = str(row.get("confidence") or "MEDIUM")
+        new_conf = old_conf if _CONF_RANK.get(old_conf, 1) >= _CONF_RANK.get(confidence, 1) else confidence
+        self._execute(
+            "UPDATE facts SET access_count = access_count + 1, updated_at = ?, "
+            "last_accessed = ?, trust = ?, confidence = ? WHERE id = ?",
+            (now, now, max(int(row["trust"]), trust), new_conf, row["id"]),
+        )
+        return FactWriteResult(action="merged", fact_id=int(row["id"]), merged_with=int(row["id"]))
+
+    def _insert_fact_row(
+        self,
+        text: str,
+        nh: str,
+        origin: str,
+        trust: int,
+        episode_id: str | None,
+        confidence: str,
+        vec: list[float] | None,
+    ) -> int | None:
+        """Insert a facts row + its FTS mirror in one locked commit.
+
+        Returns the new fact id, or None when the norm_hash unique index
+        ignored the insert (caller falls back to merge semantics).
+        """
+        now = time.time()
+        blob = _embeddings.pack(vec) if vec is not None else None
+        model = getattr(self.embedder, "model", None) if vec is not None else None
+        with self._lock:
+            conn = self._conn()
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO facts "
+                "(fact, norm_hash, origin, trust, episode_id, confidence, status, "
+                "embedding, embedding_model, access_count, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, 0, ?, ?)",
+                (text, nh, origin, trust, episode_id, confidence, blob, model, now, now),
+            )
+            if cursor.rowcount == 0:
+                conn.commit()
+                return None
+            fact_id = int(cursor.lastrowid or 0)
+            conn.execute(
+                "INSERT INTO memory_fts (content, memory_type, ref_id) VALUES (?, ?, ?)",
+                (text, "fact", str(fact_id)),
+            )
+            conn.commit()
+            return fact_id
+
+    def _embedded_fact_candidates(self, text: str, limit: int = 20) -> list[dict]:
+        from conscio.memory.retrieval import build_fts_query  # noqa: PLC0415
+
+        match = build_fts_query(text, mode="or")
+        if not match:
+            return []
+        try:
+            return self.fetchall(
+                "SELECT f.id, f.fact, f.trust, f.confidence, f.embedding FROM memory_fts "
+                "JOIN facts f ON f.id = CAST(memory_fts.ref_id AS INTEGER) "
+                "WHERE memory_fts MATCH ? AND f.status = 'active' AND f.embedding IS NOT NULL "
+                "ORDER BY bm25(memory_fts) LIMIT ?",
+                (f"memory_type:fact AND ({match})", limit),
+            )
+        except sqlite3.OperationalError:
+            return []
+
+    async def mark_contradiction(self, fact_id_a: int, fact_id_b: int) -> list[int]:
+        """Mark contradiction between two facts. Trust floor: the lower tier
+        loses; equal tiers mark both. Never deletes."""
+        rows = {
+            int(r["id"]): r
+            for r in self.fetchall(
+                "SELECT id, trust FROM facts WHERE id IN (?, ?)", (fact_id_a, fact_id_b)
+            )
+        }
+        a = rows.get(int(fact_id_a))
+        b = rows.get(int(fact_id_b))
+        if a is None or b is None:
+            return []
+        if int(a["trust"]) > int(b["trust"]):
+            losers = [b]
+        elif int(b["trust"]) > int(a["trust"]):
+            losers = [a]
+        else:
+            losers = [a, b]
+        now = time.time()
+        self._execute_many(
+            [
+                (
+                    "UPDATE facts SET status = 'contradicted', updated_at = ? WHERE id = ?",
+                    (now, loser["id"]),
+                )
+                for loser in losers
+            ]
+        )
+        try:
+            self._execute(
+                "INSERT INTO action_events (kind, created_at) VALUES (?, ?)",
+                ("fact_contradiction", now),
+            )
+        except sqlite3.OperationalError:
+            pass  # action_events lives in the autonomy schema; absent in bare stores
+        return [int(loser["id"]) for loser in losers]
+
+    async def retrieve_facts(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        include_web: bool = True,
+        max_web: int = 2,
+        embedder: Embedder | None = None,
+    ) -> list[Any]:
+        """Hybrid retrieval (FTS BM25 prefilter -> cosine rerank -> provenance
+        shaping). The single retrieval surface; see memory/retrieval.py."""
+        from conscio.memory.retrieval import retrieve_facts  # noqa: PLC0415
+
+        return await retrieve_facts(
+            self,
+            query,
+            limit=limit,
+            include_web=include_web,
+            max_web=max_web,
+            embedder=embedder or self.embedder,
+        )
 
     async def search_facts(self, query: str, limit: int = 10) -> list[dict]:
-        return self._fetchall(
-            "SELECT fact, source, confidence, created_at FROM semantic "
-            "WHERE fact LIKE ? ORDER BY updated_at DESC LIMIT ?",
+        results = await self.retrieve_facts(query, limit=limit)
+        if results:
+            return [r.to_dict() for r in results]
+        # Fallback for substring queries FTS cannot tokenize.
+        rows = self._fetchall(
+            "SELECT id, fact, origin, trust, confidence, created_at, updated_at FROM facts "
+            "WHERE status = 'active' AND trust > 0 AND fact LIKE ? "
+            "ORDER BY updated_at DESC LIMIT ?",
             (f"%{query}%", limit),
         )
+        return [{**row, "source": row["origin"]} for row in rows]
 
     async def recent_facts(self, limit: int = 10) -> list[dict]:
-        return self._fetchall(
-            "SELECT fact, source, confidence, created_at, updated_at FROM semantic "
-            "ORDER BY updated_at DESC LIMIT ?",
+        rows = self._fetchall(
+            "SELECT id, fact, origin, trust, confidence, status, created_at, updated_at "
+            "FROM facts WHERE status = 'active' ORDER BY updated_at DESC LIMIT ?",
             (limit,),
         )
+        return [{**row, "source": row["origin"]} for row in rows]
 
-    # ── Procedural Memory ────────────────────────────────────────
+    # ── Procedures (deliberate, validated; replaces v1 junk skills) ──────
 
-    async def add_skill(self, skill: str, description: str = "", steps: str = "") -> None:
+    async def upsert_procedure(
+        self,
+        name: str,
+        description: str,
+        steps: str,
+        trigger: str = "",
+        origin: str = "agent",
+    ) -> None:
         now = time.time()
         self._execute(
-            "INSERT INTO procedural (skill, description, steps, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(skill) DO UPDATE SET "
-            "description = excluded.description, steps = excluded.steps, updated_at = ?",
-            (skill, description, steps, now, now, now),
+            "INSERT INTO procedures (name, description, steps, trigger, origin, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET "
+            "description = excluded.description, steps = excluded.steps, "
+            "trigger = excluded.trigger, updated_at = excluded.updated_at",
+            (name, description, steps, trigger, origin, now, now),
         )
 
-    async def use_skill(self, skill: str) -> None:
+    async def record_procedure_outcome(self, name: str, success: bool) -> None:
+        column = "success_count" if success else "failure_count"
         self._execute(
-            "UPDATE procedural SET use_count = use_count + 1, updated_at = ? WHERE skill = ?",
-            (time.time(), skill),
+            f"UPDATE procedures SET {column} = {column} + 1, updated_at = ? WHERE name = ?",
+            (time.time(), name),
         )
 
-    async def list_skills(self) -> list[dict]:
+    async def list_procedures(self) -> list[dict]:
         return self._fetchall(
-            "SELECT * FROM procedural ORDER BY use_count DESC",
+            "SELECT * FROM procedures ORDER BY success_count DESC, updated_at DESC",
         )
 
     # ── Thoughts (inner monologue persistence) ───────────────────
@@ -369,18 +733,19 @@ class MemoryStore:
 
     async def search(self, query: str, limit: int = 20) -> list[dict]:
         return self._fetchall(
-            "SELECT content, memory_type, source, rank FROM memory_fts "
+            "SELECT content, memory_type, ref_id, rank FROM memory_fts "
             "WHERE memory_fts MATCH ? ORDER BY rank LIMIT ?",
             (query, limit),
         )
 
     # ── Context assembly ─────────────────────────────────────────
 
-    async def format_context(self, session_id: str, limit: int = 5) -> str:
-        episodes = await self.recent_episodes(session_id, limit)
+    async def format_context(self, limit: int = 5) -> str:
+        episodes = await self.recent_episodes(limit)
         parts: list[str] = []
         if episodes:
             parts.append("RECENT EPISODES:")
             for e in episodes:
-                parts.append(f"  - {e['summary']} (confidence: {e.get('confidence', 'N/A')})")
+                summary = e.get("summary") or e.get("input", "")
+                parts.append(f"  - {summary}")
         return "\n".join(parts)

@@ -30,17 +30,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
-CREATE TABLE IF NOT EXISTS service_episodes (
-    id TEXT PRIMARY KEY,
-    source TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    input TEXT NOT NULL,
-    output TEXT NOT NULL,
-    selected_action TEXT NOT NULL,
-    metrics TEXT NOT NULL DEFAULT '{}',
-    created_at REAL NOT NULL
-);
-CREATE TABLE IF NOT EXISTS service_traces (
+CREATE TABLE IF NOT EXISTS progress_notes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     episode_id TEXT,
     content TEXT NOT NULL,
@@ -237,70 +227,21 @@ class AutonomyStore:
         )
         return int(row["count"]) if row else 0
 
-    async def store_episode(
-        self,
-        *,
-        episode_id: str,
-        source: str,
-        event_type: str,
-        input: str,
-        output: str,
-        selected_action: str,
-        metrics: dict[str, Any],
-        trace: str,
-    ) -> None:
-        now = time.time()
-        self.memory.transaction([
-            (
-                "INSERT OR REPLACE INTO service_episodes "
-                "(id, source, event_type, input, output, selected_action, metrics, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (episode_id, source, event_type, input, output, selected_action, json.dumps(metrics), now),
-            ),
-            (
-                "INSERT INTO service_traces (episode_id, content, created_at) VALUES (?, ?, ?)",
-                (episode_id, trace, now),
-            ),
-        ])
-
     async def note_progress(self, episode_id: str | None, content: str) -> None:
-        """Append a free-form progress note to service_traces (used by note_progress meta-tool)."""
+        """Append a free-form progress note (used by the note_progress meta-tool)."""
         self.memory.execute(
-            "INSERT INTO service_traces (episode_id, content, created_at) VALUES (?, ?, ?)",
+            "INSERT INTO progress_notes (episode_id, content, created_at) VALUES (?, ?, ?)",
             (episode_id, content, time.time()),
         )
 
-    async def recent_episodes(self, limit: int = 20) -> list[dict[str, Any]]:
-        rows = self.memory.fetchall(
-            "SELECT * FROM service_episodes ORDER BY created_at DESC LIMIT ?",
-            (limit,),
-        )
-        return [self._episode_from_row(row) for row in rows]
-
-    async def episodes_before(
-        self, cursor_ts: float, limit: int = 20
-    ) -> list[dict[str, Any]]:
-        """Cursor pagination — return episodes older than ``cursor_ts``."""
-        rows = self.memory.fetchall(
-            "SELECT * FROM service_episodes WHERE created_at < ? "
+    async def recent_notes(self, limit: int = 20) -> list[dict[str, Any]]:
+        return self.memory.fetchall(
+            "SELECT episode_id, content, created_at FROM progress_notes "
             "ORDER BY created_at DESC LIMIT ?",
-            (cursor_ts, limit),
-        )
-        return [self._episode_from_row(row) for row in rows]
-
-    async def recent_trace(self, limit: int = 20) -> str:
-        rows = self.memory.fetchall(
-            "SELECT content FROM service_traces ORDER BY created_at DESC LIMIT ?",
             (limit,),
         )
-        return "\n\n".join(row["content"] for row in reversed(rows))
 
     def _task_from_row(self, row: dict | sqlite3.Row) -> Task:
         data = dict(row)
         data["tool_args"] = json.loads(data.get("tool_args") or "{}")
         return Task(**data)
-
-    def _episode_from_row(self, row: dict | sqlite3.Row) -> dict[str, Any]:
-        data = dict(row)
-        data["metrics"] = json.loads(data.get("metrics") or "{}")
-        return data

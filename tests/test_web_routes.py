@@ -59,7 +59,7 @@ class _StubService:
     async def recent_episodes(self, limit: int) -> list[dict[str, Any]]: return []
     async def recent_trace(self) -> str: return ""
     async def recent_facts(self, limit: int) -> list[dict[str, Any]]: return []
-    async def list_skills(self) -> list[dict[str, Any]]: return []
+    async def list_procedures(self) -> list[dict[str, Any]]: return []
 
     @property
     def goals(self):

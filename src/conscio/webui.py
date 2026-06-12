@@ -121,7 +121,7 @@ def create_web_router(service: ConscioService) -> APIRouter:
             "trace": await service.recent_trace(),
             "model_context": service.latest_model_context,
             "facts": await service.recent_facts(10),
-            "skills": await service.list_skills(),
+            "skills": await service.list_procedures(),
         }
 
     @router.post("/ui/api/message", include_in_schema=False)
@@ -405,7 +405,7 @@ def create_web_router(service: ConscioService) -> APIRouter:
         _require_web_auth(service, sessions, conscio_web_session)
         return {
             "facts": await service.recent_facts(limit),
-            "skills": await service.list_skills(),
+            "skills": await service.list_procedures(),
         }
 
     # ── Server-Sent Events stream ────────────────────────────────────────

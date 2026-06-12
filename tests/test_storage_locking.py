@@ -8,7 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from conscio.autonomy import AUTONOMY_SCHEMA
 from conscio.goals import GOAL_SCHEMA
-from conscio.memory.store import MemoryStore
+from conscio.memory.embeddings import pack
+from conscio.memory.store import MemoryStore, norm_hash
 
 
 class StorageLockingTests(unittest.TestCase):
@@ -30,18 +31,28 @@ class StorageLockingTests(unittest.TestCase):
 
             def insert_fact(idx: int) -> None:
                 now = time.time()
+                text = f"stress fact {idx}"
+                nh = norm_hash(text)
                 memory.transaction([
                     (
-                        "INSERT INTO semantic (fact, source, confidence, created_at, updated_at) "
-                        "VALUES (?, ?, ?, ?, ?) "
-                        "ON CONFLICT(fact) DO UPDATE SET updated_at = ?, confidence = ?",
-                        (f"stress fact {idx}", "stress", "MEDIUM", now, now, now, "MEDIUM"),
+                        "INSERT OR IGNORE INTO facts "
+                        "(fact, norm_hash, origin, trust, confidence, status, "
+                        "embedding, embedding_model, access_count, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, 'active', ?, ?, 0, ?, ?)",
+                        (text, nh, "stress", 2, "MEDIUM", pack([float(idx)] * 8), "stub", now, now),
                     ),
                     (
-                        "INSERT INTO memory_fts (content, memory_type, source) VALUES (?, ?, ?)",
-                        (f"stress fact {idx}", "semantic", "stress"),
+                        "INSERT INTO memory_fts (content, memory_type, ref_id) "
+                        "SELECT ?, 'fact', CAST(id AS TEXT) FROM facts WHERE norm_hash = ?",
+                        (text, nh),
                     ),
                 ])
+
+            def update_embedding(idx: int) -> None:
+                memory.execute(
+                    "UPDATE facts SET embedding = ?, updated_at = ? WHERE norm_hash = ?",
+                    (pack([float(idx) + 0.5] * 8), time.time(), norm_hash(f"stress fact {idx}")),
+                )
 
             def insert_task(idx: int) -> None:
                 now = time.time()
@@ -63,20 +74,25 @@ class StorageLockingTests(unittest.TestCase):
                 for i in range(60):
                     futures.append(pool.submit(insert_fact, i))
                     futures.append(pool.submit(insert_task, i))
+                    futures.append(pool.submit(update_embedding, i))
                     if i % 5 == 0:
                         futures.append(pool.submit(update_project, i))
                 for fut in futures:
                     fut.result(timeout=10)
 
-            facts = memory.fetchall("SELECT COUNT(*) AS c FROM semantic")
+            facts = memory.fetchall("SELECT COUNT(*) AS c FROM facts")
+            embedded = memory.fetchall(
+                "SELECT COUNT(*) AS c FROM facts WHERE embedding IS NOT NULL"
+            )
             tasks = memory.fetchall("SELECT COUNT(*) AS c FROM tasks WHERE project_id = ?", (project_id,))
             fts = memory.fetchall(
-                "SELECT COUNT(*) AS c FROM memory_fts WHERE memory_type = ? AND source = ?",
-                ("semantic", "stress"),
+                "SELECT COUNT(*) AS c FROM memory_fts WHERE memory_type = ? AND content LIKE ?",
+                ("fact", "stress fact%"),
             )
             memory._conn().close()
 
         self.assertEqual(facts[0]["c"], 60)
+        self.assertEqual(embedded[0]["c"], 60)
         self.assertEqual(tasks[0]["c"], 60)
         self.assertEqual(fts[0]["c"], 60)
 

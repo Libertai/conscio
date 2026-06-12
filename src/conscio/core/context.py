@@ -83,7 +83,7 @@ class PromptAssembler:
             self._format_state(state),
             "",
             "RECENT_EPISODES",
-            self._format_recent_episodes(await memory.recent_episodes(session_id, self.settings.recent_episodes)),
+            self._format_recent_episodes(await memory.recent_episodes(self.settings.recent_episodes)),
             "",
             "RELEVANT_MEMORY",
             self._format_memories(await self._retrieve(memory, retrieval_query)),
