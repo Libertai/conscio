@@ -144,6 +144,11 @@ class PredictionEngine:
     def pending(self) -> list[Expectation]:
         return [exp for exp in self._pending if not exp.resolved]
 
+    @property
+    def episode_failures(self) -> int:
+        """Resolved failures this episode (reset by ``reset_episode``)."""
+        return self._failure_count
+
     def failure_rate(self) -> float:
         """Resolved failures / resolved, this episode."""
         if not self._resolved_count:
@@ -186,4 +191,7 @@ class PredictionEngine:
             metadata={"prediction_error": 1.0, "expectation": exp.kind, "expectation_id": exp.id},
         )
         entry.resolved = False
+        # The engine sets explicit appraisal-grade scores; skipping the
+        # heuristic re-stamp keeps the carryover urgency decay effective.
+        entry.appraised = True
         return entry

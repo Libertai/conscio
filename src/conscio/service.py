@@ -13,11 +13,53 @@ from conscio.config import ServiceConfig, load_config
 from conscio.core.context import ContextSettings
 from conscio.core.cognition import InputEvent
 from conscio.core.runtime import CognitiveRuntime, EpisodeResult
+from conscio.core.tool_loop import WEB_CONTENT_TOOLS, web_request_url
 from conscio.goals import GoalStore
 from conscio.llm.client import LLMClient
 from conscio.memory.embeddings import LibertAIEmbedder
 from conscio.memory.store import MemoryStore
 from conscio.tools import PolicyToolRegistry
+
+
+# Tasks-state sentinel: "no pending task" is visible model state the agent must
+# resolve itself (the v1 filler task is gone).
+NO_PENDING_TASK_SENTINEL = (
+    "NO_PENDING_TASK — you must add_task or set_task_status before acting"
+)
+
+# Self-management tools never count against the per-hour world-tool budget.
+_SELF_MANAGEMENT_TOOLS = {
+    "set_task_status",
+    "add_task",
+    "note_progress",
+    "propose_subgoal",
+    "learn_procedure",
+}
+
+# Consecutive add-only autonomous ticks before the task-discipline hard rule fires.
+_ADD_ONLY_TICK_LIMIT = 3
+
+
+@dataclass
+class EpisodeTaint:
+    """Per-episode taint tracker (quarantine defense): set when a web tool runs;
+    consulted by remember_fact/remember_facts so web-derived knowledge is written
+    with origin='web:<url>' and trust tier 1."""
+
+    web: bool = False
+    urls: list[str] = field(default_factory=list)
+
+    def reset(self) -> None:
+        self.web = False
+        self.urls = []
+
+    def note(self, url: str) -> None:
+        self.web = True
+        if url and url not in self.urls:
+            self.urls.append(url)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"web": self.web, "urls": list(self.urls)}
 
 
 @dataclass
@@ -133,6 +175,12 @@ class ConscioService:
             compaction_interval=self.config.context_compaction_interval,
             enable_semantic_compaction=self.config.context_enable_semantic_compaction,
         )
+        self.goals = GoalStore(self.memory, motivation=self.config.motivation)
+        self.autonomy = AutonomyStore(
+            self.memory,
+            stale_flag_days=self.config.motivation.stale_flag_days,
+            stale_block_days=self.config.motivation.stale_block_days,
+        )
         self.runtime = CognitiveRuntime(
             memory=self.memory,
             tools=tools,
@@ -140,11 +188,20 @@ class ConscioService:
             context_settings=context_settings,
             context_provider=self._context_state,
             max_tool_rounds=self.config.model_tool_rounds,
+            max_ticks=self.config.max_ticks,
+            tool_rounds_per_tick=self.config.tool_rounds_per_tick,
+            max_reflections=self.config.max_reflections,
+            ablation=self.config.ablation,
+            constraint_provider=self.goals.active_constraints,
         )
-        self.runtime._autonomous_module.context_provider = self._autonomous_context_state
-        self.runtime._autonomous_module.on_tool_observation = self._on_autonomous_tool_observation
-        self.goals = GoalStore(self.memory)
-        self.autonomy = AutonomyStore(self.memory)
+        # Strategy wiring through the public surface (no module-private pokes).
+        self.runtime.autonomous_strategy.context_provider = self._autonomous_context_state
+        self.runtime.autonomous_strategy.on_tool_observation = self._on_autonomous_tool_observation
+        self.runtime.chat_strategy.on_tool_observation = self._on_chat_tool_observation
+        self.episode_taint = EpisodeTaint()
+        self._add_only_ticks = 0
+        self._current_goal_id: str | None = None
+        self._current_project_id: str | None = None
         self._tick_count = 0
         self._goal_review_interval = 10
         self.lock = ServiceLock(self.config.lock_path)
@@ -185,9 +242,33 @@ class ConscioService:
             cleaned = [" ".join(item.strip().split()) for item in candidates if item and item.strip()]
             if not cleaned:
                 return {"output": "No fact provided.", "error": True}
+            episode_id = self.runtime.workspace.current_episode or None
+            stored = len(dict.fromkeys(cleaned))
+            if self.episode_taint.web:
+                # Quarantine: this episode fetched web content, so any fact it
+                # stores is web-derived (origin=web:<url>, trust tier 1).
+                url = self.episode_taint.urls[-1] if self.episode_taint.urls else ""
+                origin = f"web:{url}" if url else "web"
+                for item in dict.fromkeys(cleaned):
+                    await self.memory.add_fact(
+                        item[:500],
+                        origin=origin,
+                        trust=1,
+                        episode_id=episode_id,
+                        confidence=confidence,
+                    )
+                return {
+                    "output": (
+                        f"Stored {stored} fact(s) in semantic memory "
+                        f"(web-derived this episode: origin={origin}, trust=1)."
+                    ),
+                    "error": False,
+                }
             for item in dict.fromkeys(cleaned):
-                await self.memory.add_fact(item[:500], source=source, confidence=confidence)
-            return {"output": f"Stored {len(dict.fromkeys(cleaned))} fact(s) in semantic memory.", "error": False}
+                await self.memory.add_fact(
+                    item[:500], source=source, episode_id=episode_id, confidence=confidence
+                )
+            return {"output": f"Stored {stored} fact(s) in semantic memory.", "error": False}
 
         async def search_memory(
             query: str | None = None,
@@ -262,6 +343,24 @@ class ConscioService:
             )
             await self.autonomy.record_action("self_management")
             return {"output": f"Proposed new goal {goal.id}: {text[:200]}.", "error": False, "goal_id": goal.id}
+
+        async def learn_procedure(
+            name: str,
+            description: str,
+            steps: str,
+            trigger: str = "",
+        ) -> dict[str, Any]:
+            slug = " ".join(name.strip().split())
+            if not slug or not description.strip() or not steps.strip():
+                return {"output": "learn_procedure requires name, description and steps.", "error": True}
+            await self.memory.upsert_procedure(
+                slug[:80],
+                description.strip()[:500],
+                steps.strip()[:2000],
+                trigger=trigger.strip()[:300],
+            )
+            await self.autonomy.record_action("self_management")
+            return {"output": f"Recorded procedure '{slug[:80]}'.", "error": False}
 
         tools.register(
             "remember_fact",
@@ -366,6 +465,22 @@ class ConscioService:
                 "additionalProperties": False,
             },
         )
+        tools.register(
+            "learn_procedure",
+            learn_procedure,
+            "Record a validated, reusable procedure you have confirmed works.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "steps": {"type": "string"},
+                    "trigger": {"type": "string"},
+                },
+                "required": ["name", "description", "steps"],
+                "additionalProperties": False,
+            },
+        )
 
     async def start(self, *, acquire_lock: bool = True, background: bool = True) -> None:
         if self.running:
@@ -430,7 +545,9 @@ class ConscioService:
         return result
 
     async def submit_influence(self, content: str, *, kind: str = "goal", source: str = "user") -> dict[str, Any]:
-        influence = await self.goals.add_influence(content, kind=kind, source=source)
+        influence = await self.goals.add_influence(
+            content, kind=kind, source=source, llm=self.runtime.autonomous_strategy.llm
+        )
         await self._submit_event(
             InputEvent(
                 content=f"Influence received ({kind}): {content}",
@@ -511,6 +628,8 @@ class ConscioService:
     async def _process_event(self, event: InputEvent, *, autonomous: bool = False) -> EpisodeResult | None:
         async with self._event_lock:
             self.current_event = f"{event.source}:{event.event_type}"
+            self._current_goal_id = None
+            self._current_project_id = None
             try:
                 if autonomous:
                     return await self._plan_and_act(event)
@@ -519,6 +638,7 @@ class ConscioService:
                 self.current_event = ""
 
     async def _run_episode(self, event: InputEvent) -> EpisodeResult:
+        self.episode_taint.reset()
         try:
             result = await self.runtime.run_episode(event)
             self.latest_model_context = result.model_context
@@ -531,6 +651,7 @@ class ConscioService:
             raise
 
     async def _plan_and_act(self, event: InputEvent) -> EpisodeResult:
+        await self.goals.scheduler.decay_tick()  # drive homeostasis, once per tick
         goal = await self.goals.review()
         if goal is None:
             return await self._run_episode(event)
@@ -545,26 +666,29 @@ class ConscioService:
                     event_type="project_paused",
                 )
             )
-        await self.autonomy.ensure_next_task(
-            project.id,
-            "Make concrete progress on the active goal.",
-        )
+        # No filler task: "no pending task" is visible context state
+        # (tasks.status NO_PENDING_TASK sentinel) the model must resolve.
+        self._current_goal_id = goal.id
+        self._current_project_id = project.id
         result = await self._run_episode(event)
-        requests = self.runtime._autonomous_module.last_tool_requests
+        # This episode serviced the goal: bump its drive's satiation.
+        await self.goals.scheduler.record_serviced(goal.id)
+        requests = self.runtime.autonomous_strategy.last_tool_requests
         if requests:
             self.last_autonomous_action = f"tool:{requests[-1].name}"
         else:
             self.last_autonomous_action = "wait:no_action"
+        self._update_task_discipline(requests)
         self._tick_count += 1
         if (
-            self.runtime._autonomous_module.llm is not None
+            self.runtime.autonomous_strategy.llm is not None
             and self._goal_review_interval > 0
             and self._tick_count % self._goal_review_interval == 0
         ):
             try:
                 await self.autonomy.record_action("goal_review_attempt")
                 applied = await self.goals.review_with_llm(
-                    self.runtime._autonomous_module.llm,
+                    self.runtime.autonomous_strategy.llm,
                     recent_episodes=await self.memory.recent_episodes(15),
                     recent_influences=await self.goals.list_influences(15),
                 )
@@ -578,17 +702,45 @@ class ConscioService:
                 self.last_error = f"goal_review_failed: {exc}"
         return result
 
+    def _update_task_discipline(self, requests: list[Any]) -> None:
+        """Track the add_task-vs-set_task_status balance across autonomous ticks.
+        Three consecutive add-only ticks arm the transition-nudge hard rule
+        rendered by the autonomous assembler (task_discipline context key)."""
+        names = {getattr(r, "name", "") for r in requests}
+        if "set_task_status" in names:
+            self._add_only_ticks = 0
+        elif "add_task" in names:
+            self._add_only_ticks += 1
+
+    def _task_discipline_rule(self) -> str:
+        if self._add_only_ticks < _ADD_ONLY_TICK_LIMIT:
+            return ""
+        return (
+            f"You have added tasks on {self._add_only_ticks} consecutive ticks without "
+            "progressing any. This tick you MUST set_task_status (done/blocked) on an "
+            "existing task or make concrete progress — do not add a new task."
+        )
+
     async def _autonomous_context_state(self) -> dict[str, Any]:
         goal_obj = await self.goals.active_goal()
         goal = asdict(goal_obj) if goal_obj else {}
         project = await self.autonomy.active_project() or {}
         active_task = await self.autonomy.active_task()
+        # Stale-task watchdog: flag lingering tasks ([STALE] in context) and
+        # auto-block the ones past the block threshold.
+        stale = await self.autonomy.flag_stale_tasks()
+        stale_ids = {t["id"] for t in stale["flagged"]}
         pending: list[dict[str, Any]] = []
         recently_completed: list[dict[str, Any]] = []
         if project:
             tasks = await self.autonomy.list_tasks(project["id"])
-            pending = [t for t in tasks if t["status"] == "pending"]
+            pending = [
+                {**t, "stale": t["id"] in stale_ids}
+                for t in tasks
+                if t["status"] == "pending"
+            ]
             recently_completed = [t for t in tasks if t["status"] in {"done", "blocked"}][-3:]
+        tasks_status = "ok" if (pending or active_task) else NO_PENDING_TASK_SENTINEL
         constraints = await self.goals.active_constraints()
         recent_episodes = await self.memory.recent_episodes(5)
         relevant_memory: list[dict[str, Any]] = []
@@ -605,20 +757,39 @@ class ConscioService:
             "active_goal": goal,
             "current_project": project,
             "current_task": active_task,
-            "tasks": {"pending": pending, "recently_completed": recently_completed},
+            "tasks": {
+                "pending": pending,
+                "recently_completed": recently_completed,
+                "status": tasks_status,
+            },
             "recent_episodes": recent_episodes,
             "relevant_memory": relevant_memory,
             "constraints": constraints,
             "budget_remaining": budget_remaining,
             "budget_limit": self.config.max_actions_per_hour,
             "last_autonomous_action": self.last_autonomous_action,
+            "goal_selection": self.goals.scheduler.last_selection or {},
+            "drives": await self.goals.list_drives(),
+            "task_discipline": self._task_discipline_rule(),
+            "episode_taint": self.episode_taint.to_dict(),
         }
 
+    def _note_web_taint(self, request: Any) -> None:
+        """Mark the episode tainted when a web-content tool runs."""
+        if getattr(request, "name", "") in WEB_CONTENT_TOOLS:
+            self.episode_taint.note(web_request_url(request))
+
+    async def _on_chat_tool_observation(self, request: Any, result: dict[str, Any]) -> None:
+        """Chat-path tool hook: taint tracking only (no autonomous budget)."""
+        self._note_web_taint(request)
+
     async def _on_autonomous_tool_observation(self, request: Any, result: dict[str, Any]) -> None:
-        """Hook fired by the autonomous ToolLoop after each tool call. Records a tool action
-        for the per-hour persistent budget. Self-management tools record themselves."""
+        """Hook fired by the autonomous tool loop after each tool call. Tracks
+        web taint and records a tool action for the per-hour persistent budget.
+        Self-management tools record themselves."""
+        self._note_web_taint(request)
         name = getattr(request, "name", "")
-        if name in {"set_task_status", "add_task", "note_progress", "propose_subgoal"}:
+        if name in _SELF_MANAGEMENT_TOOLS:
             return
         await self.autonomy.record_action("tool")
 
@@ -733,8 +904,12 @@ class ConscioService:
             input=ep.input,
             output=ep.output,
             selected_action=ep.selected_action,
+            tainted=self.episode_taint.web,
+            web_origins=list(self.episode_taint.urls),
             metrics=dict(ep.metrics),
             trace=result.cognitive_trace,
+            goal_id=self._current_goal_id,
+            project_id=self._current_project_id,
         )
         self._event_broker.emit(
             "episode.created",
@@ -758,6 +933,7 @@ class ConscioService:
             "paused": self.paused,
             "autonomous": self.config.autonomous,
             "last_autonomous_action": self.last_autonomous_action,
+            "episode_taint": self.episode_taint.to_dict(),
         }
 
 

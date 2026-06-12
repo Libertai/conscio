@@ -66,6 +66,11 @@ class Workspace:
         self._current_episode = ""
         self._current_tick = -1
 
+    @property
+    def current_episode(self) -> str:
+        """Canonical id of the episode in progress (memory provenance)."""
+        return self._current_episode
+
     def write(
         self,
         content: str,
@@ -210,21 +215,6 @@ class Workspace:
             filtered = (e for e in filtered if e.type in type_filter)
         sorted_entries = sorted(filtered, key=lambda e: (-e.priority, -e.timestamp))
         return sorted_entries[:limit]
-
-    def attend(self, query: str, limit: int = 10) -> list[WorkspaceEntry]:
-        query_lower = query.lower()
-        scored: list[tuple[float, WorkspaceEntry]] = []
-        for entry in self._entries:
-            score = 0.0
-            if query_lower in entry.content.lower():
-                score += entry.priority + 1
-            if query_lower in entry.source.lower():
-                score += 0.5
-            score += entry.priority * 0.1
-            if score > 0:
-                scored.append((score, entry))
-        scored.sort(key=lambda x: -x[0])
-        return [e for _, e in scored[:limit]]
 
     def subscribe(self, handler: BroadcastHandler) -> Callable[[], None]:
         self._subscribers.append(handler)

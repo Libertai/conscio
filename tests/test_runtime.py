@@ -123,6 +123,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.calls[0][0], fake.calls[-1][0])
 
     async def test_empty_llm_response_gets_visible_fallback(self) -> None:
+        # v2: an empty final is a recorded prediction failure plus a
+        # WAIT-with-fallback after one retry — never a masked "answer".
         with tempfile.TemporaryDirectory() as tmp:
             runtime = CognitiveRuntime(
                 llm=EmptyLLM(),  # type: ignore[arg-type]
@@ -134,7 +136,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await runtime.close()
 
-        self.assertEqual(result.selected_action, "answer")
+        self.assertNotEqual(result.selected_action, "answer")
+        self.assertGreaterEqual(result.metrics.prediction_errors, 1)
         self.assertIn("empty response", result.output)
 
     async def test_evented_episode_returns_trace_and_attention_schema(self) -> None:

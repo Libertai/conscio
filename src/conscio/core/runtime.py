@@ -1,11 +1,28 @@
+"""Cognitive runtime v2 — the per-tick control loop owns the agent.
+
+v1 was "modules tick → one module secretly runs the whole agent → break".
+v2 inverts this: ``run_episode`` runs an explicit SENSE → APPRAISE → ATTEND →
+EXECUTE → VALIDATE → SELF-STATE → DECIDE loop each tick; the LLM/tool work is
+an :class:`~conscio.core.executor.EpisodeExecutor` invoked *after* attention,
+one bounded step at a time. One engine, two prompt strategies (chat /
+autonomous).
+
+Latency invariant: a simple chat message resolves in exactly ONE
+``chat_async`` call (tick 1: sense/appraise/attend are pure Python + one FTS
+query; the executor's first step returns a final answer; structural constraint
+validation is deterministic; DECIDE answers and breaks). Pinned by
+``tests/test_engine.py``.
+"""
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Awaitable, Callable
 
-from conscio.core.context import ContextSettings, PromptAssembler
+from conscio.config import AblationFlags
+from conscio.core.autonomy_module import AutonomousPromptAssembler
 from conscio.core.cognition import (
     ActionKind,
     ActionSelector,
@@ -16,18 +33,34 @@ from conscio.core.cognition import (
     CognitiveTrace,
     InputEvent,
     Intention,
-    PredictionEngine,
-    PredictionPredicate,
     SelfState,
+    TickDecision,
 )
-from conscio.core.autonomy_module import AutonomousActionModule, AutonomousPromptAssembler
-from conscio.core.executor import NEUTRAL_SELF_DESCRIPTION
-from conscio.core.tool_loop import ToolLoop, ToolLoopResult, ToolRequest
+from conscio.core.constraints import (
+    ConstraintCheck,
+    ConstraintReport,
+    ConstraintValidator,
+    ParsedConstraint,
+)
+from conscio.core.context import ContextSettings, PromptAssembler
+from conscio.core.executor import AutonomousStrategy, ChatStrategy, EpisodeExecutor
+from conscio.core.prediction import PredictionEngine
+from conscio.core.tool_loop import StepResult
 from conscio.core.workspace import EntryType, Workspace, WorkspaceEntry
 from conscio.llm.client import LLMClient
 from conscio.memory.consolidation import ConsolidationEngine
 from conscio.memory.store import MemoryStore
 from conscio.tools import ToolRegistry
+
+
+EMPTY_RESPONSE_FALLBACK = (
+    "I recorded your message, but my inference backend returned an empty response. "
+    "I will retain the facts and continue."
+)
+
+INTERNAL_OBSERVATION_MESSAGE = (
+    "Internal observation recorded; no user-facing response needed."
+)
 
 
 @dataclass
@@ -38,6 +71,11 @@ class EpisodeMetrics:
     prediction_errors: int = 0
     tool_calls: int = 0
     global_broadcasts: int = 0
+    # v2 additive fields:
+    llm_calls: int = 0
+    tool_rounds: int = 0
+    reflections: int = 0
+    constraint_violations: int = 0
 
 
 @dataclass
@@ -54,18 +92,30 @@ class EpisodeResult:
     memory_ids: list[str] = field(default_factory=list)
     model_context: str = ""
     episode_id: str = ""
+    # v2 additive fields:
+    tick_trace: list[dict[str, Any]] = field(default_factory=list)
+    constraint_report: list[dict[str, Any]] = field(default_factory=list)
 
 
 class PerceptionModule:
+    """Surfaces unperceived input events as observation evidence.
+
+    Does NOT mark the raw input entry attended — attention must still see it
+    so the force-include guard (user input always reaches broadcast) holds.
+    """
+
     name = "observer"
 
     async def tick(self, workspace: Workspace, state: SelfState) -> list[WorkspaceEntry]:
         entries = [
-            e for e in workspace.unattended(20)
-            if e.source == "input" and e.type == EntryType.OBSERVATION
+            e for e in workspace.view()
+            if e.source == "input"
+            and e.type == EntryType.OBSERVATION
+            and not e.metadata.get("perceived")
         ]
         produced: list[WorkspaceEntry] = []
         for entry in entries:
+            entry.metadata["perceived"] = True
             produced.append(
                 workspace.write(
                     f"Perceived {entry.metadata.get('event_type', 'message')} from {entry.metadata.get('source', 'user')}: {entry.content}",
@@ -79,7 +129,6 @@ class PerceptionModule:
                     evidence=[entry.content[:200]],
                 )
             )
-            entry.attended = True
         return produced
 
 
@@ -121,168 +170,44 @@ class MemoryRetrievalModule:
 
 
 class ReflectionModule:
-    """Surfaces unresolved conflicts of the current episode as REFLECTION
-    candidates (episode-scoped via the workspace view; no timestamp filter)."""
+    """Surfaces unresolved conflicts of the current episode (including
+    carryover from prior episodes) as REFLECTION candidates referencing the
+    conflict's expectation id. Episode-scoped via the workspace view — the v1
+    ``episode_start`` timestamp filter is gone."""
 
     name = "reflector"
 
-    async def tick(self, workspace: Workspace, state: SelfState) -> list[WorkspaceEntry]:
-        conflicts = workspace.unresolved_conflicts()
-        if not conflicts:
-            return []
-        latest = conflicts[-1]
-        return [
-            workspace.write(
-                f"Reflect on conflict before acting: {latest.content}",
-                source=self.name,
-                type=EntryType.REFLECTION,
-                priority=7,
-                salience=0.75,
-                confidence=0.75,
-                novelty=0.5,
-                urgency=latest.urgency,
-                evidence=[latest.content],
-                metadata={
-                    "conflict_expectation_id": latest.metadata.get("expectation_id", ""),
-                    "intention": Intention(
-                        kind=ActionKind.REFLECT,
-                        content=f"Resolve conflict: {latest.content}",
-                        source=self.name,
-                        confidence=0.8,
-                        expected_observation=PredictionPredicate(kind="none"),
-                        urgency=latest.urgency,
-                    ),
-                },
-            )
-        ]
-
-
-class ResponseModule:
-    name = "responder"
-    DEFAULT_MAX_TOOL_ROUNDS = 32
-
-    def __init__(
-        self,
-        llm: LLMClient | None = None,
-        *,
-        assembler: PromptAssembler | None = None,
-        memory: MemoryStore | None = None,
-        session_id: str = "",
-        context_provider: Any | None = None,
-        tools: ToolRegistry | None = None,
-        max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS,
-    ) -> None:
-        self.llm = llm
-        self.assembler = assembler or PromptAssembler()
-        self.memory = memory
-        self.session_id = session_id
-        self.context_provider = context_provider
-        self.tools = tools
-        self.max_tool_rounds = max(1, int(max_tool_rounds))
-        self._ran = False
-        self.last_model_context = ""
-        self.last_tool_requests: list[ToolRequest] = []
+    def __init__(self) -> None:
+        self._surfaced: set[int] = set()
 
     def reset(self) -> None:
-        self._ran = False
-        self.last_tool_requests = []
+        self._surfaced.clear()
 
     async def tick(self, workspace: Workspace, state: SelfState) -> list[WorkspaceEntry]:
-        if self._ran:
-            return []
-        self._ran = True
-        user_entries = [
-            e for e in workspace.view()
-            if e.source == "input"
-            and e.type == EntryType.OBSERVATION
-            and e.metadata.get("source") not in {"autonomous", "tool", "system"}
-        ]
-        if not user_entries:
-            return []
-        user_entries.sort(key=lambda e: e.timestamp, reverse=True)
-        user_text = user_entries[0].content if user_entries else ""
-        intention = await self._choose_intention(user_text, workspace)
-        return [
-            workspace.write(
-                f"Candidate {intention.kind.value}: {intention.content}",
-                source=self.name,
-                type=EntryType.INTENTION,
-                priority=7,
-                salience=0.7,
-                confidence=intention.confidence,
-                novelty=0.55,
-                urgency=0.35,
-                metadata={"intention": intention},
+        produced: list[WorkspaceEntry] = []
+        for conflict in workspace.unresolved_conflicts():
+            key = id(conflict)
+            if key in self._surfaced:
+                continue
+            self._surfaced.add(key)
+            produced.append(
+                workspace.write(
+                    f"Reflect on conflict before acting: {conflict.content}",
+                    source=self.name,
+                    type=EntryType.REFLECTION,
+                    priority=7,
+                    salience=0.75,
+                    confidence=0.75,
+                    novelty=0.5,
+                    urgency=conflict.urgency,
+                    evidence=[conflict.content],
+                    metadata={
+                        "conflict_expectation_id": conflict.metadata.get("expectation_id", ""),
+                        "carryover_from": conflict.metadata.get("carryover_from", ""),
+                    },
+                )
             )
-        ]
-
-    async def _choose_intention(self, user_text: str, workspace: Workspace) -> Intention:
-        self.last_model_context = ""
-        if self.llm is None:
-            answer: str
-            if "2+2" in user_text.replace(" ", "") and "one word" in workspace.format_context().lower():
-                answer = "four"
-            elif "conscious" in user_text.lower():
-                answer = NEUTRAL_SELF_DESCRIPTION
-            else:
-                answer = f"I treated this as a cognitive episode: {user_text[:240]}"
-            return self._answer_intention(answer)
-        state = await self.context_provider() if self.context_provider else {}
-        memory = self.memory or MemoryStore()
-        assembled = await self.assembler.assemble(
-            user_input=user_text,
-            workspace=workspace,
-            memory=memory,
-            session_id=self.session_id,
-            state=state,
-            retrieval_query=user_text or " ".join(str(v) for v in state.values()),
-        )
-        self.last_model_context = assembled.dynamic_context
-        messages = list(assembled.messages)
-        tool_schemas = self._tool_schemas()
-        loop = ToolLoop(
-            llm=self.llm,
-            tools=self.tools,
-            max_rounds=self.max_tool_rounds,
-            temperature=0.4,
-        )
-        result = await loop.run(messages, workspace, tool_schemas)
-        self.last_tool_requests.extend(result.tool_requests)
-        if result.final_text:
-            return self._answer_intention(result.final_text)
-        return self._answer_intention(
-            "I recorded your message, but my inference backend returned an empty response. "
-            "I will retain the facts and continue."
-        )
-
-    def _answer_intention(self, content: str) -> Intention:
-        return Intention(
-            kind=ActionKind.ANSWER,
-            content=content,
-            source=self.name,
-            confidence=0.72,
-            expected_observation=PredictionPredicate(kind="answer_delivered"),
-            urgency=0.4,
-            expected_value=0.8,
-        )
-
-    def _tool_schemas(self) -> list[dict[str, Any]] | None:
-        if self.tools is None:
-            return None
-        descriptions = self.tools.list_tools()
-        schemas = self.tools.tool_schemas()
-        out = [
-            {
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": descriptions.get(name, ""),
-                    "parameters": schemas.get(name, {"type": "object", "properties": {}, "additionalProperties": True}),
-                },
-            }
-            for name in descriptions
-        ]
-        return out or None
+        return produced
 
 
 class MemoryConsolidator:
@@ -319,8 +244,19 @@ class MemoryConsolidator:
         return [episode_id]
 
 
+_LLM_APPRAISAL_SYSTEM_PROMPT = (
+    "You score workspace entries for a cognitive architecture. For each entry "
+    "return salience, novelty and urgency in [0,1]. Respond with ONLY a JSON "
+    'array: [{"index": 0, "salience": 0.5, "novelty": 0.5, "urgency": 0.5}].'
+)
+
+# Event sources that are pure observations: ingested into the workspace but
+# never executed against the LLM (no user to answer, no heartbeat to act on).
+_OBSERVATION_ONLY_SOURCES = {"tool", "system"}
+
+
 class CognitiveRuntime:
-    """Event-driven consciousness-architecture harness."""
+    """Event-driven consciousness-architecture harness (v2 tick loop)."""
 
     def __init__(
         self,
@@ -330,60 +266,77 @@ class CognitiveRuntime:
         tools: ToolRegistry | None = None,
         session_id: str | None = None,
         modules: list[CognitiveModule] | None = None,
-        max_ticks: int = 4,
-        max_tool_rounds: int = ResponseModule.DEFAULT_MAX_TOOL_ROUNDS,
+        max_ticks: int = 8,
+        max_tool_rounds: int = 32,
+        tool_rounds_per_tick: int = 4,
+        max_reflections: int = 2,
+        ablation: AblationFlags | None = None,
+        constraint_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None,
         context_settings: ContextSettings | None = None,
         context_provider: Any | None = None,
     ) -> None:
         self.session_id = session_id or uuid.uuid4().hex[:16]
+        self.ablation = ablation or AblationFlags()
         self.workspace = Workspace()
         self.trace = CognitiveTrace()
         self.self_state = SelfState()
         self.attention_schema = AttentionSchema()
-        self.attention = AttentionController()
-        self.appraisal = AppraisalSystem()
+        self.attention = AttentionController(coupling=self.ablation.self_state_coupling)
+        self.appraisal = AppraisalSystem(enabled=self.ablation.appraisal)
         self.action_selector = ActionSelector()
-        self.predictions = PredictionEngine()
+        self.prediction = PredictionEngine(enabled=self.ablation.prediction)
         self.memory = memory or MemoryStore()
         self.tools = tools or ToolRegistry()
         if tools is None:
             self.tools.load_builtins()
-        self.max_ticks = max_ticks
+        self.max_ticks = max(1, int(max_ticks))
+        self.max_reflections = max(0, int(max_reflections))
+        self.constraint_provider = constraint_provider
         self.context_settings = context_settings or ContextSettings()
         self.prompt_assembler = PromptAssembler(self.context_settings)
         self.last_model_context = ""
-        self._response_module = ResponseModule(
-            llm,
+        self.validator = ConstraintValidator(
+            llm=llm, judge_enabled=self.ablation.constraint_judge
+        )
+        self.chat_strategy = ChatStrategy(
             assembler=self.prompt_assembler,
-            memory=self.memory,
-            session_id=self.session_id,
             context_provider=context_provider,
-            tools=self.tools,
-            max_tool_rounds=max_tool_rounds,
+            llm=llm,
         )
         self.autonomous_assembler = AutonomousPromptAssembler(
             max_dynamic_chars=self.context_settings.max_dynamic_chars,
         )
-        self._autonomous_module = AutonomousActionModule(
+        self.autonomous_strategy = AutonomousStrategy(
+            assembler=self.autonomous_assembler,
+            memory=self.memory,
+            context_provider=context_provider,
             llm=llm,
+        )
+        self.executor = EpisodeExecutor(
             tools=self.tools,
             memory=self.memory,
             session_id=self.session_id,
-            assembler=self.autonomous_assembler,
-            context_provider=context_provider,
-            max_tool_rounds=max_tool_rounds,
+            chat=self.chat_strategy,
+            autonomous=self.autonomous_strategy,
+            max_total_rounds=max_tool_rounds,
+            rounds_per_tick=tool_rounds_per_tick,
+            prediction=self.prediction,
         )
         self.modules = modules or self._default_modules()
         self.consolidator = MemoryConsolidator(self.context_settings)
 
+    @property
+    def _autonomous_module(self) -> AutonomousStrategy:
+        """Compat shim: external consumers (service.py, eval/legacy.py) poke
+        ``.llm`` (settable), ``.last_tool_requests``, ``.context_provider``
+        and ``.on_tool_observation`` — all live on the AutonomousStrategy."""
+        return self.autonomous_strategy
+
     def _default_modules(self) -> list[CognitiveModule]:
-        modules: list[CognitiveModule] = [
-            PerceptionModule(),
-            MemoryRetrievalModule(self.memory, self.session_id),
-            self._response_module,
-            self._autonomous_module,
-            ReflectionModule(),
-        ]
+        modules: list[CognitiveModule] = [PerceptionModule()]
+        if self.ablation.memory_retrieval:
+            modules.append(MemoryRetrievalModule(self.memory, self.session_id))
+        modules.append(ReflectionModule())
         return modules
 
     async def initialize(self) -> None:
@@ -398,106 +351,228 @@ class CognitiveRuntime:
         if isinstance(event, str):
             event = InputEvent(content=event)
         episode_id = uuid.uuid4().hex  # canonical episode id (memory provenance)
-        self.workspace.begin_episode(episode_id)
+        carried = self.workspace.begin_episode(episode_id)
         self._reset_modules_for_episode()
+        self.self_state.conflict_level *= 0.5  # decay, not reset
+        self.prediction.reset_episode()
+        self.executor.reset()
         start = time.time()
         self.last_model_context = ""
-        self.self_state.conflict_level *= 0.5  # decay, not reset
         metrics = EpisodeMetrics()
-        self.trace.record("episode_started", "runtime", event_source=event.source)
+        constraints = await self._fetch_constraints(event)  # once per episode
+        self.trace.record(
+            "episode_started", "runtime", event_source=event.source, carryover=len(carried)
+        )
         self._ingest_event(event)
-        selected_intention: Intention | None = None
-        tool_results: list[dict[str, Any]] = []
 
-        for tick in range(self.max_ticks):
+        executable = event.source not in _OBSERVATION_ONLY_SOURCES
+        tick_trace: list[dict[str, Any]] = []
+        final_report: ConstraintReport | None = None
+        pending_answer: str | None = None
+        answer_expectation = None
+        reflections_done = 0
+        empty_steps = 0
+        extra_llm_calls = 0
+        output = ""
+        outcome: TickDecision | None = None
+        prev_failures = 0
+        prev_llm_calls = 0
+        prev_tool_rounds = 0
+        prev_state = self.self_state.to_dict()
+
+        for tick in range(1, self.max_ticks + 1):
             metrics.ticks += 1
-            self.workspace._current_tick = tick + 1  # designed seam: runtime stamps the tick
-            self.self_state.cognitive_load = min(1.0, self.workspace.size / 100)
-            produced: list[WorkspaceEntry] = []
+            self.workspace._current_tick = tick  # designed seam: runtime stamps the tick
+
+            # 1 SENSE — modules produce LOCAL evidence entries (no scores).
             for module in self.modules:
                 module_entries = await module.tick(self.workspace, self.self_state)
                 if module_entries:
-                    self.trace.record(
-                        "module_tick",
-                        module.name,
-                        produced=len(module_entries),
-                    )
-                    produced.extend(module_entries)
+                    self.trace.record("module_tick", module.name, produced=len(module_entries))
+
+            # 2 APPRAISE — centralized stamping of unappraised entries.
+            recent = [e for e in self.workspace.view() if e.appraised]
+            appraised = self.appraisal.appraise_entries(
+                self.workspace.unappraised(), self.self_state, recent
+            )
+            if self.ablation.llm_appraisal and appraised and self.chat_strategy.llm is not None:
+                if await self._llm_appraise(appraised):
+                    extra_llm_calls += 1
+
+            # 3 ATTEND — broadcast winners gate the model context.
             selection = self.attention.attend(
                 self.workspace,
                 self.self_state,
                 self.trace,
                 self.attention_schema,
                 episode_id=episode_id,
-                tick=tick + 1,
+                tick=tick,
             )
-            selected = selection.selected
-            metrics.attention_selections += len(selected)
-            if any(e.type == EntryType.CONFLICT for e in selected):
-                self.self_state.conflict_level = min(1.0, self.self_state.conflict_level + 0.25)
-            intentions = self._collect_intentions()
-            if intentions:
-                selected_intention = self.action_selector.select_intention(intentions, self.self_state)
-                self.self_state.current_intention = selected_intention.kind.value
-                self.trace.record(
-                    "intention_selected",
-                    "action_selector",
-                    kind=selected_intention.kind.value,
-                    intention_source=selected_intention.source,
-                )
-                if selected_intention.kind in {ActionKind.ANSWER, ActionKind.TOOL, ActionKind.ASK, ActionKind.REFUSE}:
-                    break
-            if not produced and not selected:
-                break
+            metrics.attention_selections += len(selection.selected)
 
-        if selected_intention is None:
-            wait_content = (
-                "Internal observation recorded; no user-facing response needed."
+            # 4 EXECUTE — one bounded executor step after attention.
+            step: StepResult | None = None
+            forced_decision: TickDecision | None = None
+            if executable and pending_answer is None and not self.executor.exhausted:
+                broadcast_new = (
+                    list(selection.selected) if self.ablation.attention_gating else None
+                )
+                step = await self.executor.step(
+                    event=event,
+                    workspace=self.workspace,
+                    broadcast_new=broadcast_new,
+                    state=self.self_state,
+                )
+                if step.kind == "final":
+                    pending_answer = step.text
+                    answer_expectation = self.prediction.expect_answer(
+                        constraints=constraints, tick=tick
+                    )
+                    self._record_intention(ActionKind.ANSWER, step.text)
+                elif step.kind == "control":
+                    self._record_intention(
+                        ActionKind.ASK if step.control == "ask" else ActionKind.REFUSE,
+                        step.text,
+                    )
+                elif step.kind == "empty":
+                    if step.text:
+                        # Deterministic offline path (autonomous, no LLM):
+                        # nothing to execute — resolve to WAIT with the reason.
+                        output = step.text
+                        forced_decision = TickDecision(
+                            ActionKind.WAIT, "no LLM configured; nothing to execute"
+                        )
+                    else:
+                        # Empty LLM response: a recorded prediction failure;
+                        # retry once next tick, then fall back to WAIT.
+                        empty_steps += 1
+                        self._record_empty_failure(constraints, tick)
+                        if empty_steps >= 2:
+                            output = EMPTY_RESPONSE_FALLBACK
+                            forced_decision = TickDecision(
+                                ActionKind.WAIT, "empty LLM response after retry"
+                            )
+                        else:
+                            forced_decision = TickDecision(
+                                ActionKind.STEP, "empty LLM response; retrying once"
+                            )
+
+            # 5 VALIDATE — constraint report + answer expectation resolution.
+            report: ConstraintReport | None = None
+            if pending_answer is not None:
+                report = await self.validator.validate(pending_answer, constraints)
+                final_report = report
+                metrics.constraint_violations += len(report.violations)
+                if answer_expectation is not None:
+                    self.prediction.resolve_answer(
+                        answer_expectation, report, self.workspace, tick
+                    )
+                    answer_expectation = None
+
+            # 6 SELF-STATE — update from real signals.
+            fresh_failures = self.prediction.episode_failures - prev_failures
+            prev_failures = self.prediction.episode_failures
+            unresolved = len(self.workspace.unresolved_conflicts())
+            self.self_state.update_tick(
+                self.prediction.error_ema,
+                self.prediction.failure_rate(),
+                selection.dispersion,
+                unresolved_conflicts=unresolved,
+                fresh_failures=fresh_failures,
+            )
+            if self.executor.last_model_context:
+                self.self_state.update_load(
+                    len(self.executor.last_model_context),
+                    self.context_settings.max_dynamic_chars,
+                )
+            if fresh_failures:
+                self.trace.record(
+                    "prediction_error", "prediction_engine", error=self.self_state.prediction_error
+                )
+
+            # 7 DECIDE — per-tick arbitration.
+            decision = forced_decision or self.action_selector.decide_tick(
+                state=self.self_state,
+                last_step=step,
+                pending_answer=pending_answer,
+                report=report,
+                reflections_done=reflections_done,
+                max_reflections=self.max_reflections,
+                ablation=self.ablation,
+                fresh_failure=fresh_failures > 0,
+                session_live=executable and not self.executor.exhausted,
+            )
+            self.trace.record("tick_decision", "action_selector", kind=decision.kind.value, tick=tick)
+            state_now = self.self_state.to_dict()
+            tick_trace.append(
+                {
+                    "tick": tick,
+                    "decision": decision.kind.value,
+                    "reason": decision.reason,
+                    "broadcast": [f"{e.source}:{e.type.value}" for e in selection.selected],
+                    "llm_calls": self.executor.llm_calls - prev_llm_calls,
+                    "tool_rounds": len(self.executor.tool_requests) - prev_tool_rounds,
+                    "prediction_events": fresh_failures,
+                    "self_state_delta": _state_delta(prev_state, state_now),
+                }
+            )
+            prev_llm_calls = self.executor.llm_calls
+            prev_tool_rounds = len(self.executor.tool_requests)
+            prev_state = state_now
+
+            if decision.kind in (ActionKind.ANSWER, ActionKind.ASK, ActionKind.REFUSE):
+                outcome = decision
+                output = pending_answer if decision.kind == ActionKind.ANSWER else (step.text if step else output)
+                break
+            if decision.kind == ActionKind.REFLECT:
+                self.executor.inject_reflection(self._reflection_text(report))
+                for conflict in self.workspace.unresolved_conflicts():
+                    conflict.resolved = True
+                reflections_done += 1
+                metrics.reflections += 1
+                pending_answer = None  # discard the violating answer; revise next tick
+                self.trace.record("reflection_injected", "runtime", count=reflections_done)
+                continue
+            if decision.kind == ActionKind.WAIT:
+                outcome = decision
+                break
+            # STEP — keep working next tick.
+
+        if outcome is None:
+            outcome = TickDecision(ActionKind.WAIT, "tick budget exhausted")
+        if outcome.kind == ActionKind.WAIT and not output:
+            output = (
+                INTERNAL_OBSERVATION_MESSAGE
                 if event.source in {"autonomous", "tool", "system"}
                 else "No stable intention emerged."
             )
-            selected_intention = Intention(
-                kind=ActionKind.WAIT,
-                content=wait_content,
-                source="runtime",
-                confidence=0.2,
-            )
-        output = selected_intention.content
-        if selected_intention.kind == ActionKind.TOOL and selected_intention.tool_name:
-            metrics.tool_calls += 1
-            tool_result = await self.tools.call(selected_intention.tool_name, selected_intention.tool_args)
-            tool_results.append({"tool": selected_intention.tool_name, **tool_result})
-            output = str(tool_result.get("output", output))
-        all_requests = list(self._response_module.last_tool_requests) + list(
-            getattr(self._autonomous_module, "last_tool_requests", [])
-        )
-        for request in all_requests:
-            metrics.tool_calls += 1
-            result = self._latest_tool_result(request.name)
-            if result is not None:
-                tool_results.append({"tool": request.name, **result})
-        prediction_entry = self.predictions.evaluate(selected_intention, output, self.workspace)
-        if prediction_entry is not None:
-            metrics.prediction_errors += 1
-            self.self_state.prediction_error = prediction_entry.metadata.get("prediction_error", 1.0)
-            self.trace.record("prediction_error", "prediction_engine", error=self.self_state.prediction_error)
+        selected_action = outcome.kind.value
+
         metrics.duration = time.time() - start
         metrics.global_broadcasts = len(self.workspace.global_entries)
+        metrics.prediction_errors = self.prediction.episode_failures
+        metrics.llm_calls = self.executor.llm_calls + extra_llm_calls
+        metrics.tool_calls = len(self.executor.tool_requests)
+        metrics.tool_rounds = len(self.executor.tool_requests)
         self._capture_model_context()
         result = EpisodeResult(
             output=output,
-            selected_action=selected_intention.kind.value,
+            selected_action=selected_action,
             session_id=self.session_id,
             workspace_trace=self.workspace.format_context(limit=30),
             cognitive_trace=self.trace.format(limit=60),
             self_state=self.self_state.to_dict(),
             attention_schema=self.attention_schema.to_dict(),
             metrics=metrics,
-            tool_results=tool_results,
+            tool_results=list(self.executor.tool_results),
             model_context=self.last_model_context,
             episode_id=episode_id,
+            tick_trace=tick_trace,
+            constraint_report=final_report.to_dicts() if final_report is not None else [],
         )
-        result.memory_ids = await self.consolidator.consolidate(self.memory, self.session_id, event, result)
+        result.memory_ids = await self.consolidator.consolidate(
+            self.memory, self.session_id, event, result
+        )
         self.trace.record("episode_completed", "runtime", action=result.selected_action)
         return result
 
@@ -514,24 +589,125 @@ class CognitiveRuntime:
             results.append(await self.run_episode(event))
         return results
 
+    async def _fetch_constraints(self, event: InputEvent) -> list[ParsedConstraint]:
+        """Constraint fetch happens ONCE per episode: persistent rows from the
+        provider (one sqlite read) merged with episode constraints extracted
+        from the triggering input."""
+        rows: list[dict[str, Any]] = []
+        if self.constraint_provider is not None:
+            try:
+                rows = await self.constraint_provider()
+            except Exception:  # noqa: BLE001 — constraints are best-effort context
+                rows = []
+        constraints = self.validator.parse(rows)
+        constraints.extend(self.validator.extract_episode_constraints(event.content))
+        return constraints
+
     def _ingest_event(self, event: InputEvent) -> None:
-        appraisal = self.appraisal.appraise(
-            event.content,
-            source=event.source,
-            type=EntryType.OBSERVATION,
-            goal=self.self_state.active_goal,
-        )
+        """Write the raw event entry; appraisal happens in phase 2 like everything else."""
         self.workspace.write(
             event.content,
             source="input",
             type=EntryType.OBSERVATION,
             priority=7,
-            salience=appraisal["salience"],
-            novelty=appraisal["novelty"],
-            urgency=appraisal["urgency"],
             confidence=0.95,
+            urgency=0.5,
             metadata={"source": event.source, "event_type": event.event_type, **event.metadata},
         )
+
+    def _record_intention(self, kind: ActionKind, content: str) -> None:
+        intention = Intention(
+            kind=kind,
+            content=content,
+            source="executor",
+            confidence=max(0.0, min(1.0, 1.0 - self.self_state.uncertainty)),
+        )
+        self.workspace.write(
+            f"Candidate {kind.value}: {content[:200]}",
+            source="executor",
+            type=EntryType.INTENTION,
+            priority=7,
+            salience=0.7,
+            confidence=intention.confidence,
+            novelty=0.55,
+            urgency=0.35,
+            metadata={"intention": intention},
+        )
+        self.self_state.current_intention = kind.value
+        self.trace.record(
+            "intention_selected", "action_selector", kind=kind.value, intention_source="executor"
+        )
+
+    def _record_empty_failure(self, constraints: list[ParsedConstraint], tick: int) -> None:
+        """An empty LLM response is a failed answer expectation, not a masked success."""
+        expectation = self.prediction.expect_answer(constraints=constraints, tick=tick)
+        failing = ConstraintReport(
+            checks=[
+                ConstraintCheck(
+                    "answer:nonempty",
+                    "answer must be non-empty",
+                    "structural",
+                    False,
+                    "empty LLM response",
+                )
+            ]
+        )
+        self.prediction.resolve_answer(expectation, failing, self.workspace, tick)
+
+    def _reflection_text(self, report: ConstraintReport | None) -> str:
+        lines = ["REFLECT: problems detected with the current approach:"]
+        for conflict in self.workspace.unresolved_conflicts()[-3:]:
+            lines.append(f"- {conflict.content}")
+        if report is not None:
+            for violation in report.violations:
+                lines.append(
+                    f"- constraint violated: {violation.text} ({violation.detail})"
+                )
+        lines.append(
+            "Revise your approach so the next answer satisfies every active constraint, "
+            "then respond again."
+        )
+        return "\n".join(lines)
+
+    async def _llm_appraise(self, entries: list[WorkspaceEntry]) -> bool:
+        """Flag-gated batched LLM appraisal pass: one scoring call per tick.
+        Scores only ever raise the heuristic floors; failures fall back silently."""
+        payload = [
+            {"index": index, "content": entry.content[:300]}
+            for index, entry in enumerate(entries)
+        ]
+        messages = [
+            {"role": "system", "content": _LLM_APPRAISAL_SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ]
+        try:
+            response = await self.chat_strategy.llm.chat_async(
+                messages, temperature=0.0, max_tokens=400
+            )
+        except Exception:  # noqa: BLE001 — heuristics already stamped
+            return False
+        content = str(response.get("content", "") or "")
+        start, end = content.find("["), content.rfind("]")
+        if start == -1 or end <= start:
+            return True
+        try:
+            items = json.loads(content[start : end + 1])
+        except (json.JSONDecodeError, ValueError):
+            return True
+        if not isinstance(items, list):
+            return True
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                entry = entries[int(item.get("index", -1))]
+            except (ValueError, TypeError, IndexError):
+                continue
+            for key in ("salience", "novelty", "urgency"):
+                value = item.get(key)
+                if isinstance(value, (int, float)):
+                    setattr(entry, key, max(getattr(entry, key), min(1.0, max(0.0, float(value)))))
+        return True
 
     def _collect_intentions(self) -> list[Intention]:
         """Candidate intentions of the current episode (episode_id filter, not timestamps)."""
@@ -545,18 +721,9 @@ class CognitiveRuntime:
         return intentions
 
     def _capture_model_context(self) -> None:
-        for module in self.modules:
-            context = getattr(module, "last_model_context", "")
-            if context:
-                self.last_model_context = context
-
-    def _latest_tool_result(self, name: str) -> dict[str, Any] | None:
-        for entry in reversed(self.workspace.read(limit=100, type_filter={EntryType.OBSERVATION})):
-            if entry.source == "tool" and entry.metadata.get("tool") == name:
-                result = entry.metadata.get("result")
-                if isinstance(result, dict):
-                    return result
-        return None
+        context = self.executor.last_model_context
+        if context:
+            self.last_model_context = context
 
     def _reset_modules_for_episode(self) -> None:
         for module in self.modules:
@@ -565,3 +732,6 @@ class CognitiveRuntime:
                 reset()
 
 
+def _state_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """Keys of the self-state dict whose values changed this tick."""
+    return {key: value for key, value in after.items() if before.get(key) != value}

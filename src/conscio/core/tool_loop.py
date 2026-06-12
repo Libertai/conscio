@@ -46,11 +46,36 @@ PreToolHook = Callable[[ToolRequest], Awaitable[Any]]
 
 _CONTROL_KINDS = {"ask_user": "ask", "refuse": "refuse"}
 
+# Tools whose output is untrusted external data: spotlighted with explicit
+# delimiters before it enters the workspace/prompt (quarantine defense).
+WEB_CONTENT_TOOLS = frozenset({"web_fetch", "web_search"})
+
+UNTRUSTED_WEB_BEGIN = "<<UNTRUSTED_WEB_CONTENT url={url}>>"
+UNTRUSTED_WEB_END = "<<END_UNTRUSTED>>"
+
+
+def web_request_url(request: ToolRequest) -> str:
+    """Best-effort URL/query identifying what a web tool touched."""
+    args = request.args or {}
+    return str(args.get("url") or args.get("query") or args.get("input") or "").strip()
+
+
+def _spotlight_web_output(request: ToolRequest, result: dict[str, Any]) -> dict[str, Any]:
+    """Wrap web tool output in explicit data-delimiters. Spotlighting is
+    probabilistic, not a guarantee — a sufficiently clever page could still
+    influence reasoning within an episode; the taint/trust pipeline bounds the
+    blast radius rather than eliminating it."""
+    output = str(result.get("output", ""))
+    begin = UNTRUSTED_WEB_BEGIN.format(url=web_request_url(request))
+    return {**result, "output": f"{begin}\n{output}\n{UNTRUSTED_WEB_END}"}
+
 
 async def _execute_tool(tools: Any, request: ToolRequest, workspace: Workspace) -> dict[str, Any]:
     if tools is None:
         return {"output": "Tool registry is unavailable.", "error": True}
     result = await tools.call(request.name, request.args)
+    if request.name in WEB_CONTENT_TOOLS:
+        result = _spotlight_web_output(request, result)
     output = str(result.get("output", ""))
     workspace.write(
         f"Tool {request.name} returned: {output[:1000]}",
@@ -108,6 +133,13 @@ class ToolLoopSession:
     @property
     def exhausted(self) -> bool:
         return self._closed or self._rounds >= self.max_total_rounds
+
+    @property
+    def closed(self) -> bool:
+        """True once the session can produce no further output (a forced
+        final was already emitted). ``exhausted`` merely means the round
+        budget is spent — one forced-final step may still be owed."""
+        return self._closed
 
     def inject(self, content: str, role: str = "user") -> None:
         """Append-only context update: cache-safe, never rebuilds the list."""

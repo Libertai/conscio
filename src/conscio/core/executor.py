@@ -120,7 +120,7 @@ class PromptStrategy(Protocol):
         *,
         event: InputEvent,
         workspace: Workspace,
-        broadcast: list[WorkspaceEntry],
+        broadcast: list[WorkspaceEntry] | None,
         memory: MemoryStore,
         session_id: str,
     ) -> AssembledPrompt:
@@ -145,10 +145,12 @@ class ChatStrategy:
         assembler: PromptAssembler | None = None,
         context_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None,
         llm: Any = None,
+        on_tool_observation: Callable[[ToolRequest, dict[str, Any]], Awaitable[None]] | None = None,
     ) -> None:
         self.assembler = assembler or PromptAssembler()
         self.context_provider = context_provider
         self.llm = llm
+        self.on_tool_observation = on_tool_observation
         self.last_model_context = ""
 
     async def build(
@@ -156,7 +158,7 @@ class ChatStrategy:
         *,
         event: InputEvent,
         workspace: Workspace,
-        broadcast: list[WorkspaceEntry],
+        broadcast: list[WorkspaceEntry] | None,
         memory: MemoryStore,
         session_id: str,
         self_state: SelfState | None = None,
@@ -222,7 +224,7 @@ class AutonomousStrategy:
         *,
         event: InputEvent,
         workspace: Workspace,
-        broadcast: list[WorkspaceEntry],
+        broadcast: list[WorkspaceEntry] | None,
         memory: MemoryStore,
         session_id: str,
         self_state: SelfState | None = None,
@@ -278,6 +280,7 @@ class EpisodeExecutor:
         self.prediction = prediction
         self.last_model_context = ""
         self.tool_requests: list[ToolRequest] = []
+        self.tool_results: list[dict[str, Any]] = []
         self.llm_calls = 0
         self._session: ToolLoopSession | None = None
         self._strategy: ChatStrategy | AutonomousStrategy | None = None
@@ -296,13 +299,18 @@ class EpisodeExecutor:
 
     @property
     def exhausted(self) -> bool:
-        return self._session is not None and self._session.exhausted
+        """No further output possible. A session that merely hit its round
+        budget is NOT exhausted: stepping it once more yields the forced
+        final answer."""
+        return self._session is not None and self._session.closed
 
     def reset(self) -> None:
         """Per-episode reset; strategies (and their settable llm) persist."""
         self.last_model_context = ""
         self.tool_requests = []
+        self.tool_results = []
         self.llm_calls = 0
+        self.autonomous.last_tool_requests = []
         self._session = None
         self._strategy = None
         self._tick = 0
@@ -321,7 +329,9 @@ class EpisodeExecutor:
         self._tick += 1
         self._hook_workspace = workspace
         self._hook_state = state
-        broadcast = list(broadcast_new or [])
+        # broadcast_new=None means attention gating is ablated: the prompt
+        # falls back to the v1 read() WORKSPACE and no updates are injected.
+        broadcast = list(broadcast_new) if broadcast_new is not None else None
         if self._strategy is None:
             self._strategy = self.autonomous if event.source == "autonomous" else self.chat
         if self._session is None:
@@ -370,6 +380,7 @@ class EpisodeExecutor:
         self._pending_expectation = self.prediction.expect_tool(request, self._tick)
 
     async def _on_tool_observation(self, request: ToolRequest, result: dict[str, Any]) -> None:
+        self.tool_results.append({"tool": request.name, **result})
         expectation = self._pending_expectation
         self._pending_expectation = None
         if expectation is not None and self._hook_workspace is not None:

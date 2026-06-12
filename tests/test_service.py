@@ -257,6 +257,73 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(influence.response, "Can we narrow this down first?")
         self.assertFalse(any(g["source"] == "user_influence" for g in goals))
 
+    async def test_submit_influence_routes_through_autonomous_llm(self) -> None:
+        service = ConscioService(self.config)
+        await service.start(background=False)
+        try:
+            stub = _StubAutonomousLLM([
+                {
+                    "content": (
+                        '{"decision": "adopt", "reasoning": "Useful and aligned.", '
+                        '"response_to_user": "Adopting it."}'
+                    )
+                },
+            ])
+            service.runtime.autonomous_strategy.llm = stub
+            influence = await service.submit_influence(
+                "Document the architecture decisions.", kind="goal"
+            )
+            goals = await service.goals.list_goals()
+        finally:
+            await service.stop()
+
+        # submit_influence passes the autonomous strategy's llm into appraisal.
+        self.assertGreaterEqual(len(stub.calls), 1)
+        self.assertEqual(influence["decision"], "adopt")
+        self.assertEqual(influence["status"], "adopted")
+        self.assertTrue(any(g["source"] == "user_influence" for g in goals))
+
+    async def test_learn_procedure_tool_records_deliberate_procedure(self) -> None:
+        service = ConscioService(self.config)
+        await service.start(background=False)
+        try:
+            result = await service.runtime.tools.call(
+                "learn_procedure",
+                {
+                    "name": "triage-logs",
+                    "description": "Check the service logs for recent errors.",
+                    "steps": "1. journalctl -u conscio\n2. grep ERROR",
+                    "trigger": "After a failed deploy.",
+                },
+            )
+            procedures = await service.list_procedures()
+        finally:
+            await service.stop()
+
+        self.assertFalse(result["error"])
+        self.assertEqual(len(procedures), 1)
+        self.assertEqual(procedures[0]["name"], "triage-logs")
+        self.assertEqual(procedures[0]["trigger"], "After a failed deploy.")
+
+    async def test_task_discipline_nudge_fires_after_three_add_only_ticks(self) -> None:
+        service = ConscioService(self.config)
+        await service.start(background=False)
+        try:
+            add_only = [type("Req", (), {"name": "add_task"})()]
+            for _ in range(3):
+                service._update_task_discipline(add_only)
+            state = await service._autonomous_context_state()
+            assembled = await service.runtime.autonomous_assembler.assemble(state=state)
+            # A progressing tick clears the nudge.
+            service._update_task_discipline([type("Req", (), {"name": "set_task_status"})()])
+            cleared = await service._autonomous_context_state()
+        finally:
+            await service.stop()
+
+        self.assertIn("MUST set_task_status", state["task_discipline"])
+        self.assertIn("TASK_DISCIPLINE (hard rule)", assembled.dynamic_context)
+        self.assertEqual(cleared["task_discipline"], "")
+
     async def test_influence_can_be_rejected_instead_of_auto_adopted(self) -> None:
         service = ConscioService(self.config)
         await service.start(background=False)
@@ -321,7 +388,9 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         try:
             await first.run_autonomous_tick()
             projects = await first.list_projects()
+            project = await first.get_project(projects[0]["id"])
             episodes = await first.recent_episodes()
+            context_state = await first._autonomous_context_state()
         finally:
             await first.stop()
 
@@ -335,6 +404,12 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertGreaterEqual(len(projects), 1)
         self.assertGreaterEqual(len(episodes), 1)
+        # The v1 filler task is dead: nothing pending unless the model adds it,
+        # and the gap surfaces as the NO_PENDING_TASK sentinel in context state.
+        self.assertEqual(project.get("tasks", []), [])
+        self.assertTrue(context_state["tasks"]["status"].startswith("NO_PENDING_TASK"))
+        # Unified episodes are global (restart-amnesia fix): the new process
+        # sees the prior process's episodes and projects.
         self.assertEqual(reloaded_projects[0]["id"], projects[0]["id"])
         self.assertEqual(reloaded_episodes[0]["id"], episodes[0]["id"])
 
@@ -345,6 +420,12 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             await service.run_autonomous_tick()
             project = (await service.list_projects())[0]
             await service.set_project_status(project["id"], "paused")
+            # Pin the scheduler to this project's goal: the drive scheduler
+            # would otherwise rotate to a starved drive (anti-monopoly).
+            service.memory.execute(
+                "UPDATE goals SET status = 'retired' WHERE id != ?",
+                (project["goal_id"],),
+            )
             await service.run_autonomous_tick()
             reloaded = await service.get_project(project["id"])
             status = await service.status()
@@ -423,7 +504,8 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         # The stub LLM is constrained to bash, so we don't assert the task itself
         # transitioned — only that autonomy ran tool calls inside the configured workdir.
         self.assertIsNotNone(project)
-        self.assertGreaterEqual(len(project.get("tasks", [])), 1)
+        # The v1 filler task is gone: no task appears unless the model adds one.
+        self.assertEqual(project.get("tasks", []), [])
 
     async def test_tool_action_budget_persists_across_restart(self) -> None:
         workdir = Path(self.tmp.name) / "work-budget"
