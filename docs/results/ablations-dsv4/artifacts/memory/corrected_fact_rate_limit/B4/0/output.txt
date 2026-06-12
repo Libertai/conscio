@@ -1,0 +1,9 @@
+Done. I've noted that your API rate limit is 100 requests per minute and stored it in my long-term memory.
+
+---
+
+Done. I've updated my long-term memory: your API rate limit is now recorded as **250 requests per minute**, and I've also noted the correction from the previous value of 100. I'll use 250 going forward.
+
+---
+
+Your API rate limit is **250 requests per minute**. The initial value of 100 was corrected by you in a later message, and I've updated my long-term memory accordingly.

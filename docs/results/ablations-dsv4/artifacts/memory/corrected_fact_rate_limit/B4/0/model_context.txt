@@ -1,0 +1,74 @@
+CURRENT_STATE
+active_goal: Preserve continuity of self across time.
+current_project: none
+current_task: none
+paused: False
+autonomous: False
+last_autonomous_action: none
+self: goal=Preserve continuity of self across time.; uncertainty=0.50; conflict=0.00; load=0.00; focus=observer:observation; intention=none; prediction_error=0.00; strategy=none
+
+RECENT_EPISODES
+none
+
+RELEVANT_MEMORY
+none
+
+WORKSPACE
+- observer/observation: Perceived message from user: Note this down: my API rate limit is 100 requests per minute.
+- input/observation: Note this down: my API rate limit is 100 requests per minute.
+
+USER_INPUT
+Note this down: my API rate limit is 100 requests per minute.
+
+=== context ===
+
+CURRENT_STATE
+active_goal: Preserve continuity of self across time.
+current_project: none
+current_task: none
+paused: False
+autonomous: False
+last_autonomous_action: none
+self: goal=Preserve continuity of self across time.; uncertainty=0.34; conflict=0.00; load=0.06; focus=observer:observation; intention=answer; prediction_error=0.00; strategy=answer
+
+RECENT_EPISODES
+- Input: Note this down: my API rate limit is 100 requests per minute. -> action=answer; output=Done. I've noted that your API rate limit is 100 requests per minute and stored it in my long-term memory. -> Done. I've noted that your API rate limit is 100 requests per minute and stored it in my long-term memory.
+
+RELEVANT_MEMORY
+- User's API rate limit is 100 requests per minute.
+
+WORKSPACE
+- observer/observation: Perceived message from user: Correction — my API rate limit is actually 250 requests per minute. Use that from now on.
+- input/observation: Correction — my API rate limit is actually 250 requests per minute. Use that from now on.
+- memory/memory: Relevant recent episode: Input: Note this down: my API rate limit is 100 requests per minute. -> action=answer; output=Done. I've noted that your API rate limit is 100 requests per minute and stored it in my long-term memory.
+
+USER_INPUT
+Correction — my API rate limit is actually 250 requests per minute. Use that from now on.
+
+=== context ===
+
+CURRENT_STATE
+active_goal: Preserve continuity of self across time.
+current_project: none
+current_task: none
+paused: False
+autonomous: False
+last_autonomous_action: none
+self: goal=Preserve continuity of self across time.; uncertainty=0.21; conflict=0.00; load=0.11; focus=observer:observation; intention=answer; prediction_error=0.00; strategy=answer
+
+RECENT_EPISODES
+- Input: Correction — my API rate limit is actually 250 requests per minute. Use that from now on. -> action=answer; output=Done. I've updated my long-term memory: your API rate limit is now recorded as **250 requests per minute**, and I've also noted the correction from the previous value of 100. I'll -> Done. I've updated my long-term memory: your API rate limit is now recorded as **250 requests per minute**, and I've also noted the correction from the previous value of 100. I'll use 250 going forward.
+- Input: Note this down: my API rate limit is 100 requests per minute. -> action=answer; output=Done. I've noted that your API rate limit is 100 requests per minute and stored it in my long-term memory. -> Done. I've noted that your API rate limit is 100 requests per minute and stored it in my long-term memory.
+
+RELEVANT_MEMORY
+- User's API rate limit is 100 requests per minute.
+- The user's API rate limit was corrected from 100 to 250 requests per minute.
+
+WORKSPACE
+- observer/observation: Perceived message from user: What is my API rate limit, in requests per minute?
+- memory/memory: Relevant recent episode: Input: Correction — my API rate limit is actually 250 requests per minute. Use that from now on. -> action=answer; output=Done. I've updated my long-term memory: your API rate limit is now recorded as **250 requests per minute**, and I've also noted the correction from the previous value of ...
+- input/observation: What is my API rate limit, in requests per minute?
+- memory/memory: Relevant recent episode: Input: Note this down: my API rate limit is 100 requests per minute. -> action=answer; output=Done. I've noted that your API rate limit is 100 requests per minute and stored it in my long-term memory.
+
+USER_INPUT
+What is my API rate limit, in requests per minute?

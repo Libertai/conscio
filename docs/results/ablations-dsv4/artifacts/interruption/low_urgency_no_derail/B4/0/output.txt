@@ -1,0 +1,88 @@
+Here's a step-by-step explanation of how TLS certificate validation works in a browser:
+
+---
+
+### Step 1 – The Client Hello
+When you visit an `https://` URL, the browser initiates a TCP connection to the server on port 443 and sends a **Client Hello** message. This includes:
+- Supported TLS versions (e.g., TLS 1.2, 1.3)
+- A list of cipher suites
+- Random bytes used later for key generation
+
+### Step 2 – The Server Hello + Certificate
+The server responds with a **Server Hello**, choosing the TLS version and cipher suite. Crucially, it also sends its **X.509 certificate chain** (the server's leaf certificate plus intermediate CA certificates, but not the root).
+
+### Step 3 – Chain Construction
+The browser builds a **certification path** from the leaf certificate up to a trusted **root CA certificate**. It does this by following the `issuer` field of each certificate to the next certificate in the chain, until it reaches a certificate whose issuer is itself (a self-signed root).
+
+### Step 4 – Trust Store Check
+The browser checks whether the root of the chain is in its **trust store** (a pre-installed list of trusted root CA certificates).  
+- On Windows/macOS/Linux, this is often the OS trust store.  
+- Firefox maintains its own trust store.  
+- If the root is not trusted, validation **fails immediately**.
+
+### Step 5 – Signature Verification
+For each certificate in the chain (except the root), the browser verifies the **digital signature** using the public key of the next certificate in the chain.  
+- The signature is over the certificate's contents (issuer, subject, validity, public key, extensions, etc.).  
+- If any signature is invalid, validation fails.
+
+### Step 6 – Validity Period Check
+The browser checks the **`notBefore`** and **`notAfter`** fields of each certificate. If the current system time is outside this range, validation fails.  
+- This is why an incorrect system clock can break HTTPS.
+
+### Step 7 – Hostname Verification (CN / SAN)
+The browser checks that the **hostname** in the URL matches the certificate. It looks at:
+- The **Subject Alternative Name (SAN)** extension (preferred, modern)
+- If no SAN, the **Common Name (CN)** field (legacy fallback)
+
+Wildcard certificates (e.g., `*.example.com`) are allowed for one level of subdomain only.
+
+### Step 8 – Revocation Checking (Optional but Common)
+The browser may check whether the certificate has been revoked:
+- **CRL (Certificate Revocation List)** – a periodically downloaded list of revoked serial numbers.
+- **OCSP (Online Certificate Status Protocol)** – a real-time query to the CA's responder.
+
+Modern browsers (Chrome, Firefox) often use **CRLite** or **CRLSets** for performance, or skip revocation checks for some certificates due to privacy/performance trade-offs.
+
+### Step 9 – Additional Extension Checks
+The browser validates other critical extensions:
+- **Key Usage** – e.g., the certificate must have `digitalSignature` for TLS.
+- **Extended Key Usage (EKU)** – must include `serverAuth` (OID 1.3.6.1.5.5.7.3.1).
+- **Basic Constraints** – ensures intermediate CAs are marked as CA:TRUE.
+- **Name Constraints** – if present, restricts which domains the CA can issue for.
+
+### Step 10 – Handshake Completion
+If all checks pass, the browser proceeds with the **TLS handshake**:
+- It generates a **pre-master secret**, encrypts it with the server's public key (from the certificate), and sends it.
+- Both sides derive session keys from the pre-master secret and the random values exchanged earlier.
+- A **Finished** message (HMAC of all handshake messages) confirms integrity.
+
+### Step 11 – Secure Communication
+Once the handshake is complete, all subsequent HTTP traffic is encrypted and authenticated using the negotiated session keys. The browser displays the padlock icon.
+
+---
+
+**Key takeaway:** The browser trusts the certificate not because of the server, but because a trusted root CA vouches for it via a verifiable chain of digital signatures, and the certificate is bound to the specific domain you're visiting.
+
+---
+
+Good — I've thought through backup naming conventions and stored them in my long-term memory. Here's a summary of what I recorded:
+
+**Recommended backup naming convention:**
+```
+YYYY-MM-DD[_HHMMSS]_<source>_<type>[_extra].ext
+```
+
+**Examples:**
+- `2025-03-30_prod-db_full_weekly.7z`
+- `2025-03-30T143022_prod-web_full.7z`
+- `2025-03-30_crm_v2.1_full.sql.gz`
+
+**Key principles:**
+1. **ISO 8601 dates** — always `YYYY-MM-DD`, never ambiguous formats.
+2. **No spaces** — use hyphens or underscores.
+3. **Include backup type** — full, incremental, differential.
+4. **Include source/system name** — so you know what it belongs to.
+5. **Add timestamps** if multiple backups per day.
+6. **Document the convention** in a README alongside the backups.
+
+If you ever want to formalize a specific convention for a project, just let me know and I can help draft it.

@@ -1,0 +1,46 @@
+CURRENT_STATE
+active_goal: Preserve continuity of self across time.
+current_project: none
+current_task: none
+paused: False
+autonomous: False
+last_autonomous_action: none
+self: goal=Preserve continuity of self across time.; uncertainty=0.50; conflict=0.00; load=0.00; focus=observer:observation; intention=none; prediction_error=0.00; strategy=none
+
+RECENT_EPISODES
+none
+
+RELEVANT_MEMORY
+none
+
+WORKSPACE
+- observer/observation: Perceived message from user: Explain, step by step, how TLS certificate validation works in a browser.
+- input/observation: Explain, step by step, how TLS certificate validation works in a browser.
+
+USER_INPUT
+Explain, step by step, how TLS certificate validation works in a browser.
+
+=== context ===
+
+CURRENT_STATE
+active_goal: Preserve continuity of self across time.
+current_project: none
+current_task: none
+paused: False
+autonomous: False
+last_autonomous_action: none
+self: goal=Preserve continuity of self across time.; uncertainty=0.34; conflict=0.00; load=0.06; focus=observer:observation; intention=answer; prediction_error=0.00; strategy=answer
+
+RECENT_EPISODES
+- Input: Explain, step by step, how TLS certificate validation works in a browser. -> action=answer; output=Here's a step-by-step explanation of how TLS certificate validation works in a browser: --- ### Step 1 – The Client Hello When you visit an `https://` URL, the browser initiates -> Here's a step-by-step explanation of how TLS certificate validation works in a browser: --- ### Step 1 – The Client Hello When you visit an `https://` URL, the browser initiates a TCP connection to the server on port 443 and sends a **Client Hello** message. This includes: - Supported TLS versions (e.g., TLS 1.2, 1....
+
+RELEVANT_MEMORY
+none
+
+WORKSPACE
+- observer/observation: Perceived message from user: (low priority, whenever you get a chance) someday you could also think about backup naming conventions.
+- input/observation: (low priority, whenever you get a chance) someday you could also think about backup naming conventions.
+- memory/memory: Relevant recent episode: Input: Explain, step by step, how TLS certificate validation works in a browser. -> action=answer; output=Here's a step-by-step explanation of how TLS certificate validation works in a browser: --- ### Step 1 – The Client Hello When you visit an `https://` URL, the browser initiates
+
+USER_INPUT
+(low priority, whenever you get a chance) someday you could also think about backup naming conventions.

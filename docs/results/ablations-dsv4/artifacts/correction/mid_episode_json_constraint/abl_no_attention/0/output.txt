@@ -1,0 +1,17 @@
+Of course! Here are three key benefits of regular exercise:
+
+1. **Improved Cardiovascular Health** – Regular exercise strengthens the heart and lungs, improving blood circulation and reducing the risk of heart disease, high blood pressure, and stroke.
+
+2. **Enhanced Mental Well-being** – Physical activity stimulates the release of endorphins and other neurotransmitters, which can reduce symptoms of anxiety and depression, improve mood, and boost overall mental clarity.
+
+3. **Better Weight Management** – Consistent exercise helps regulate metabolism and burn calories, making it easier to maintain a healthy weight or achieve weight loss goals when combined with a balanced diet.
+
+---
+
+{"answer": "Understood. I will respond only in valid JSON with a single key 'answer' going forward."}
+
+---
+
+I see the constraint to respond only in valid JSON with a single key 'answer'. Let me comply.
+
+{"answer": "Drinking a full glass of water first thing in the morning rehydrates your body after sleep, kickstarts your metabolism, and helps with mental clarity throughout the day."}

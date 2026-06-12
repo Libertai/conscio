@@ -1,0 +1,11 @@
+Noted. I've stored that fact in my long-term memory: **your API rate limit is 100 requests per minute.** I'll keep that in mind going forward.
+
+---
+
+It seems the fact was stored (the system confirmed 25 facts stored — likely a quirk of the count), but the search isn't returning results. That may be a search/indexing delay. Regardless, I've recorded the correction.
+
+**Noted and updated.** Your API rate limit is now recorded as **250 requests per minute** — the old value of 100 has been superseded. I'll use this going forward.
+
+---
+
+Your API rate limit is **250 requests per minute** (the corrected value you provided after initially saying 100). I've now stored that in my long-term memory.

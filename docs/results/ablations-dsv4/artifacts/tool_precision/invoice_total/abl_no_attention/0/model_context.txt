@@ -1,0 +1,21 @@
+CURRENT_STATE
+active_goal: Preserve continuity of self across time.
+current_project: none
+current_task: none
+paused: False
+autonomous: False
+last_autonomous_action: none
+self: goal=Preserve continuity of self across time.; uncertainty=0.50; conflict=0.00; load=0.00; focus=observer:observation; intention=none; prediction_error=0.00; strategy=none
+
+RECENT_EPISODES
+none
+
+RELEVANT_MEMORY
+none
+
+WORKSPACE
+- input/observation: Using your tools, find the total of invoice INV-204 and state the amount.
+- observer/observation: Perceived message from user: Using your tools, find the total of invoice INV-204 and state the amount.
+
+USER_INPUT
+Using your tools, find the total of invoice INV-204 and state the amount.

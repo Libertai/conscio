@@ -1,0 +1,1 @@
+**Result:** The build status service returned "service unavailable" for project **apollo**. I was unable to retrieve the current build status — the service may be down or unreachable at this moment. You might want to try again later.

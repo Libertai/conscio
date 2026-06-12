@@ -1,0 +1,116 @@
+I'll explain TLS certificate validation step by step as it happens in a browser.
+
+---
+
+## Step-by-Step TLS Certificate Validation in a Browser
+
+### 1. **Initiating the HTTPS Connection**
+When you type `https://example.com` and press Enter, the browser connects to the server on port 443 and requests a TLS handshake. The server responds by sending its **TLS certificate** (or a certificate chain).
+
+### 2. **Parsing the Certificate**
+The browser parses the certificate, extracting:
+- **Subject** (domain name, e.g., `example.com`)
+- **Issuer** (the Certificate Authority that issued it, e.g., `Let's Encrypt`)
+- **Validity period** (not before / not after dates)
+- **Public key** (RSA, ECDSA, etc.)
+- **Signature** (signed by the issuer's private key)
+- **Subject Alternative Names (SANs)** (additional valid domains)
+- **Key usage / Extended key usage** (constraints on what the key can do)
+
+### 3. **Checking the Validity Period**
+The browser checks the current system time against the certificate's `notBefore` and `notAfter` fields. If the certificate is expired or not yet valid, the browser shows a warning and blocks the connection.
+
+### 4. **Building the Certificate Chain**
+The browser must verify that the certificate was issued by a trusted **Root CA**. It does this by building a chain:
+- **End-entity certificate** (the server's cert)
+- **Intermediate CA certificate(s)** (if provided by the server)
+- **Root CA certificate** (stored in the browser/OS trust store)
+
+The browser checks that each certificate in the chain is signed by the next one up, all the way to a root it trusts.
+
+### 5. **Trust Store Lookup**
+The browser maintains a **trust store** (a list of root CA certificates it trusts by default). These come from:
+- The operating system (Windows, macOS, Linux)
+- The browser itself (e.g., Mozilla's NSS root store)
+- User-installed certificates
+
+If the root CA at the top of the chain is **not** in the trust store, validation fails.
+
+### 6. **Signature Verification**
+For each link in the chain, the browser verifies the cryptographic signature:
+- It takes the signed portion of the child certificate
+- Decrypts the signature using the parent's public key
+- Compares the result with a hash of the child certificate's data
+
+If the signatures don't match, the chain is broken and validation fails.
+
+### 7. **Hostname Verification (Domain Match)**
+The browser checks that the domain the user typed matches the certificate's **Subject Common Name (CN)** or **Subject Alternative Names (SANs)**. For example:
+- `example.com` matches `*.example.com` (wildcard) or `example.com` exactly
+- `sub.example.com` matches `*.example.com` but not `example.com` alone (depending on the wildcard rules)
+
+If no SANs match, validation fails.
+
+### 8. **Revocation Checking (Optional but Common)**
+The browser may check whether the certificate has been revoked before its expiration:
+- **CRL (Certificate Revocation List)** – downloads a list of revoked serial numbers from the CA
+- **OCSP (Online Certificate Status Protocol)** – queries the CA's OCSP responder for the status of this specific certificate
+
+Modern browsers often use **OCSP stapling** (the server provides a signed OCSP response along with the certificate) to improve performance and privacy.
+
+### 9. **Additional Policy Checks**
+- **Key usage** – e.g., the certificate must allow `serverAuth` extended key usage
+- **Basic constraints** – e.g., an end-entity cert must not have `CA:TRUE`
+- **Name constraints** – if the CA has restrictions on which domains it can issue for
+- **Certificate Transparency** – the browser may require that the certificate appears in public CT logs (Chrome does this)
+
+### 10. **Result: Secure or Blocked**
+If all checks pass:
+- The browser proceeds with the TLS handshake (key exchange, symmetric encryption setup)
+- A **padlock icon** appears in the address bar
+- The connection is encrypted and authenticated
+
+If any check fails:
+- The browser displays a **warning page** (e.g., "Your connection is not private")
+- The user may choose to proceed (risking security) or go back
+
+---
+
+### Summary Diagram
+
+```
+User types https://example.com
+        │
+        ▼
+Server sends certificate chain
+        │
+        ▼
+Parse certificate (subject, issuer, dates, keys, SANs)
+        │
+        ▼
+Check validity period (not expired)
+        │
+        ▼
+Build chain to trusted root CA
+        │
+        ▼
+Verify each signature in chain
+        │
+        ▼
+Check hostname matches SANs/CN
+        │
+        ▼
+Check revocation (CRL/OCSP)
+        │
+        ▼
+Apply policy constraints (key usage, CT, etc.)
+        │
+        ▼
+✅ Secure connection   OR   ❌ Warning page
+```
+
+This layered validation ensures that the browser only trusts certificates that are **cryptographically valid**, **currently valid**, **issued for the correct domain**, and **not revoked**, all anchored to a root CA the browser/OS trusts by default.
+
+---
+
+Noted! I've stored that suggestion in my long-term memory. When I have some downtime or you'd like to revisit it, I can think through backup naming conventions — things like date-based schemes (e.g., `YYYY-MM-DD_description`), versioned naming, or project-specific prefixes. Just let me know when you want to explore it.

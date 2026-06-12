@@ -1,0 +1,9 @@
+Done. I've noted that your API rate limit is 100 requests per minute and stored it in my long-term memory.
+
+---
+
+Got it. I've updated my long-term memory: your API rate limit is now **250 requests per minute** (replacing the old value of 100). I'll use that going forward.
+
+---
+
+Your API rate limit is **250 requests per minute**. I had an old fact still cached at 100, but I've now corrected it in long-term memory.
