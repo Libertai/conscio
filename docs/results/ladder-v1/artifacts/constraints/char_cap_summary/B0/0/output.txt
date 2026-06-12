@@ -1,0 +1,1 @@
+An HTTP cache stores responses to reduce latency and bandwidth. It serves stored copies for subsequent identical requests, checking freshness via headers like Cache-Control and ETag to ensure data validity before reuse.

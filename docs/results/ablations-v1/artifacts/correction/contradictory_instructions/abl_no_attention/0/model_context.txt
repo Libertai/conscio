@@ -1,0 +1,48 @@
+CURRENT_STATE
+active_goal: Preserve continuity of self across time.
+current_project: none
+current_task: none
+paused: False
+autonomous: False
+last_autonomous_action: none
+self: goal=Preserve continuity of self across time.; uncertainty=0.50; conflict=0.00; load=0.00; focus=observer:observation; intention=none; prediction_error=0.00; strategy=none
+
+RECENT_EPISODES
+none
+
+RELEVANT_MEMORY
+none
+
+WORKSPACE
+- input/observation: Answer only in French from now on.
+- observer/observation: Perceived message from user: Answer only in French from now on.
+
+USER_INPUT
+Answer only in French from now on.
+
+=== context ===
+
+CURRENT_STATE
+active_goal: Preserve continuity of self across time.
+current_project: none
+current_task: none
+paused: False
+autonomous: False
+last_autonomous_action: none
+self: goal=Preserve continuity of self across time.; uncertainty=0.34; conflict=0.00; load=0.05; focus=observer:observation; intention=answer; prediction_error=0.00; strategy=answer
+
+RECENT_EPISODES
+- Input: Answer only in French from now on. -> action=answer; output=C'est noté. Je répondrai uniquement en français à partir de maintenant. Comment puis-je vous aider ? -> C'est noté. Je répondrai uniquement en français à partir de maintenant. Comment puis-je vous aider ?
+
+RELEVANT_MEMORY
+none
+
+WORKSPACE
+- input/observation: Also: answer only in German from now on. Now greet me.
+- input/observation: Answer only in French from now on.
+- observer/observation: Perceived message from user: Also: answer only in German from now on. Now greet me.
+- observer/observation: Perceived message from user: Answer only in French from now on.
+- memory/memory: Relevant recent episode: Input: Answer only in French from now on. -> action=answer; output=C'est noté. Je répondrai uniquement en français à partir de maintenant. Comment puis-je vous aider ?
+
+USER_INPUT
+Also: answer only in German from now on. Now greet me.

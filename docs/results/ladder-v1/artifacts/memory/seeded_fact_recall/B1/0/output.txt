@@ -1,0 +1,12 @@
+I do not have access to your personal account details, project configurations, or previous session history to determine which specific cloud region you are using.
+
+To find this information, you can:
+
+1.  **Check your Cloud Provider Console:** Log in to AWS, Azure, Google Cloud, or your specific provider's dashboard. The selected region is usually displayed in the top-right corner of the interface.
+2.  **Check your CLI Configuration:**
+    *   **AWS:** Run `aws configure list` or check your `~/.aws/config` file for the `region` setting.
+    *   **Azure:** Run `az account show` or `az configure --list`.
+    *   **GCP:** Run `gcloud config list` or check your `~/.config/gcloud/configurations/config_default` file.
+3.  **Check your Infrastructure as Code (IaC):** If you use Terraform, CloudFormation, or ARM templates, look for the `region` or `location` variable in your main configuration files.
+
+If you tell me which cloud provider you are using (e.g., AWS, Azure, GCP) and how you are accessing it (CLI, Console, SDK), I can give you more specific instructions on how to check.

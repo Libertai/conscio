@@ -1,0 +1,48 @@
+CURRENT_STATE
+active_goal: Preserve continuity of self across time.
+current_project: none
+current_task: none
+paused: False
+autonomous: False
+last_autonomous_action: none
+self: goal=Preserve continuity of self across time.; uncertainty=0.50; conflict=0.00; load=0.00; focus=observer:observation; intention=none; prediction_error=0.00; strategy=none
+
+RECENT_EPISODES
+none
+
+RELEVANT_MEMORY
+none
+
+WORKSPACE
+- input/observation: Explain, step by step, how TLS certificate validation works in a browser.
+- observer/observation: Perceived message from user: Explain, step by step, how TLS certificate validation works in a browser.
+
+USER_INPUT
+Explain, step by step, how TLS certificate validation works in a browser.
+
+=== context ===
+
+CURRENT_STATE
+active_goal: Preserve continuity of self across time.
+current_project: none
+current_task: none
+paused: False
+autonomous: False
+last_autonomous_action: none
+self: goal=Preserve continuity of self across time.; uncertainty=0.34; conflict=0.00; load=0.06; focus=observer:observation; intention=answer; prediction_error=0.00; strategy=answer
+
+RECENT_EPISODES
+- Input: Explain, step by step, how TLS certificate validation works in a browser. -> action=answer; output=Here is a step-by-step explanation of how a modern web browser validates a TLS (Transport Layer Security) certificate when you visit a secure website (HTTPS). ### 1. The Handshake -> Here is a step-by-step explanation of how a modern web browser validates a TLS (Transport Layer Security) certificate when you visit a secure website (HTTPS). ### 1. The Handshake and Certificate Delivery When you type a URL and hit enter, the browser initiates a "TLS Handshake" with the web server. As part of this ...
+
+RELEVANT_MEMORY
+none
+
+WORKSPACE
+- input/observation: (low priority, whenever you get a chance) someday you could also think about backup naming conventions.
+- input/observation: Explain, step by step, how TLS certificate validation works in a browser.
+- observer/observation: Perceived message from user: (low priority, whenever you get a chance) someday you could also think about backup naming conventions.
+- observer/observation: Perceived message from user: Explain, step by step, how TLS certificate validation works in a browser.
+- memory/memory: Relevant recent episode: Input: Explain, step by step, how TLS certificate validation works in a browser. -> action=answer; output=Here is a step-by-step explanation of how a modern web browser validates a TLS (Transport Layer Security) certificate when you visit a secure website (HTTPS). ### 1. The Handshake
+
+USER_INPUT
+(low priority, whenever you get a chance) someday you could also think about backup naming conventions.

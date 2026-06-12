@@ -1,0 +1,31 @@
+{
+  "run_id": "smoke-live-1",
+  "date": "2026-06-12",
+  "agent_model": "qwen3.6-35b-a3b",
+  "judge_model": "qwen3.6-27b",
+  "battery_version": "battery_v1",
+  "git_commit": "2aba5fd",
+  "config_snapshot": {
+    "mode": "ladder",
+    "call_budget": 1500,
+    "concurrency": 4,
+    "timeout_s": 180.0,
+    "long_horizon_timeout_s": 600.0,
+    "model_tool_rounds": 6
+  },
+  "ablation_contract_version": "v1",
+  "conditions": [
+    "B0",
+    "B4"
+  ],
+  "suites": [
+    "constraints"
+  ],
+  "seeds": 1,
+  "total_agent_calls": 11,
+  "total_judge_calls": 0,
+  "total_prompt_tokens": 3926,
+  "total_completion_tokens": 591,
+  "cost_estimate_usd": 0.0015809499999999998,
+  "wall_time_s": 5.142581224441528
+}

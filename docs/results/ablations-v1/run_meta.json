@@ -1,0 +1,43 @@
+{
+  "run_id": "ablations-v1",
+  "date": "2026-06-12",
+  "agent_model": "qwen3.6-35b-a3b",
+  "judge_model": "qwen3.6-27b",
+  "battery_version": "battery_v1",
+  "git_commit": "2aba5fd",
+  "config_snapshot": {
+    "mode": "ablations",
+    "call_budget": 1500,
+    "concurrency": 4,
+    "timeout_s": 180.0,
+    "long_horizon_timeout_s": 600.0,
+    "model_tool_rounds": 6
+  },
+  "ablation_contract_version": "v1",
+  "conditions": [
+    "B4",
+    "abl_no_attention",
+    "abl_no_memory",
+    "abl_no_prediction",
+    "abl_no_reflection",
+    "abl_no_selfstate",
+    "abl_no_appraisal"
+  ],
+  "suites": [
+    "constraints",
+    "correction",
+    "interruption",
+    "long_horizon",
+    "memory",
+    "refusal",
+    "self_report",
+    "tool_precision"
+  ],
+  "seeds": 1,
+  "total_agent_calls": 792,
+  "total_judge_calls": 25,
+  "total_prompt_tokens": 1246296,
+  "total_completion_tokens": 97780,
+  "cost_estimate_usd": 0.4704266,
+  "wall_time_s": 1451.8570201396942
+}
