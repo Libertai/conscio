@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 import tempfile
 import time
+import uuid
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -18,7 +21,7 @@ from rich.tree import Tree
 from conscio.core.agent import ConsciousAgent
 from conscio.core.cognition import InputEvent
 from conscio.core.runtime import CognitiveRuntime
-from conscio.eval import run_eval_suite
+from conscio.eval import LIVE_SUITES, run_eval_suite
 from conscio.memory.store import MemoryStore
 from conscio.config import load_config, write_default_config
 
@@ -222,6 +225,72 @@ async def _run_daemon_dry_run(events: list[str]) -> None:
             await runtime.close()
 
 
+LIVE_EVAL_GATE_EXPLANATION = (
+    "Live eval suites (ladder/ablations) make paid LLM calls and are double-gated:\n"
+    "  1. pass --live on the command line, AND\n"
+    "  2. set CONSCIO_EVAL_LIVE=1 in the environment.\n"
+    "The stub suites (smoke, autonomy_long_horizon, goal_evolution, ssrf_rejection)\n"
+    "never need either gate."
+)
+
+
+def _csv_list(value: str) -> list[str] | None:
+    items = [item.strip() for item in (value or "").split(",") if item.strip()]
+    return items or None
+
+
+async def _run_live_eval(args: argparse.Namespace) -> None:
+    if not args.live or os.environ.get("CONSCIO_EVAL_LIVE") != "1":
+        raise SystemExit(LIVE_EVAL_GATE_EXPLANATION)
+
+    from conscio.eval.judge import Judge
+    from conscio.eval.runner import run_battery
+    from conscio.llm.client import LLMClient
+
+    agent_model = args.model or load_config().llm_model
+    judge_model = args.judge_model
+    run_id = args.run_id or f"{time.strftime('%Y-%m-%d')}_{args.suite}_{uuid.uuid4().hex[:4]}"
+    out_dir = Path(args.out) / run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    agent_llm = LLMClient(model=agent_model)
+    judge = Judge(
+        LLMClient(model=judge_model),
+        judge_model,
+        out_dir / "judge_log.jsonl",
+        agent_model=agent_model,
+    )
+    console.print(
+        f"[bold]Live eval[/] run_id={run_id} suite={args.suite} "
+        f"agent={agent_model} judge={judge_model}"
+    )
+    result = await run_battery(
+        agent_llm=agent_llm,
+        agent_model=agent_model,
+        mode=args.suite,
+        conditions=_csv_list(args.conditions),
+        suites=_csv_list(args.tasks),
+        seeds=args.seeds,
+        judge=judge,
+        out_dir=out_dir,
+        run_id=run_id,
+    )
+    table = Table(title=f"Eval run {run_id}")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value")
+    errored = sum(1 for r in result.records if r.error)
+    passed = sum(1 for r in result.records if r.passed and not r.error)
+    table.add_row("records", str(len(result.records)))
+    table.add_row("passed", str(passed))
+    table.add_row("errored", str(errored))
+    table.add_row("agent calls", str(result.meta.total_agent_calls))
+    table.add_row("judge calls", str(result.meta.total_judge_calls))
+    table.add_row("est. cost", f"${result.meta.cost_estimate_usd:.2f}")
+    table.add_row("wall time", f"{result.meta.wall_time_s:.0f}s")
+    console.print(table)
+    for name, path in result.paths.items():
+        console.print(f"[dim]{name}: {path}[/]")
+
+
 async def _run_eval(suite: str) -> None:
     rows = await run_eval_suite(suite)
     table = Table(title=f"Eval Suite: {suite}")
@@ -416,7 +485,32 @@ def main() -> None:
     daemon_p.add_argument("--dry-run", action="store_true", default=True, help="Process events without unsafe autonomy")
     daemon_p.add_argument("events", nargs="*", default=["Daemon dry-run heartbeat"], help="Events to process")
     eval_p = sub.add_parser("eval", help="Run built-in evaluation suites")
-    eval_p.add_argument("--suite", default="smoke", help="Evaluation suite name")
+    eval_p.add_argument(
+        "--suite",
+        default="smoke",
+        help="Stub suite name (smoke, autonomy_long_horizon, goal_evolution, "
+        "ssrf_rejection) or a live battery suite (ladder, ablations)",
+    )
+    eval_p.add_argument(
+        "--conditions",
+        default="",
+        help="Comma-separated condition names (B0,B1,B2,B3,B4,abl_*) for live suites",
+    )
+    eval_p.add_argument("--seeds", type=int, default=1, help="Seeds for temperature>0 tasks")
+    eval_p.add_argument(
+        "--tasks",
+        default="",
+        help="Comma-separated battery suites to run (e.g. constraints,memory)",
+    )
+    eval_p.add_argument("--out", default="docs/results", help="Results output directory")
+    eval_p.add_argument("--model", default="", help="Agent model for live suites")
+    eval_p.add_argument("--judge-model", default="qwen3.6-27b", help="Judge model (must differ from agent)")
+    eval_p.add_argument("--run-id", default="", help="Run id (default: date_suite_rand)")
+    eval_p.add_argument(
+        "--live",
+        action="store_true",
+        help="Required (with CONSCIO_EVAL_LIVE=1) to run paid live suites",
+    )
 
     service_p = sub.add_parser("service", help="Manage the long-running Conscio service")
     service_sub = service_p.add_subparsers(dest="service_command")
@@ -457,7 +551,10 @@ def main() -> None:
     elif args.command == "daemon":
         asyncio.run(_run_daemon_dry_run(args.events))
     elif args.command == "eval":
-        asyncio.run(_run_eval(args.suite))
+        if args.suite in LIVE_SUITES:
+            asyncio.run(_run_live_eval(args))
+        else:
+            asyncio.run(_run_eval(args.suite))
     elif args.command == "service":
         if args.service_command == "init":
             _service_init()
