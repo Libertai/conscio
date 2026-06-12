@@ -270,6 +270,8 @@ class CognitiveRuntime:
         max_tool_rounds: int = 32,
         tool_rounds_per_tick: int = 4,
         max_reflections: int = 2,
+        attention_broadcast_limit: int = 6,
+        attention_char_budget: int = 4000,
         ablation: AblationFlags | None = None,
         constraint_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None,
         context_settings: ContextSettings | None = None,
@@ -281,7 +283,11 @@ class CognitiveRuntime:
         self.trace = CognitiveTrace()
         self.self_state = SelfState()
         self.attention_schema = AttentionSchema()
-        self.attention = AttentionController(coupling=self.ablation.self_state_coupling)
+        self.attention = AttentionController(
+            broadcast_limit=attention_broadcast_limit,
+            char_budget=attention_char_budget,
+            coupling=self.ablation.self_state_coupling,
+        )
         self.appraisal = AppraisalSystem(enabled=self.ablation.appraisal)
         self.action_selector = ActionSelector()
         self.prediction = PredictionEngine(enabled=self.ablation.prediction)

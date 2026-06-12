@@ -52,8 +52,14 @@ class AutonomousPromptAssembler:
     def __init__(self, *, max_dynamic_chars: int = 12000) -> None:
         self.max_dynamic_chars = max_dynamic_chars
 
-    async def assemble(self, *, state: dict[str, Any], memory: MemoryStore | None = None) -> AssembledAutonomousPrompt:
-        dynamic = self._format(state)
+    async def assemble(
+        self,
+        *,
+        state: dict[str, Any],
+        memory: MemoryStore | None = None,
+        broadcast_entries: list[WorkspaceEntry] | None = None,
+    ) -> AssembledAutonomousPrompt:
+        dynamic = self._format(state, broadcast_entries=broadcast_entries)
         if len(dynamic) > self.max_dynamic_chars:
             dynamic = "CONTEXT_TRUNCATED\n" + dynamic[-self.max_dynamic_chars :]
         return AssembledAutonomousPrompt(
@@ -64,7 +70,11 @@ class AutonomousPromptAssembler:
             dynamic_context=dynamic,
         )
 
-    def _format(self, state: dict[str, Any]) -> str:
+    def _format(
+        self,
+        state: dict[str, Any],
+        broadcast_entries: list[WorkspaceEntry] | None = None,
+    ) -> str:
         goal = state.get("active_goal") or {}
         project = state.get("current_project") or {}
         active_task = state.get("current_task") or {}
@@ -81,7 +91,23 @@ class AutonomousPromptAssembler:
         tasks_status = str(tasks.get("status") or "")
         episode_taint = state.get("episode_taint") or {}
 
-        parts = [
+        parts: list[str] = []
+        if broadcast_entries is not None:
+            # Attention gating ON: the tick-1 broadcast selection populates the
+            # WORKSPACE section of the initial prompt (design §7/§9). Entries are
+            # rendered exactly, in the score order the AttentionController
+            # returned them. broadcast_entries=None (abl_no_attention) keeps the
+            # v1-ish prompt with no WORKSPACE section.
+            parts.append("WORKSPACE")
+            if not broadcast_entries:
+                parts.append("  none")
+            else:
+                for entry in broadcast_entries:
+                    parts.append(
+                        f"  - {entry.source}/{entry.type.value}: {self._line(entry.content)}"
+                    )
+            parts.append("")
+        parts += [
             "ACTIVE_GOAL",
             self._line(
                 f"id={goal.get('id', 'none')} priority={goal.get('priority', 0):.2f} "

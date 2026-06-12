@@ -374,6 +374,10 @@ class MemoryStore:
         exact-dup merge via norm_hash; embed (best-effort); near-dup cosine
         merge above MERGE_THRESHOLD; flag-gated contradiction judge on the
         ambiguous band; else insert (INSERT OR IGNORE on norm_hash races).
+
+        Merge semantics: re-asserting resurrects archived/contradicted rows
+        (status back to 'active'), and trust is never raised across the
+        web/agent boundary — web/quarantined rows keep the tainted tier.
         """
         text = normalize_fact(fact)
         if not text:
@@ -383,7 +387,7 @@ class MemoryStore:
         nh = norm_hash(text)
 
         existing = self.fetchone(
-            "SELECT id, trust, confidence FROM facts WHERE norm_hash = ?", (nh,)
+            "SELECT id, trust, confidence, origin, status FROM facts WHERE norm_hash = ?", (nh,)
         )
         if existing:
             return self._merge_into(existing, trust=resolved_trust, confidence=confidence)
@@ -422,7 +426,9 @@ class MemoryStore:
                     )
                     if fact_id is None:
                         refetched = self.fetchone(
-                            "SELECT id, trust, confidence FROM facts WHERE norm_hash = ?", (nh,)
+                            "SELECT id, trust, confidence, origin, status FROM facts "
+                            "WHERE norm_hash = ?",
+                            (nh,),
                         )
                         if refetched:
                             return self._merge_into(
@@ -440,7 +446,8 @@ class MemoryStore:
         if fact_id is None:
             # norm_hash race or legitimate normalization collision: merge instead of failing.
             refetched = self.fetchone(
-                "SELECT id, trust, confidence FROM facts WHERE norm_hash = ?", (nh,)
+                "SELECT id, trust, confidence, origin, status FROM facts WHERE norm_hash = ?",
+                (nh,),
             )
             if refetched:
                 return self._merge_into(refetched, trust=resolved_trust, confidence=confidence)
@@ -451,10 +458,21 @@ class MemoryStore:
         now = time.time()
         old_conf = str(row.get("confidence") or "MEDIUM")
         new_conf = old_conf if _CONF_RANK.get(old_conf, 1) >= _CONF_RANK.get(confidence, 1) else confidence
+        old_trust = int(row["trust"])
+        origin = str(row.get("origin") or "")
+        tainted = origin.startswith("web:") or origin in {"web", "quarantined"}
+        # Never launder trust upward across the web/agent boundary: a re-asserted
+        # web/quarantined fact keeps the tainted tier (min) instead of being
+        # promoted to the asserting origin's tier. Untainted rows keep max(old, new).
+        merged_trust = min(old_trust, trust) if tainted else max(old_trust, trust)
+        # Re-asserting a fact resurrects archived/contradicted rows; otherwise the
+        # merge target stays invisible to retrieval (status='active' filter) forever.
+        old_status = str(row.get("status") or "active")
+        new_status = "active" if old_status in {"archived", "contradicted"} else old_status
         self._execute(
             "UPDATE facts SET access_count = access_count + 1, updated_at = ?, "
-            "last_accessed = ?, trust = ?, confidence = ? WHERE id = ?",
-            (now, now, max(int(row["trust"]), trust), new_conf, row["id"]),
+            "last_accessed = ?, trust = ?, confidence = ?, status = ? WHERE id = ?",
+            (now, now, merged_trust, new_conf, new_status, row["id"]),
         )
         return FactWriteResult(action="merged", fact_id=int(row["id"]), merged_with=int(row["id"]))
 
@@ -504,7 +522,8 @@ class MemoryStore:
             return []
         try:
             return self.fetchall(
-                "SELECT f.id, f.fact, f.trust, f.confidence, f.embedding FROM memory_fts "
+                "SELECT f.id, f.fact, f.trust, f.confidence, f.origin, f.status, f.embedding "
+                "FROM memory_fts "
                 "JOIN facts f ON f.id = CAST(memory_fts.ref_id AS INTEGER) "
                 "WHERE memory_fts MATCH ? AND f.status = 'active' AND f.embedding IS NOT NULL "
                 "ORDER BY bm25(memory_fts) LIMIT ?",

@@ -91,6 +91,65 @@ class AblationTests(unittest.IsolatedAsyncioTestCase):
             prefix = line.split(":", 1)[0]
             self.assertIn(prefix, broadcast_lines)
 
+    async def test_attention_gating_on_autonomous_prompt_has_broadcast_workspace(self) -> None:
+        # Design §7/§9: tick-1 selection populates the WORKSPACE section of the
+        # autonomous initial prompt too, not just the chat one.
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = ScriptedLLM([{"content": "done"}])
+            runtime = CognitiveRuntime(
+                llm=fake,  # type: ignore[arg-type]
+                memory=MemoryStore(db_path=os.path.join(tmp, "auto-gating-on.db")),
+            )
+            await runtime.initialize()
+            try:
+                await runtime.run_episode(
+                    InputEvent(
+                        content="Autonomous heartbeat: pick a concrete next step.",
+                        source="autonomous",
+                        event_type="heartbeat",
+                    )
+                )
+            finally:
+                await runtime.close()
+
+        prompt = fake.calls[0][1]["content"]
+        self.assertTrue(prompt.startswith("WORKSPACE\n"))
+        section = prompt[len("WORKSPACE\n") : prompt.index("\n\nACTIVE_GOAL")]
+        self.assertNotEqual(section.strip(), "none")
+        # Every rendered line is a broadcast (GLOBAL) winner.
+        broadcast_lines = {
+            f"  - {entry.source}/{entry.type.value}" for entry in runtime.workspace.global_entries
+        }
+        for line in section.splitlines():
+            prefix = line.split(":", 1)[0]
+            self.assertIn(prefix, broadcast_lines)
+
+    async def test_attention_gating_off_autonomous_prompt_has_no_workspace(self) -> None:
+        # abl_no_attention: the autonomous prompt falls back to the v1-ish
+        # rendering with no WORKSPACE section — the gated/ablated prompts differ.
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = ScriptedLLM([{"content": "done"}])
+            runtime = CognitiveRuntime(
+                llm=fake,  # type: ignore[arg-type]
+                memory=MemoryStore(db_path=os.path.join(tmp, "auto-gating-off.db")),
+                ablation=AblationFlags(attention_gating=False),
+            )
+            await runtime.initialize()
+            try:
+                await runtime.run_episode(
+                    InputEvent(
+                        content="Autonomous heartbeat: pick a concrete next step.",
+                        source="autonomous",
+                        event_type="heartbeat",
+                    )
+                )
+            finally:
+                await runtime.close()
+
+        prompt = fake.calls[0][1]["content"]
+        self.assertNotIn("WORKSPACE\n", prompt)
+        self.assertTrue(prompt.startswith("ACTIVE_GOAL"))
+
     async def test_memory_retrieval_off_skips_memory_module(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime = CognitiveRuntime(

@@ -382,6 +382,37 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(episodes), 1)
         self.assertEqual(status.episode_count, 1)
 
+    async def test_consolidate_cycle_runs_on_autonomous_cadence(self) -> None:
+        """consolidate_cycle (decay, LLM summarization, contradiction sweep)
+        fires every consolidation_interval autonomous ticks."""
+        config_path = Path(self.tmp.name) / "config_consolidation.toml"
+        config_path.write_text(
+            "[service]\n"
+            f"home = \"{self.tmp.name}\"\n"
+            "api_key = \"test-key\"\n"
+            "autonomous = false\n"
+            "consolidation_interval = 2\n",
+            encoding="utf-8",
+        )
+        service = ConscioService(load_config(config_path))
+        service.consolidation.consolidate_cycle = AsyncMock(
+            return_value={"facts_written": 0, "archived": 0, "contradicted": 0, "errors": []}
+        )
+        await service.start(background=False)
+        try:
+            await service.run_autonomous_tick()
+            calls_after_first = service.consolidation.consolidate_cycle.await_count
+            await service.run_autonomous_tick()
+            calls_after_second = service.consolidation.consolidate_cycle.await_count
+        finally:
+            await service.stop()
+
+        self.assertEqual(calls_after_first, 0)
+        self.assertEqual(calls_after_second, 1)
+        # Contradiction sweep stays flag-gated: no judge unless enabled.
+        _, kwargs = service.consolidation.consolidate_cycle.await_args
+        self.assertIsNone(kwargs["contradiction_judge"])
+
     async def test_autonomous_tick_creates_project_and_persists_after_restart(self) -> None:
         first = ConscioService(self.config)
         await first.start(background=False)

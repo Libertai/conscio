@@ -31,7 +31,9 @@ class ConsolidationEngine:
       episodes row with a deterministic summary and taint provenance.
     - consolidate_cycle(): periodic budgeted path — LLM summarization into
       semantic facts (via add_fact, origin=consolidation, so dedup applies),
-      a decay-to-archived pass, and a budgeted contradiction sweep.
+      a decay-to-archived pass, and a budgeted contradiction sweep. Tainted
+      (web-derived) episodes are excluded from summarization: consolidation
+      must never promote web content to trust-2 facts (quarantine invariant).
     Best-effort throughout: failures are recorded, never raised to the tick.
     """
 
@@ -128,13 +130,18 @@ class ConsolidationEngine:
         return stats
 
     async def _summarize_recent(self, llm: Any, max_facts: int, now: float) -> int:
+        # Quarantine: tainted (web-derived) episodes are excluded so consolidation
+        # cannot launder web content into trust-2 origin='consolidation' facts.
+        # Web-derived knowledge only enters semantic memory via the per-episode
+        # remember_fact quarantine path (origin='web:<url>', trust tier 1).
         episodes = self.store.fetchall(
-            "SELECT summary, input, output FROM episodes WHERE created_at > ? "
+            "SELECT summary, input, output FROM episodes "
+            "WHERE created_at > ? AND tainted = 0 "
             "ORDER BY created_at DESC LIMIT ?",
             (self._last_cycle_ts, MAX_CYCLE_EPISODES),
         )
-        self._last_cycle_ts = now
         if not episodes:
+            self._last_cycle_ts = now
             return 0
         lines = []
         for episode in episodes:
@@ -153,6 +160,9 @@ class ConsolidationEngine:
             {"role": "user", "content": "EPISODES:\n" + "\n".join(lines)},
         ]
         response = await llm.chat_async(messages, temperature=0.2, max_tokens=2400)
+        # Advance the window only after the LLM call succeeds: setting it before
+        # would permanently skip this window's episodes on a transient failure.
+        self._last_cycle_ts = now
         facts = _parse_fact_list(str(response.get("content") or ""))
         written = 0
         for fact in facts[:max_facts]:

@@ -230,7 +230,12 @@ class AutonomousStrategy:
         self_state: SelfState | None = None,
     ) -> AssembledPrompt:
         state = await self.context_provider() if self.context_provider else {}
-        assembled = await self.assembler.assemble(state=state, memory=memory or self.memory)
+        # The tick-1 broadcast selection populates the WORKSPACE section of the
+        # initial prompt (design §7/§9); broadcast=None (abl_no_attention)
+        # falls back to the v1-ish prompt without a WORKSPACE section.
+        assembled = await self.assembler.assemble(
+            state=state, memory=memory or self.memory, broadcast_entries=broadcast
+        )
         self.last_model_context = assembled.dynamic_context
         return AssembledPrompt(
             messages=assembled.messages,

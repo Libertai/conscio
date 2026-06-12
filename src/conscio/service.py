@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 from dataclasses import asdict, dataclass, field
@@ -10,15 +11,18 @@ from typing import Any
 
 from conscio.autonomy import AutonomyStore
 from conscio.config import ServiceConfig, load_config
-from conscio.core.context import ContextSettings
+from conscio.core.context import ContextSettings, provenance_marker
 from conscio.core.cognition import InputEvent
 from conscio.core.runtime import CognitiveRuntime, EpisodeResult
-from conscio.core.tool_loop import WEB_CONTENT_TOOLS, web_request_url
+from conscio.core.tool_loop import web_taint_origin
 from conscio.goals import GoalStore
 from conscio.llm.client import LLMClient
+from conscio.memory.consolidation import ConsolidationEngine
 from conscio.memory.embeddings import LibertAIEmbedder
 from conscio.memory.store import MemoryStore
 from conscio.tools import PolicyToolRegistry
+
+logger = logging.getLogger(__name__)
 
 
 # Tasks-state sentinel: "no pending task" is visible model state the agent must
@@ -191,6 +195,8 @@ class ConscioService:
             max_ticks=self.config.max_ticks,
             tool_rounds_per_tick=self.config.tool_rounds_per_tick,
             max_reflections=self.config.max_reflections,
+            attention_broadcast_limit=self.config.attention_broadcast_limit,
+            attention_char_budget=self.config.attention_char_budget,
             ablation=self.config.ablation,
             constraint_provider=self.goals.active_constraints,
         )
@@ -199,6 +205,10 @@ class ConscioService:
         self.runtime.autonomous_strategy.on_tool_observation = self._on_autonomous_tool_observation
         self.runtime.chat_strategy.on_tool_observation = self._on_chat_tool_observation
         self.episode_taint = EpisodeTaint()
+        # Periodic budgeted consolidation (design §4.3): one persistent engine
+        # so _last_cycle_ts carries the summarization window across cycles.
+        self.consolidation = ConsolidationEngine(self.memory, llm=llm)
+        self._consolidation_ticks = 0
         self._add_only_ticks = 0
         self._current_goal_id: str | None = None
         self._current_project_id: str | None = None
@@ -232,6 +242,11 @@ class ConscioService:
             confidence: str = "HIGH",
             input: str | None = None,
         ) -> dict[str, Any]:
+            # Confabulated-provenance defense: the model must never mint
+            # user-tier (trust 3) facts. Whatever `source` it passes, only
+            # 'agent' is accepted from this tool.
+            if source != "agent":
+                source = "agent"
             candidates: list[str] = []
             if facts:
                 candidates.extend(str(item) for item in facts)
@@ -281,7 +296,13 @@ class ConscioService:
             rows = await self.memory.search_facts(q, limit)
             if not rows:
                 return {"output": "No matching semantic memories found.", "error": False}
-            lines = [f"- {row['fact']} ({row.get('confidence', '')})" for row in rows]
+            # Same provenance marking as the prompt assemblers: web-derived
+            # (trust 1) and user facts stay visibly labelled even when the
+            # model pulls them explicitly through this tool.
+            lines = [
+                f"- {provenance_marker(row)}{row['fact']} ({row.get('confidence', '')})"
+                for row in rows
+            ]
             return {"output": "\n".join(lines), "error": False, "results": rows}
 
         async def set_task_status(
@@ -370,7 +391,6 @@ class ConscioService:
                 "type": "object",
                 "properties": {
                     "fact": {"type": "string"},
-                    "source": {"type": "string", "default": "agent"},
                     "confidence": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"], "default": "HIGH"},
                 },
                 "required": ["fact"],
@@ -385,7 +405,6 @@ class ConscioService:
                 "type": "object",
                 "properties": {
                     "facts": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-                    "source": {"type": "string", "default": "agent"},
                     "confidence": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"], "default": "HIGH"},
                 },
                 "required": ["facts"],
@@ -651,6 +670,7 @@ class ConscioService:
             raise
 
     async def _plan_and_act(self, event: InputEvent) -> EpisodeResult:
+        await self._maybe_consolidate()  # periodic budgeted memory consolidation
         await self.goals.scheduler.decay_tick()  # drive homeostasis, once per tick
         goal = await self.goals.review()
         if goal is None:
@@ -701,6 +721,61 @@ class ConscioService:
                     pass
                 self.last_error = f"goal_review_failed: {exc}"
         return result
+
+    async def _maybe_consolidate(self) -> None:
+        """Run ConsolidationEngine.consolidate_cycle on the autonomous cadence
+        (every config.consolidation_interval ticks, separate from goal-review):
+        budgeted LLM episode summarization into facts, the decay-to-archived
+        pass, and the flag-gated contradiction sweep. Best-effort: failures are
+        recorded in last_error and never block the tick."""
+        interval = self.config.consolidation_interval
+        if interval <= 0:
+            return
+        self._consolidation_ticks += 1
+        if self._consolidation_ticks % interval != 0:
+            return
+        try:
+            stats = await self.consolidation.consolidate_cycle(
+                contradiction_judge=self._contradiction_judge(),
+            )
+            if stats.get("errors"):
+                self.last_error = "consolidation: " + "; ".join(stats["errors"])
+            self._event_broker.emit("memory.consolidated", stats)
+        except Exception as exc:  # noqa: BLE001 — consolidation never blocks the tick
+            logger.exception("consolidation cycle failed")
+            self.last_error = f"consolidation_failed: {exc}"
+
+    def _contradiction_judge(self) -> Any | None:
+        """Flag-gated LLM yes/no judge for the budgeted contradiction sweep
+        (config.enable_contradiction_check; design risk note: never on the
+        write hot path, only inside the consolidation cycle)."""
+        if not self.config.enable_contradiction_check:
+            return None
+        llm = self.runtime.autonomous_strategy.llm
+        if llm is None:
+            return None
+
+        async def judge(fact_a: str, fact_b: str) -> bool:
+            response = await llm.chat_async(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You judge whether two stored memory facts contradict "
+                            "each other. Answer ONLY YES or NO."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": f"A: {fact_a}\nB: {fact_b}\nDo A and B contradict each other?",
+                    },
+                ],
+                temperature=0.0,
+                max_tokens=8,
+            )
+            return str(response.get("content") or "").strip().upper().startswith("YES")
+
+        return judge
 
     def _update_task_discipline(self, requests: list[Any]) -> None:
         """Track the add_task-vs-set_task_status balance across autonomous ticks.
@@ -774,20 +849,23 @@ class ConscioService:
             "episode_taint": self.episode_taint.to_dict(),
         }
 
-    def _note_web_taint(self, request: Any) -> None:
-        """Mark the episode tainted when a web-content tool runs."""
-        if getattr(request, "name", "") in WEB_CONTENT_TOOLS:
-            self.episode_taint.note(web_request_url(request))
+    def _note_web_taint(self, request: Any, result: dict[str, Any] | None = None) -> None:
+        """Mark the episode tainted when a tool touches web content — the
+        spotlighted web tools, or bash/execute_code reaching the network via
+        curl/wget/python (otherwise a shell fetch bypasses the taint pipeline)."""
+        origin = web_taint_origin(request, result)
+        if origin is not None:
+            self.episode_taint.note(origin)
 
     async def _on_chat_tool_observation(self, request: Any, result: dict[str, Any]) -> None:
         """Chat-path tool hook: taint tracking only (no autonomous budget)."""
-        self._note_web_taint(request)
+        self._note_web_taint(request, result)
 
     async def _on_autonomous_tool_observation(self, request: Any, result: dict[str, Any]) -> None:
         """Hook fired by the autonomous tool loop after each tool call. Tracks
         web taint and records a tool action for the per-hour persistent budget.
         Self-management tools record themselves."""
-        self._note_web_taint(request)
+        self._note_web_taint(request, result)
         name = getattr(request, "name", "")
         if name in _SELF_MANAGEMENT_TOOLS:
             return
@@ -869,10 +947,21 @@ class ConscioService:
         return await self.goals.list_influences()
 
     async def _autonomous_loop(self) -> None:
+        backoff = 0.0
         while self.running:
             if not self.paused:
-                await self.run_autonomous_tick()
-            await asyncio.sleep(self.config.tick_interval)
+                try:
+                    await self.run_autonomous_tick()
+                    backoff = 0.0
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # A failed episode must never kill the heartbeat: log it,
+                    # back off, and keep ticking. _run_episode already recorded
+                    # last_error (and paused, if pause_on_error is set).
+                    logger.exception("autonomous tick failed")
+                    backoff = min(max(backoff * 2, self.config.tick_interval), 300.0)
+            await asyncio.sleep(backoff or self.config.tick_interval)
 
     def _recent_actions(self, items: list[float]) -> list[float]:
         cutoff = time.time() - 3600

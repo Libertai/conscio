@@ -50,8 +50,31 @@ _CONTROL_KINDS = {"ask_user": "ask", "refuse": "refuse"}
 # delimiters before it enters the workspace/prompt (quarantine defense).
 WEB_CONTENT_TOOLS = frozenset({"web_fetch", "web_search"})
 
+# Tools that can reach the network *without* going through the spotlighted web
+# tools (curl/wget/python one-liners under unsafe_autonomy). Their calls are
+# inspected so taint tracking cannot be bypassed by routing a fetch through a
+# shell instead of web_fetch.
+NETWORK_CAPABLE_TOOLS = frozenset({"bash", "execute_code"})
+
 UNTRUSTED_WEB_BEGIN = "<<UNTRUSTED_WEB_CONTENT url={url}>>"
 UNTRUSTED_WEB_END = "<<END_UNTRUSTED>>"
+_UNTRUSTED_BEGIN_PREFIX = "<<UNTRUSTED_WEB_CONTENT"
+
+# Anything in *fetched* content that looks like one of our quarantine
+# delimiters — `<<...UNTRUSTED_WEB_CONTENT...>>` / `<<...END_UNTRUSTED...>>` in
+# any casing/spacing. A page must never be able to forge an early
+# <<END_UNTRUSTED>> (escaping the quarantine block) or open a fake one.
+_FORGED_DELIMITER_RE = re.compile(
+    r"<<[^<>]*?(?:UNTRUSTED_WEB_CONTENT|END_UNTRUSTED)[^<>]*?>>",
+    re.IGNORECASE,
+)
+
+_URL_RE = re.compile(r"https?://[^\s'\"<>`]+", re.IGNORECASE)
+_NETWORK_CLIENT_RE = re.compile(
+    r"\b(?:curl|wget|aria2c|httpie|nc|ncat|netcat|socat|sftp|scp|ssh|telnet)\b"
+    r"|openssl\s+s_client|urllib|requests\.|httpx|aiohttp|http\.client|socket\.",
+    re.IGNORECASE,
+)
 
 
 def web_request_url(request: ToolRequest) -> str:
@@ -60,12 +83,61 @@ def web_request_url(request: ToolRequest) -> str:
     return str(args.get("url") or args.get("query") or args.get("input") or "").strip()
 
 
+def web_taint_origin(request: ToolRequest, result: dict[str, Any] | None = None) -> str | None:
+    """Origin string when a tool call touched web content, else None.
+
+    Covers the spotlighted web tools plus network-capable tools
+    (bash/execute_code): a `curl`/`wget`/python fetch routed through a shell
+    pulls untrusted bytes into the workspace just the same, so it must taint
+    the episode too — otherwise the whole taint pipeline is bypassable.
+    Conservative over-tainting is the accepted trade-off."""
+    name = request.name
+    if name in WEB_CONTENT_TOOLS:
+        return web_request_url(request)
+    if name in NETWORK_CAPABLE_TOOLS:
+        args_blob = json.dumps(request.args or {}, ensure_ascii=False)
+        output = str((result or {}).get("output", ""))
+        url_match = _URL_RE.search(args_blob) or _URL_RE.search(output)
+        if url_match:
+            return url_match.group(0)
+        if _NETWORK_CLIENT_RE.search(args_blob):
+            return f"{name}:network"
+    return None
+
+
+def neutralize_untrusted_delimiters(text: str) -> str:
+    """Strip forged quarantine delimiters from untrusted content. Substitution
+    repeats until a fixpoint so removals can never reassemble a new token."""
+    previous = None
+    while previous != text:
+        previous = text
+        text = _FORGED_DELIMITER_RE.sub("[forged-delimiter-removed]", text)
+    return text
+
+
+def truncate_spotlighted(text: str, limit: int) -> str:
+    """Truncate tool output without dropping the closing quarantine delimiter.
+
+    A plain ``[:limit]`` slice on a spotlighted web result cuts inside the page
+    body and discards the trailing <<END_UNTRUSTED>>, leaving the model with an
+    opened-but-never-closed quarantine block (so later trusted content visually
+    falls inside it)."""
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    if _UNTRUSTED_BEGIN_PREFIX in head:
+        suffix = f"\n[truncated]\n{UNTRUSTED_WEB_END}"
+        return text[: max(0, limit - len(suffix))] + suffix
+    return head
+
+
 def _spotlight_web_output(request: ToolRequest, result: dict[str, Any]) -> dict[str, Any]:
-    """Wrap web tool output in explicit data-delimiters. Spotlighting is
-    probabilistic, not a guarantee — a sufficiently clever page could still
+    """Wrap web tool output in explicit data-delimiters, after neutralizing any
+    delimiter tokens the page itself contains (delimiter forgery). Spotlighting
+    is probabilistic, not a guarantee — a sufficiently clever page could still
     influence reasoning within an episode; the taint/trust pipeline bounds the
     blast radius rather than eliminating it."""
-    output = str(result.get("output", ""))
+    output = neutralize_untrusted_delimiters(str(result.get("output", "")))
     begin = UNTRUSTED_WEB_BEGIN.format(url=web_request_url(request))
     return {**result, "output": f"{begin}\n{output}\n{UNTRUSTED_WEB_END}"}
 
@@ -78,7 +150,7 @@ async def _execute_tool(tools: Any, request: ToolRequest, workspace: Workspace) 
         result = _spotlight_web_output(request, result)
     output = str(result.get("output", ""))
     workspace.write(
-        f"Tool {request.name} returned: {output[:1000]}",
+        f"Tool {request.name} returned: {truncate_spotlighted(output, 1000)}",
         source="tool",
         type=EntryType.OBSERVATION,
         priority=6,
@@ -163,45 +235,59 @@ class ToolLoopSession:
                     max_tokens=self.max_tokens,
                     tools=self.tool_schemas,
                 )
-                request = ToolLoop._tool_request(response, self._known_names)
+                requests = ToolLoop._tool_requests(response, self._known_names)
             else:
                 response = await self.llm.chat_async(
                     self.messages,
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
                 )
-                request = None
-            if request is None:
+                requests = []
+            if not requests:
                 content = str(response.get("content") or "").strip()
                 if not content:
                     return StepResult(kind="empty", rounds_used=rounds_this_step)
                 self.messages.append({"role": "assistant", "content": content})
                 return StepResult(kind="final", text=content, rounds_used=rounds_this_step)
-            if request.name in self.control_tool_names:
-                text = self._control_text(request, response)
+            control = next(
+                (req for _, req in requests if req.name in self.control_tool_names), None
+            )
+            if control is not None:
+                text = self._control_text(control, response)
                 self.messages.append({"role": "assistant", "content": text})
                 return StepResult(
                     kind="control",
                     text=text,
-                    tool_request=request,
-                    control=_CONTROL_KINDS.get(request.name, request.name),
+                    tool_request=control,
+                    control=_CONTROL_KINDS.get(control.name, control.name),
                     rounds_used=rounds_this_step,
                 )
-            self.tool_requests.append(request)
-            if self.pre_tool_hook is not None:
-                await self.pre_tool_hook(request)
-            result = await _execute_tool(self.tools, request, workspace)
-            if self.on_tool_observation is not None:
-                await self.on_tool_observation(request, result)
-            self.messages.append(ToolLoop._assistant_tool_call_message(response, request))
-            self.messages.append({
-                "role": "tool",
-                "tool_call_id": ToolLoop._tool_call_id(response),
-                "name": request.name,
-                "content": str(result.get("output", ""))[:8000],
-            })
-            last_request = request
-            last_result = result
+            # Execute every parallel call; the echoed assistant message then
+            # carries exactly the executed calls, each followed by a matching
+            # role:tool response — N tool_calls with fewer responses is a
+            # protocol violation OpenAI-compatible backends reject with a 400.
+            outcomes: list[tuple[str, ToolRequest, dict[str, Any]]] = []
+            for call_id, request in requests:
+                self.tool_requests.append(request)
+                if self.pre_tool_hook is not None:
+                    await self.pre_tool_hook(request)
+                result = await _execute_tool(self.tools, request, workspace)
+                if self.on_tool_observation is not None:
+                    await self.on_tool_observation(request, result)
+                outcomes.append((call_id, request, result))
+            self.messages.append(
+                ToolLoop._assistant_tool_call_message(
+                    response, [(call_id, request) for call_id, request, _ in outcomes]
+                )
+            )
+            for call_id, request, result in outcomes:
+                self.messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": request.name,
+                    "content": truncate_spotlighted(str(result.get("output", "")), 8000),
+                })
+            _, last_request, last_result = outcomes[-1]
         return StepResult(
             kind="tool",
             tool_request=last_request,
@@ -303,46 +389,53 @@ class ToolLoop:
         return await _execute_tool(self.tools, request, workspace)
 
     @staticmethod
-    def _tool_request(response: dict[str, Any], known_names: set[str] | None = None) -> ToolRequest | None:
+    def _tool_requests(
+        response: dict[str, Any], known_names: set[str] | None = None
+    ) -> list[tuple[str, ToolRequest]]:
+        """All (call_id, request) pairs from the response — models may emit
+        several parallel tool calls in one turn and each must be executed (or
+        at least answered), not just calls[0]."""
         calls = response.get("tool_calls") or []
         if not calls:
-            return _parse_dsml_tool_call(str(response.get("content") or ""), known_names=known_names)
-        call = calls[0]
-        function = call.get("function") or {}
-        name = str(function.get("name") or "").strip()
-        if not name:
-            return None
-        try:
-            args = json.loads(function.get("arguments") or "{}")
-        except json.JSONDecodeError:
-            args = {"input": str(function.get("arguments") or "")}
-        if not isinstance(args, dict):
-            args = {"input": args}
-        return ToolRequest(name=name, args=args)
+            parsed = _parse_dsml_tool_call(
+                str(response.get("content") or ""), known_names=known_names
+            )
+            return [("call-1", parsed)] if parsed is not None else []
+        requests: list[tuple[str, ToolRequest]] = []
+        for index, call in enumerate(calls):
+            function = call.get("function") or {}
+            name = str(function.get("name") or "").strip()
+            if not name:
+                continue
+            try:
+                args = json.loads(function.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                args = {"input": str(function.get("arguments") or "")}
+            if not isinstance(args, dict):
+                args = {"input": args}
+            call_id = str(call.get("id") or f"call-{index + 1}")
+            requests.append((call_id, ToolRequest(name=name, args=args)))
+        return requests
 
     @staticmethod
-    def _assistant_tool_call_message(response: dict[str, Any], request: ToolRequest) -> dict[str, Any]:
-        calls = response.get("tool_calls") or []
-        if calls:
-            return {"role": "assistant", "content": response.get("content") or "", "tool_calls": calls}
+    def _assistant_tool_call_message(
+        response: dict[str, Any], executed: list[tuple[str, ToolRequest]]
+    ) -> dict[str, Any]:
+        """Assistant echo carrying exactly the executed calls, so every
+        tool_call entry has a matching role:tool response in the transcript."""
+        content = (response.get("content") or "") if response.get("tool_calls") else ""
         return {
             "role": "assistant",
-            "content": "",
+            "content": content,
             "tool_calls": [
                 {
-                    "id": "call-1",
+                    "id": call_id,
                     "type": "function",
                     "function": {"name": request.name, "arguments": json.dumps(request.args)},
                 }
+                for call_id, request in executed
             ],
         }
-
-    @staticmethod
-    def _tool_call_id(response: dict[str, Any]) -> str:
-        calls = response.get("tool_calls") or []
-        if calls and calls[0].get("id"):
-            return str(calls[0]["id"])
-        return "call-1"
 
 
 def latest_tool_observation(workspace: Workspace, name: str) -> WorkspaceEntry | None:

@@ -683,6 +683,80 @@ class DsmlToolCallParserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.tool_requests[0].name, "echo")
 
 
+class ParallelToolCallTests(unittest.IsolatedAsyncioTestCase):
+    """When the model emits N parallel tool calls in one turn, all N must
+    execute and the transcript must stay protocol-valid: the echoed assistant
+    message lists exactly the executed calls, each with a matching role:tool
+    response (N tool_calls + 1 tool message is rejected with a 400 by
+    OpenAI-compatible backends)."""
+
+    async def test_parallel_tool_calls_all_execute_with_matching_responses(self) -> None:
+        from conscio.core.tool_loop import ToolLoop
+        from conscio.core.workspace import Workspace
+
+        parallel = {
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-a",
+                    "type": "function",
+                    "function": {"name": "echo", "arguments": '{"value": "one"}'},
+                },
+                {
+                    "id": "call-b",
+                    "type": "function",
+                    "function": {"name": "echo", "arguments": '{"value": "two"}'},
+                },
+            ],
+        }
+        llm = IterativeLLM([parallel, {"content": "done."}])
+        tools = ToolRegistry()
+        observed: list[dict] = []
+
+        async def echo(value: str) -> dict:
+            observed.append({"value": value})
+            return {"output": f"echo:{value}", "exit_code": 0}
+
+        tools.register("echo", echo, "Echo a value.")
+        loop = ToolLoop(llm=llm, tools=tools, max_rounds=3)
+        messages = [{"role": "user", "content": "echo twice"}]
+        result = await loop.run(
+            messages,
+            Workspace(),
+            tool_schemas=[{"type": "function", "function": {"name": "echo", "parameters": {}}}],
+        )
+
+        # Both calls executed, in order.
+        self.assertEqual(observed, [{"value": "one"}, {"value": "two"}])
+        self.assertEqual([r.name for r in result.tool_requests], ["echo", "echo"])
+        self.assertEqual(result.final_text, "done.")
+        # Protocol validity: assistant tool_calls ids == following tool message ids.
+        assistant = next(m for m in messages if m.get("tool_calls"))
+        echoed_ids = [c["id"] for c in assistant["tool_calls"]]
+        tool_ids = [m["tool_call_id"] for m in messages if m.get("role") == "tool"]
+        self.assertEqual(echoed_ids, ["call-a", "call-b"])
+        self.assertEqual(tool_ids, ["call-a", "call-b"])
+
+    async def test_unparseable_call_is_dropped_from_assistant_echo(self) -> None:
+        from conscio.core.tool_loop import ToolLoop
+
+        response = {
+            "content": "",
+            "tool_calls": [
+                {"id": "call-x", "type": "function", "function": {"name": "", "arguments": "{}"}},
+                {
+                    "id": "call-y",
+                    "type": "function",
+                    "function": {"name": "echo", "arguments": '{"value": "hi"}'},
+                },
+            ],
+        }
+        requests = ToolLoop._tool_requests(response)
+        self.assertEqual([(cid, req.name) for cid, req in requests], [("call-y", "echo")])
+        message = ToolLoop._assistant_tool_call_message(response, requests)
+        self.assertEqual([c["id"] for c in message["tool_calls"]], ["call-y"])
+
+
 class EvalTests(unittest.IsolatedAsyncioTestCase):
     async def test_smoke_eval_runs(self) -> None:
         rows = await run_eval_suite("smoke")

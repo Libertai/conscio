@@ -58,6 +58,8 @@ class ServiceConfig:
     allow_insecure_public_bind: bool = False
     autonomous: bool = True
     tick_interval: float = 30.0
+    consolidation_interval: int = 20  # autonomous ticks between consolidate_cycle runs (0 disables)
+    enable_contradiction_check: bool = False  # LLM contradiction sweep in consolidate_cycle
     unsafe_autonomy: bool = False
     llm_base_url: str = ""
     llm_api_key: str = ""
@@ -158,6 +160,8 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         ),
         autonomous=bool(service.get("autonomous", True)),
         tick_interval=float(service.get("tick_interval", 30.0)),
+        consolidation_interval=int(service.get("consolidation_interval", 20)),
+        enable_contradiction_check=bool(service.get("enable_contradiction_check", False)),
         unsafe_autonomy=bool(service.get("unsafe_autonomy", False)),
         llm_base_url=str(
             llm.get("base_url")
@@ -241,6 +245,8 @@ web_secure_cookies = false
 allow_insecure_public_bind = false
 autonomous = true
 tick_interval = 30
+consolidation_interval = 20
+enable_contradiction_check = false
 unsafe_autonomy = false
 pause_on_error = true
 
