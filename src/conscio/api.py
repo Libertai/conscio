@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -163,23 +163,23 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
                 name="ui-assets",
             )
 
-        @app.get("/ui", include_in_schema=False)
-        @app.get("/ui/", include_in_schema=False)
-        async def _ui_root() -> FileResponse:
-            return FileResponse(
-                str(STATIC_DIR / "index.html"),
+        def _spa_shell_response() -> HTMLResponse:
+            return HTMLResponse(
+                (STATIC_DIR / "index.html").read_text(encoding="utf-8"),
                 headers={"Cache-Control": "no-cache"},
             )
+
+        @app.get("/ui", include_in_schema=False)
+        @app.get("/ui/", include_in_schema=False)
+        async def _ui_root() -> HTMLResponse:
+            return _spa_shell_response()
 
         @app.get("/ui/{path:path}", include_in_schema=False)
         async def _ui_spa(path: str, request: Request) -> Response:
             # Don't shadow the API or the static-asset mount.
             if path.startswith("api/") or path.startswith("assets/"):
                 raise HTTPException(status_code=404)
-            return FileResponse(
-                str(STATIC_DIR / "index.html"),
-                headers={"Cache-Control": "no-cache"},
-            )
+            return _spa_shell_response()
 
         # Bookmarks pointed at /ui2 during the Phase 0-3 dogfood era get
         # redirected so the operator's saved tab keeps working.

@@ -12,9 +12,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 from conscio.core.workspace import Workspace
 from conscio.memory.store import MemoryStore
@@ -105,74 +105,97 @@ def app(tmp_path: Path) -> FastAPI:
     return a
 
 
-def _login(client: TestClient) -> None:
-    r = client.post("/ui/login", json={"password": "letmein"})
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def _client(app: FastAPI) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    )
+
+
+async def _login(client: httpx.AsyncClient) -> None:
+    r = await client.post("/ui/login", json={"password": "letmein"})
     assert r.status_code == 200, r.text
 
 
 def test_chat_round_trip(app: FastAPI) -> None:
-    with TestClient(app) as client:
-        _login(client)
+    async def scenario() -> None:
+        async with _client(app) as client:
+            await _login(client)
 
-        # Default session is auto-created on first list / first send.
-        r = client.post(
-            "/ui/api/chat/sessions/main/messages",
-            json={"content": "ping"},
-        )
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert body["agent"] == "echo: ping"
-        assert body["selected_action"] == "reply"
+            # Default session is auto-created on first list / first send.
+            r = await client.post(
+                "/ui/api/chat/sessions/main/messages",
+                json={"content": "ping"},
+            )
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["agent"] == "echo: ping"
+            assert body["selected_action"] == "reply"
 
-        msgs = client.get("/ui/api/chat/sessions/main/messages").json()
-        assert [m["role"] for m in msgs] == ["user", "agent"]
-        assert [m["content"] for m in msgs] == ["ping", "echo: ping"]
+            msgs = (await client.get("/ui/api/chat/sessions/main/messages")).json()
+            assert [m["role"] for m in msgs] == ["user", "agent"]
+            assert [m["content"] for m in msgs] == ["ping", "echo: ping"]
+
+    _run(scenario())
 
 
 def test_chat_session_create_and_delete(app: FastAPI) -> None:
-    with TestClient(app) as client:
-        _login(client)
-        r = client.post("/ui/api/chat/sessions", json={"title": "scratchpad"})
-        assert r.status_code == 200, r.text
-        sid = r.json()["id"]
+    async def scenario() -> None:
+        async with _client(app) as client:
+            await _login(client)
+            r = await client.post("/ui/api/chat/sessions", json={"title": "scratchpad"})
+            assert r.status_code == 200, r.text
+            sid = r.json()["id"]
 
-        sessions = client.get("/ui/api/chat/sessions").json()
-        assert any(s["id"] == sid for s in sessions)
+            sessions = (await client.get("/ui/api/chat/sessions")).json()
+            assert any(s["id"] == sid for s in sessions)
 
-        r = client.delete(f"/ui/api/chat/sessions/{sid}")
-        assert r.status_code == 200
+            r = await client.delete(f"/ui/api/chat/sessions/{sid}")
+            assert r.status_code == 200
 
-        # Default session cannot be deleted (400, not 500).
-        r = client.delete("/ui/api/chat/sessions/main")
-        assert r.status_code == 400
+            # Default session cannot be deleted (400, not 500).
+            r = await client.delete("/ui/api/chat/sessions/main")
+            assert r.status_code == 400
+
+    _run(scenario())
 
 
 def test_routes_require_auth(app: FastAPI) -> None:
-    with TestClient(app) as client:
-        for path in [
-            "/ui/api/chat/sessions",
-            "/ui/api/chat/sessions/main/messages",
-            "/ui/api/metrics",
-            "/ui/api/tools/events",
-            "/ui/api/events",
-        ]:
-            r = client.get(path)
-            assert r.status_code == 401, f"{path} should require auth"
+    async def scenario() -> None:
+        async with _client(app) as client:
+            for path in [
+                "/ui/api/chat/sessions",
+                "/ui/api/chat/sessions/main/messages",
+                "/ui/api/metrics",
+                "/ui/api/tools/events",
+                "/ui/api/events",
+            ]:
+                r = await client.get(path)
+                assert r.status_code == 401, f"{path} should require auth"
+
+    _run(scenario())
 
 
 def test_operations_routes(app: FastAPI) -> None:
-    with TestClient(app) as client:
-        _login(client)
+    async def scenario() -> None:
+        async with _client(app) as client:
+            await _login(client)
 
-        r = client.get("/ui/api/metrics")
-        assert r.status_code == 200, r.text
-        assert r.json()["tool_events_total"] == 1
+            r = await client.get("/ui/api/metrics")
+            assert r.status_code == 200, r.text
+            assert r.json()["tool_events_total"] == 1
 
-        r = client.get("/ui/api/tools/events")
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert body[0]["tool"] == "web_fetch"
-        assert body[0]["capabilities"] == ["external_content", "network_read"]
+            r = await client.get("/ui/api/tools/events")
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body[0]["tool"] == "web_fetch"
+            assert body[0]["capabilities"] == ["external_content", "network_read"]
+
+    _run(scenario())
 
 
 def test_events_route_registered_with_auth(app: FastAPI) -> None:
@@ -195,8 +218,11 @@ def test_events_route_registered_with_auth(app: FastAPI) -> None:
         for method in getattr(r, "methods", set())
     }
     assert ("/ui/api/events", "GET") in routes
-    with TestClient(app) as client:
-        # Without a session cookie, the route refuses with 401 before the
-        # streaming generator is ever instantiated.
-        r = client.get("/ui/api/events")
-        assert r.status_code == 401
+    async def scenario() -> None:
+        async with _client(app) as client:
+            # Without a session cookie, the route refuses with 401 before the
+            # streaming generator is ever instantiated.
+            r = await client.get("/ui/api/events")
+            assert r.status_code == 401
+
+    _run(scenario())

@@ -21,6 +21,13 @@ a chat feature.
 - [API and SSE](public-beta/api.md)
 - [Troubleshooting](public-beta/troubleshooting.md)
 
+## Launch
+
+- [Public Beta Launch Plan](launch/public-beta-launch.md)
+- [Announcement Draft](launch/announcement.md)
+- [Release Notes](launch/release-notes-public-beta.md)
+- [Known Limits](launch/known-limits.md)
+
 ## Tutorials
 
 - [Install and Run Local](tutorials/install-and-run-local.md)

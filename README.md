@@ -122,6 +122,8 @@ Live suites are paid and double-gated (`--live` plus `CONSCIO_EVAL_LIVE=1`).
 ## Quick Start
 
 Public-beta operator documentation starts at [docs/index.md](docs/index.md).
+Launch materials are under [docs/launch/](docs/launch/), including the
+public-beta checklist, announcement draft, release notes, and known limits.
 
 ```bash
 uv sync --frozen

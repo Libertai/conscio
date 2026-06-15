@@ -28,6 +28,10 @@ docs/public-beta/tools.md
 docs/public-beta/memory.md
 docs/public-beta/api.md
 docs/public-beta/troubleshooting.md
+docs/launch/public-beta-launch.md
+docs/launch/announcement.md
+docs/launch/release-notes-public-beta.md
+docs/launch/known-limits.md
 docs/tutorials/install-and-run-local.md
 docs/tutorials/model-backend.md
 docs/tutorials/first-autonomous-vm.md
@@ -55,6 +59,10 @@ done
 
 # README should advertise the operator docs entry point.
 has README.md "docs/index.md"
+has README.md "docs/launch/"
+has docs/index.md "launch/public-beta-launch.md"
+has docs/launch/public-beta-launch.md "scripts/check-launch-readiness.sh"
+[ -x scripts/check-launch-readiness.sh ] || fail "scripts/check-launch-readiness.sh must be executable"
 
 # CLI examples in docs must correspond to real argparse command registrations.
 for command in ask run history search daemon eval service db tools chat influence pause resume goals influences projects tick trace; do
