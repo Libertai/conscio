@@ -11,20 +11,67 @@ The runtime can run one cognitive episode, hold an interactive local session,
 or run nonstop as an authenticated service that evolves its own goals and acts
 inside configured tool boundaries.
 
+## System Map
+
+```mermaid
+flowchart TB
+    Operator["operator<br/>CLI / API / web UI"]
+    Service["long-running service<br/>FastAPI + systemd"]
+    Runtime["cognitive runtime<br/>episode loop"]
+    Workspace["workspace + attention<br/>broadcast-gated context"]
+    Model["LLM backend<br/>one phase, not the whole agent"]
+    Tools["tools<br/>shell / code / web / self-management"]
+    Memory["SQLite memory<br/>episodes / facts / procedures / chat"]
+    Goals["drives, goals,<br/>projects, tasks"]
+    Eval["eval harness<br/>ladder / ablations / trace metrics"]
+
+    Operator --> Service
+    Service --> Runtime
+    Runtime --> Workspace
+    Workspace --> Model
+    Model --> Tools
+    Tools --> Runtime
+    Runtime --> Memory
+    Memory --> Workspace
+    Goals --> Runtime
+    Runtime --> Goals
+    Runtime --> Eval
+```
+
+| Surface | Primary purpose | Inspection point |
+| --- | --- | --- |
+| CLI | Local runs, service control, database ops | command output and traces |
+| API | Authenticated service integration | `/status`, `/metrics`, `/trace` |
+| Web UI | Operator console for a live agent | model context, goals, projects, memory, tool events |
+| Eval harness | Falsify mechanism claims | committed artifacts under `docs/results/` |
+
 ## Core Thesis
 
 Most LLM agents are prompt pipelines. Conscio runs a per-tick control loop in
 which the language model is one phase, and attention causally gates what the
 model sees:
 
-```text
-event -> workspace entries (per-episode, carryover of unresolved conflicts)
-  tick: sense -> appraise -> attend (budgeted broadcast = model context)
-        -> execute (bounded tool rounds; expectations registered BEFORE tools run)
-        -> validate answer against active constraints
-        -> update self-state from measured signals
-        -> decide: step | answer | ask | refuse | reflect | wait
-  -> consolidate memory -> periodic goal review -> next heartbeat
+```mermaid
+flowchart LR
+    Event["event or heartbeat"]
+    Entries["workspace entries<br/>local + unresolved carryover"]
+    Appraise["sense + appraise"]
+    Attend{"attention competition<br/>budgeted broadcast"}
+    Context["model context<br/>WORKSPACE section"]
+    Execute["tool loop<br/>expectations registered first"]
+    Validate["constraint validation"]
+    SelfState["self-state update<br/>measured signals"]
+    Decide{"decide"}
+    Result["episode result"]
+    Memory["consolidate memory"]
+    Review["periodic goal review"]
+    Next["next heartbeat"]
+
+    Event --> Entries --> Appraise --> Attend --> Context --> Execute --> Validate --> SelfState --> Decide
+    Decide -->|"step"| Entries
+    Decide -->|"reflect"| Context
+    Decide -->|"answer / ask / refuse / wait"| Result
+    Result --> Memory --> Review --> Next
 ```
 
 Generated self-report is not the only evidence. Conscio records what it
@@ -85,6 +132,26 @@ happened, which bounded model context was supplied, and how its goals changed.
 - **Authenticated Web UI, API, and CLI**: talk to it, influence it, inspect
   its traces and assembled model context, pause it, resume it.
 
+### Memory and Trust Flow
+
+```mermaid
+flowchart LR
+    User["user-stated facts"]
+    Web["web content"]
+    Quarantine["untrusted-content<br/>spotlighting"]
+    Episode["episode trace<br/>provenance recorded"]
+    Fact["fact write<br/>origin + trust tier"]
+    Retrieval["hybrid retrieval<br/>FTS + embedding rerank"]
+    Context["attention-gated<br/>model context"]
+    Archive["archive / contradict<br/>never silent delete"]
+
+    User --> Episode --> Fact
+    Web --> Quarantine --> Episode
+    Quarantine -->|"tainted"| Fact
+    Fact --> Retrieval --> Context
+    Fact --> Archive
+```
+
 ## Evaluation
 
 The architecture is built to be falsifiable, and `conscio eval` ships the
@@ -94,17 +161,33 @@ checkers plus an audited different-model judge, single-mechanism ablations
 with pre-registered predictions, and a self-report study under the neutral
 prompt that checks every claimed mechanism against the trace.
 
+```mermaid
+flowchart LR
+    B0["B0<br/>bare model"]
+    B1["B1<br/>tool loop"]
+    B2["B2<br/>memory"]
+    B3["B3<br/>workspace + constraints"]
+    B4["B4<br/>full runtime"]
+    Ablations["single-mechanism<br/>ablations"]
+    Trace["trace-grounded<br/>self-report checks"]
+
+    B0 --> B1 --> B2 --> B3 --> B4
+    B4 --> Ablations
+    B4 --> Trace
+```
+
 Measured on qwen3.6-35b-a3b and deepseek-v4-flash (judge qwen3.6-27b), the
 full study costing about $1.30 in inference:
 
-- Memory (+0.17 on both models) and reflection (+0.18 / +0.14) ablations are
-  **confirmed**; attention gating is **refuted** on both at this task set and
-  sample size. Losses are reported next to wins.
-- Self-report groundedness rises from 0% (bare model) to 100% (full runtime)
-  on both models, and collapses under memory, prediction, and self-state
-  ablations even where task scores do not move. The agent keeps performing
-  but starts confabulating about its own mechanisms; task benchmarks miss
-  what the groundedness measure catches.
+| Signal | qwen3.6-35b-a3b | deepseek-v4-flash | Status |
+| --- | ---: | ---: | --- |
+| Memory ablation effect | +0.17 | +0.17 | confirmed on both |
+| Reflection ablation effect | +0.18 | +0.14 | confirmed on both |
+| Attention-gating task-score effect | refuted | refuted | negative result reported |
+| Self-report groundedness, B0 -> B4 | 0% -> 100% | 0% -> 100% | trace-grounded only in full runtime |
+
+The agent keeps performing under some ablations but starts confabulating about
+its own mechanisms; task benchmarks miss what the groundedness measure catches.
 
 Full records, judge logs, and per-cell artifacts are committed under
 [docs/results/](docs/results/v1/README.md); the paper draft in
@@ -182,6 +265,24 @@ conscio resume
 Conscio defaults to localhost API binding, password-protected web access, and
 disabled unsafe tools. To let it use shell and code tools on its own, deploy it
 in a disposable VM and set:
+
+```mermaid
+flowchart LR
+    Operator["operator browser / CLI"]
+    Proxy["HTTPS reverse proxy"]
+    API["Conscio API<br/>127.0.0.1:8765"]
+    Service["conscio systemd service<br/>conscio user"]
+    Workdir["tool workspace<br/>/opt/conscio/work"]
+    Home["state + config<br/>~/.conscio"]
+    Model["model backend"]
+    Web["web search / fetch"]
+
+    Operator --> Proxy --> API --> Service
+    Service --> Workdir
+    Service --> Home
+    Service --> Model
+    Service --> Web
+```
 
 ```toml
 [service]
