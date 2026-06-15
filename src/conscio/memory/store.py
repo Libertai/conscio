@@ -180,6 +180,7 @@ def _get_conn(db_path: str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_SCHEMA)
+    _repair_legacy_schema(conn)
     now = time.time()
     conn.execute(
         "INSERT INTO schema_meta (key, value, updated_at) VALUES (?, ?, ?) "
@@ -188,6 +189,43 @@ def _get_conn(db_path: str) -> sqlite3.Connection:
     )
     conn.commit()
     return conn
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except sqlite3.OperationalError:
+        return set()
+
+
+def _repair_legacy_schema(conn: sqlite3.Connection) -> None:
+    """Repair additive schema gaps that CREATE IF NOT EXISTS cannot change."""
+    fts_columns = _table_columns(conn, "memory_fts")
+    if fts_columns and "ref_id" not in fts_columns:
+        conn.execute("DROP TABLE memory_fts")
+        conn.execute(
+            "CREATE VIRTUAL TABLE memory_fts USING fts5(content, memory_type, ref_id UNINDEXED)"
+        )
+        _rebuild_memory_fts(conn)
+
+
+def _rebuild_memory_fts(conn: sqlite3.Connection) -> None:
+    fact_columns = _table_columns(conn, "facts")
+    if {"id", "fact"}.issubset(fact_columns):
+        for row in conn.execute("SELECT id, fact FROM facts").fetchall():
+            conn.execute(
+                "INSERT INTO memory_fts (content, memory_type, ref_id) VALUES (?, ?, ?)",
+                (row["fact"], "fact", str(row["id"])),
+            )
+    episode_columns = _table_columns(conn, "episodes")
+    if {"id", "summary", "input", "output"}.issubset(episode_columns):
+        for row in conn.execute("SELECT id, summary, input, output FROM episodes").fetchall():
+            content = (row["summary"] or f"{row['input'][:300]} -> {row['output'][:300]}").strip()
+            if content:
+                conn.execute(
+                    "INSERT INTO memory_fts (content, memory_type, ref_id) VALUES (?, ?, ?)",
+                    (content, "episode", row["id"]),
+                )
 
 
 class MemoryStore:
@@ -252,6 +290,7 @@ class MemoryStore:
         with self._lock:
             conn = self._conn()
             conn.executescript(_SCHEMA)
+            _repair_legacy_schema(conn)
             now = time.time()
             conn.execute(
                 "INSERT INTO schema_meta (key, value, updated_at) VALUES (?, ?, ?) "

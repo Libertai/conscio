@@ -31,6 +31,7 @@
   let status = $state<Status>({});
   let lastSyncAt = $state(0);
   let now = $state(Date.now());
+  let controlBusy = $state(false);
   let timer: ReturnType<typeof setInterval> | null = null;
   let clock: ReturnType<typeof setInterval> | null = null;
 
@@ -64,6 +65,17 @@
     return `${h}:${m}:${sec}`;
   }
 
+  async function setPaused(next: boolean) {
+    controlBusy = true;
+    try {
+      await api(`/ui/api/control/${next ? "pause" : "resume"}`, { method: "POST" });
+      status = { ...status, paused: next };
+      await refresh();
+    } finally {
+      controlBusy = false;
+    }
+  }
+
   let synced = $derived(Math.max(0, Math.floor((now - lastSyncAt) / 1000)));
   let paused = $derived(!!status.paused);
 
@@ -83,6 +95,19 @@
 </script>
 
 <div class="pause-overlay {paused ? 'on' : ''}"></div>
+{#if paused}
+  <div class="fixed inset-x-0 top-16 z-50 flex justify-center pointer-events-none">
+    <button
+      type="button"
+      onclick={() => setPaused(false)}
+      disabled={controlBusy}
+      class="pointer-events-auto h-10 px-5 rounded-md border font-mono text-[11px] smallcaps tabular shadow-lg disabled:opacity-50"
+      style="background: var(--color-bg-elev); border-color: var(--color-warn); color: var(--color-warn)"
+    >
+      {controlBusy ? "resuming" : "resume autonomy"}
+    </button>
+  </div>
+{/if}
 
 <header
   class="sticky top-0 z-20 h-14 flex items-center gap-6 px-5 border-b backdrop-blur-sm boot-reveal"
@@ -120,6 +145,16 @@
       </span>
     {/each}
   </div>
+
+  <button
+    type="button"
+    onclick={() => setPaused(!paused)}
+    disabled={controlBusy}
+    class="h-8 px-3 rounded-md border font-mono text-[10px] smallcaps tabular transition-opacity disabled:opacity-50"
+    style="border-color: {paused ? 'var(--color-warn)' : 'var(--color-border-hot)'}; color: {paused ? 'var(--color-warn)' : 'var(--color-fg-mute)'}"
+  >
+    {controlBusy ? "..." : paused ? "resume" : "pause"}
+  </button>
 
   <div class="hidden sm:flex items-baseline gap-5 ml-auto font-mono text-[11px] tabular"
        style="color: var(--color-fg-mute)">

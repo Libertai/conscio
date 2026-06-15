@@ -106,6 +106,55 @@ class MemoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tool_args", task_columns)
         self.assertIn("result", task_columns)
 
+    async def test_legacy_memory_fts_without_ref_id_is_rebuilt(self) -> None:
+        db = self.root / "legacy-fts.db"
+        with sqlite3.connect(db) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE facts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fact TEXT NOT NULL,
+                    norm_hash TEXT NOT NULL,
+                    origin TEXT NOT NULL,
+                    trust INTEGER NOT NULL,
+                    episode_id TEXT,
+                    confidence TEXT NOT NULL DEFAULT 'MEDIUM',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    supersedes INTEGER,
+                    superseded_by INTEGER,
+                    embedding BLOB,
+                    embedding_model TEXT,
+                    access_count INTEGER NOT NULL DEFAULT 0,
+                    last_accessed REAL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE VIRTUAL TABLE memory_fts USING fts5(content, memory_type);
+                INSERT INTO facts (
+                    fact, norm_hash, origin, trust, confidence, status, created_at, updated_at
+                ) VALUES ('legacy fact survives fts rebuild', 'legacy-hash', 'user', 3, 'HIGH', 'active', 1, 1);
+                INSERT INTO memory_fts (content, memory_type) VALUES ('legacy fact survives fts rebuild', 'fact');
+                """
+            )
+
+        memory = MemoryStore(db_path=str(db))
+        await memory.initialize()
+        try:
+            fts_columns = {row["name"] for row in memory.fetchall("PRAGMA table_info(memory_fts)")}
+            await memory.record_episode(
+                episode_id="ep-legacy",
+                source="test",
+                event_type="message",
+                input="hello",
+                output="world",
+            )
+            rows = await memory.retrieve_facts("legacy fact", limit=5)
+        finally:
+            await memory.close()
+
+        self.assertIn("ref_id", fts_columns)
+        self.assertEqual(rows[0].fact, "legacy fact survives fts rebuild")
+
     async def test_physical_backup_preserves_facts_and_fts(self) -> None:
         db = self.root / "state.db"
         backup = self.root / "copy.db"
