@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import sqlite3
 import tarfile
 import tempfile
 import unittest
@@ -51,6 +52,59 @@ class MemoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(status.ok)
         self.assertEqual(status.version, SCHEMA_VERSION)
         self.assertIn("schema_meta", status.tables)
+
+    async def test_goal_and_autonomy_initializers_repair_legacy_columns(self) -> None:
+        db = self.root / "legacy.db"
+        with sqlite3.connect(db) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE goals (
+                    id TEXT PRIMARY KEY,
+                    description TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    priority REAL NOT NULL,
+                    confidence REAL NOT NULL,
+                    appraisal_weight REAL NOT NULL,
+                    review_notes TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    last_reviewed_at REAL
+                );
+                CREATE TABLE projects (
+                    id TEXT PRIMARY KEY,
+                    goal_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE TABLE tasks (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                """
+            )
+
+        memory = MemoryStore(db_path=str(db))
+        goals = GoalStore(memory)
+        autonomy = AutonomyStore(memory)
+        await goals.initialize()
+        await autonomy.initialize()
+        try:
+            goal_columns = {row["name"] for row in memory.fetchall("PRAGMA table_info(goals)")}
+            task_columns = {row["name"] for row in memory.fetchall("PRAGMA table_info(tasks)")}
+        finally:
+            await memory.close()
+
+        self.assertIn("drive_id", goal_columns)
+        self.assertIn("last_serviced_at", goal_columns)
+        self.assertIn("tool_args", task_columns)
+        self.assertIn("result", task_columns)
 
     async def test_physical_backup_preserves_facts_and_fts(self) -> None:
         db = self.root / "state.db"

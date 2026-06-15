@@ -303,7 +303,7 @@ class GoalStore:
 
     async def initialize(self) -> None:
         await self.memory.initialize()
-        self.memory.executescript(GOAL_SCHEMA)
+        migrate_goal_schema(self.memory)
         await self.seed_defaults()
 
     async def seed_defaults(self) -> None:
@@ -909,6 +909,7 @@ class GoalStore:
             )
         return "\n".join(lines)
 
+
     async def review(self, note: str = "Autonomous review kept current priorities.") -> Goal | None:
         goal = await self.active_goal()
         if goal is None:
@@ -925,3 +926,46 @@ class GoalStore:
     @staticmethod
     def as_dict(goal: Goal | Influence) -> dict[str, Any]:
         return asdict(goal)
+
+
+def _table_columns(memory: MemoryStore, table: str) -> set[str]:
+    try:
+        return {str(row["name"]) for row in memory.fetchall(f"PRAGMA table_info({table})")}
+    except sqlite3.OperationalError:
+        return set()
+
+
+def _ensure_column(memory: MemoryStore, table: str, name: str, definition: str) -> None:
+    if name not in _table_columns(memory, table):
+        memory.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+
+def migrate_goal_schema(memory: MemoryStore) -> None:
+    """Create current goal tables and add missing columns from older v1/v2 DBs."""
+    memory.executescript(GOAL_SCHEMA)
+    for name, definition in {
+        "priority": "REAL NOT NULL DEFAULT 0.5",
+        "confidence": "REAL NOT NULL DEFAULT 0.6",
+        "appraisal_weight": "REAL NOT NULL DEFAULT 0.5",
+        "review_notes": "TEXT NOT NULL DEFAULT ''",
+        "drive_id": "TEXT",
+        "last_serviced_at": "REAL",
+        "embedding": "BLOB",
+        "embedding_model": "TEXT",
+        "last_reviewed_at": "REAL",
+    }.items():
+        _ensure_column(memory, "goals", name, definition)
+    for name, definition in {
+        "appetite": "REAL NOT NULL DEFAULT 0.5",
+        "satiation": "REAL NOT NULL DEFAULT 0.0",
+        "last_serviced_at": "REAL",
+    }.items():
+        _ensure_column(memory, "drives", name, definition)
+    for name, definition in {
+        "appraisal": "TEXT NOT NULL DEFAULT ''",
+        "decision": "TEXT NOT NULL DEFAULT ''",
+        "reasoning": "TEXT NOT NULL DEFAULT ''",
+        "response": "TEXT NOT NULL DEFAULT ''",
+        "updated_at": "REAL NOT NULL DEFAULT 0",
+    }.items():
+        _ensure_column(memory, "influences", name, definition)

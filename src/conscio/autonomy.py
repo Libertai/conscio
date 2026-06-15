@@ -87,7 +87,7 @@ class AutonomyStore:
 
     async def initialize(self) -> None:
         await self.memory.initialize()
-        self.memory.executescript(AUTONOMY_SCHEMA)
+        migrate_autonomy_schema(self.memory)
 
     async def get_or_create_project(self, goal_id: str, goal_description: str) -> Project | None:
         row = self.memory.fetchone(
@@ -296,3 +296,37 @@ class AutonomyStore:
         data = dict(row)
         data["tool_args"] = json.loads(data.get("tool_args") or "{}")
         return Task(**data)
+
+
+def _table_columns(memory: MemoryStore, table: str) -> set[str]:
+    try:
+        return {str(row["name"]) for row in memory.fetchall(f"PRAGMA table_info({table})")}
+    except sqlite3.OperationalError:
+        return set()
+
+
+def _ensure_column(memory: MemoryStore, table: str, name: str, definition: str) -> None:
+    if name not in _table_columns(memory, table):
+        memory.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+
+def migrate_autonomy_schema(memory: MemoryStore) -> None:
+    """Create current autonomy tables and add missing columns from older DBs."""
+    memory.executescript(AUTONOMY_SCHEMA)
+    for name, definition in {
+        "status": "TEXT NOT NULL DEFAULT 'active'",
+        "updated_at": "REAL NOT NULL DEFAULT 0",
+    }.items():
+        _ensure_column(memory, "projects", name, definition)
+    for name, definition in {
+        "status": "TEXT NOT NULL DEFAULT 'pending'",
+        "tool_name": "TEXT",
+        "tool_args": "TEXT NOT NULL DEFAULT '{}'",
+        "result": "TEXT NOT NULL DEFAULT ''",
+        "updated_at": "REAL NOT NULL DEFAULT 0",
+    }.items():
+        _ensure_column(memory, "tasks", name, definition)
+    for name, definition in {
+        "episode_id": "TEXT",
+    }.items():
+        _ensure_column(memory, "progress_notes", name, definition)

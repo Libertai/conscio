@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from conscio.config import ServiceConfig
-from conscio.autonomy import AUTONOMY_SCHEMA
-from conscio.goals import GOAL_SCHEMA
+from conscio.autonomy import migrate_autonomy_schema
+from conscio.goals import migrate_goal_schema
 from conscio.memory.store import MemoryStore, SCHEMA_VERSION
 
 
@@ -221,8 +221,8 @@ async def _import_payload(payload: dict[str, Any], target: Path, *, replace: boo
         tables = payload.get("tables") or {}
         with store._lock:  # lifecycle code is part of the storage layer.
             conn = store._conn()
-            conn.executescript(GOAL_SCHEMA)
-            conn.executescript(AUTONOMY_SCHEMA)
+            migrate_goal_schema(store)
+            migrate_autonomy_schema(store)
             table_columns: dict[str, set[str]] = {}
             for table in EXPORT_TABLES:
                 table_columns[table] = {
