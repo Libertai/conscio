@@ -124,6 +124,11 @@ def create_web_router(service: ConscioService) -> APIRouter:
             "skills": await service.list_procedures(),
         }
 
+    @router.get("/ui/api/metrics", include_in_schema=False)
+    async def ui_metrics(conscio_web_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        return await service.metrics()
+
     @router.post("/ui/api/message", include_in_schema=False)
     async def ui_message(req: TextRequest, conscio_web_session: str | None = Cookie(default=None)) -> dict[str, Any]:
         _require_web_auth(service, sessions, conscio_web_session)
@@ -407,6 +412,14 @@ def create_web_router(service: ConscioService) -> APIRouter:
             "facts": await service.recent_facts(limit),
             "skills": await service.list_procedures(),
         }
+
+    @router.get("/ui/api/tools/events", include_in_schema=False)
+    async def ui_tool_events(
+        limit: int = Query(default=50, ge=1, le=200),
+        conscio_web_session: str | None = Cookie(default=None),
+    ) -> list[dict[str, Any]]:
+        _require_web_auth(service, sessions, conscio_web_session)
+        return await service.recent_tool_events(limit)
 
     # ── Server-Sent Events stream ────────────────────────────────────────
     @router.get("/ui/api/events", include_in_schema=False)

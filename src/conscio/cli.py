@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -22,8 +23,16 @@ from conscio.core.agent import ConsciousAgent
 from conscio.core.cognition import InputEvent
 from conscio.core.runtime import CognitiveRuntime
 from conscio.eval import LIVE_SUITES, run_eval_suite
+from conscio.memory.lifecycle import (
+    create_home_backup,
+    export_database,
+    import_database,
+    migrate,
+    restore_home_backup,
+    schema_status,
+)
 from conscio.memory.store import MemoryStore
-from conscio.config import load_config, write_default_config
+from conscio.config import DEFAULT_HOME, load_config, write_default_config
 
 console = Console()
 
@@ -438,10 +447,13 @@ async def _client_trace() -> None:
     console.print(Panel(data.get("trace", ""), title="Cognitive Trace", border_style="dim"))
 
 
-def _service_init() -> None:
-    path = write_default_config()
+def _service_init(profile: str = "research") -> None:
+    path = write_default_config(profile=profile)
     console.print(f"[green]Config ready:[/] {path}")
-    console.print("[dim]Unsafe autonomy is disabled until config.toml sets unsafe_autonomy = true.[/]")
+    if profile.replace("-", "_") == "autonomous_vm":
+        console.print("[dim]Autonomous VM profile enabled: shell/code/web tools are part of the agent premises.[/]")
+    else:
+        console.print("[dim]Unsafe autonomy is disabled until config.toml sets unsafe_autonomy = true.[/]")
 
 
 def _service_start() -> None:
@@ -456,6 +468,190 @@ def _service_start() -> None:
         raise SystemExit(str(exc)) from exc
     app = create_app(config=cfg)
     uvicorn.run(app, host=cfg.host, port=cfg.port)
+
+
+def _service_doctor() -> None:
+    cfg = load_config()
+    checks: list[tuple[str, str, str]] = []
+
+    def add(name: str, ok: bool, detail: str = "") -> None:
+        checks.append((name, "ok" if ok else "fail", detail))
+
+    try:
+        cfg.validate_public_bind()
+        add("public_bind", True, f"{cfg.host}:{cfg.port}")
+    except ValueError as exc:
+        add("public_bind", False, str(exc))
+
+    try:
+        cfg.ensure_layout()
+        probe = cfg.home / ".doctor-write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        add("home_writable", True, str(cfg.home))
+    except OSError as exc:
+        add("home_writable", False, str(exc))
+
+    try:
+        cfg.working_directory.mkdir(parents=True, exist_ok=True)
+        probe = cfg.working_directory / ".doctor-write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        add("workspace_writable", True, str(cfg.working_directory))
+    except OSError as exc:
+        add("workspace_writable", False, str(exc))
+
+    status = schema_status(cfg.db_path)
+    if status.exists:
+        add("database_schema", status.ok, f"version={status.version} missing={status.missing_core or 'none'}")
+    else:
+        add("database_schema", True, "state.db does not exist yet; it will be created on start")
+
+    static_index = Path(__file__).resolve().parent / "static" / "index.html"
+    add("web_assets", static_index.is_file(), str(static_index))
+    add("model_backend", bool(cfg.llm_base_url), cfg.llm_base_url or "no live model configured")
+    add("agent_profile", True, f"{cfg.agent.profile} premises={cfg.agent.premises or 'none'}")
+
+    table = Table(title="Conscio Doctor")
+    table.add_column("Check", style="cyan")
+    table.add_column("Status")
+    table.add_column("Detail", overflow="fold")
+    failed = False
+    for name, status_text, detail in checks:
+        failed = failed or status_text == "fail"
+        style = "green" if status_text == "ok" else "red"
+        table.add_row(name, f"[{style}]{status_text}[/]", detail)
+    console.print(table)
+    if failed:
+        raise SystemExit(1)
+
+
+def _db_path(args: argparse.Namespace) -> Path:
+    return Path(args.db).expanduser() if getattr(args, "db", "") else load_config().db_path
+
+
+async def _db_migrate(args: argparse.Namespace) -> None:
+    status = await migrate(_db_path(args))
+    console.print(f"[green]Schema ready:[/] version={status.version} db={status.db_path}")
+
+
+def _db_schema(args: argparse.Namespace) -> None:
+    status = schema_status(_db_path(args))
+    table = Table(title="Conscio DB Schema")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+    table.add_row("db", str(status.db_path))
+    table.add_row("exists", str(status.exists))
+    table.add_row("version", str(status.version))
+    table.add_row("ok", str(status.ok))
+    table.add_row("missing_core", ", ".join(status.missing_core) or "none")
+    table.add_row("tables", str(len(status.tables)))
+    console.print(table)
+
+
+def _db_backup(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    archive = create_home_backup(cfg)
+    console.print(f"[green]Backup written:[/] {archive}")
+
+
+def _db_restore(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    restore_home_backup(cfg, args.archive, force=args.force)
+    console.print(f"[green]Backup restored:[/] {args.archive}")
+
+
+def _db_export(args: argparse.Namespace) -> None:
+    out = export_database(_db_path(args), args.out)
+    console.print(f"[green]Export written:[/] {out}")
+
+
+async def _db_import(args: argparse.Namespace) -> None:
+    await import_database(args.input, _db_path(args), replace=args.replace)
+    console.print(f"[green]Import complete:[/] {args.input}")
+
+
+def _config_file_path() -> Path:
+    return Path(os.environ.get("CONSCIO_CONFIG", DEFAULT_HOME / "config.toml")).expanduser()
+
+
+def _toml_array(items: list[str]) -> str:
+    return "[" + ", ".join(json.dumps(str(item)) for item in items) + "]"
+
+
+def _upsert_section_array(text: str, section: str, key: str, values: list[str]) -> str:
+    lines = text.splitlines()
+    header = f"[{section}]"
+    replacement = f"{key} = {_toml_array(values)}"
+    start = None
+    for index, line in enumerate(lines):
+        if line.strip() == header:
+            start = index
+            break
+    if start is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.extend([header, replacement])
+        return "\n".join(lines) + "\n"
+
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        stripped = lines[index].strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            end = index
+            break
+    for index in range(start + 1, end):
+        stripped = lines[index].strip()
+        if stripped.startswith(f"{key} ") or stripped.startswith(f"{key}="):
+            lines[index] = replacement
+            return "\n".join(lines) + "\n"
+    lines.insert(end, replacement)
+    return "\n".join(lines) + "\n"
+
+
+def _write_tool_policy(*, allowed: list[str] | None = None, denied: list[str] | None = None) -> Path:
+    path = _config_file_path()
+    if not path.exists():
+        write_default_config(path)
+    text = path.read_text(encoding="utf-8")
+    if allowed is not None:
+        text = _upsert_section_array(text, "tools", "allowed", sorted(dict.fromkeys(allowed)))
+    if denied is not None:
+        text = _upsert_section_array(text, "tools", "denied", sorted(dict.fromkeys(denied)))
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _tools_list() -> None:
+    cfg = load_config(_config_file_path())
+    table = Table(title="Tool Policy")
+    table.add_column("List", style="cyan")
+    table.add_column("Tools")
+    table.add_row("allowed", ", ".join(cfg.allowed_tools) or "(empty)")
+    table.add_row("denied", ", ".join(cfg.denied_tools) or "(empty)")
+    table.add_row("unsafe_autonomy", str(cfg.unsafe_autonomy))
+    table.add_row("working_directory", str(cfg.working_directory))
+    console.print(table)
+
+
+def _tools_deny(args: argparse.Namespace) -> None:
+    cfg = load_config(_config_file_path())
+    names = [str(name) for name in args.names]
+    name_set = set(names)
+    denied = sorted(dict.fromkeys([*cfg.denied_tools, *names]))
+    allowed = [name for name in cfg.allowed_tools if name not in name_set]
+    path = _write_tool_policy(allowed=allowed, denied=denied)
+    console.print(f"[green]Denied tools updated:[/] {', '.join(names)} ({path})")
+
+
+def _tools_allow(args: argparse.Namespace) -> None:
+    cfg = load_config(_config_file_path())
+    names = [str(name) for name in args.names]
+    name_set = set(names)
+    allowed = sorted(dict.fromkeys([*cfg.allowed_tools, *names]))
+    denied = [name for name in cfg.denied_tools if name not in name_set]
+    path = _write_tool_policy(allowed=allowed, denied=denied)
+    console.print(f"[green]Allowed tools updated:[/] {', '.join(names)} ({path})")
 
 
 def main() -> None:
@@ -514,10 +710,43 @@ def main() -> None:
 
     service_p = sub.add_parser("service", help="Manage the long-running Conscio service")
     service_sub = service_p.add_subparsers(dest="service_command")
-    service_sub.add_parser("init", help="Create ~/.conscio/config.toml")
+    service_init_p = service_sub.add_parser("init", help="Create ~/.conscio/config.toml")
+    service_init_p.add_argument(
+        "--profile",
+        default="research",
+        choices=["research", "autonomous-vm", "autonomous_vm"],
+        help="Config profile to generate",
+    )
     service_sub.add_parser("start", help="Start the authenticated FastAPI service")
     service_sub.add_parser("status", help="Show service status")
+    service_sub.add_parser("doctor", help="Validate local service configuration and runtime prerequisites")
     service_sub.add_parser("stop", help="Stop the service")
+
+    db_p = sub.add_parser("db", help="Manage the local Conscio state database")
+    db_sub = db_p.add_subparsers(dest="db_command")
+    db_schema_p = db_sub.add_parser("schema", help="Show schema status")
+    db_schema_p.add_argument("--db", default="", help="Override database path")
+    db_migrate_p = db_sub.add_parser("migrate", help="Create/update additive schema metadata")
+    db_migrate_p.add_argument("--db", default="", help="Override database path")
+    db_sub.add_parser("backup", help="Create a timestamped home backup archive")
+    db_restore_p = db_sub.add_parser("restore", help="Restore a home backup archive")
+    db_restore_p.add_argument("archive")
+    db_restore_p.add_argument("--force", action="store_true", help="Restore even if the service lock exists")
+    db_export_p = db_sub.add_parser("export", help="Export logical database rows to JSON")
+    db_export_p.add_argument("--db", default="", help="Override database path")
+    db_export_p.add_argument("--out", required=True, help="Output JSON path")
+    db_import_p = db_sub.add_parser("import", help="Import logical database rows from JSON")
+    db_import_p.add_argument("input")
+    db_import_p.add_argument("--db", default="", help="Override database path")
+    db_import_p.add_argument("--replace", action="store_true", help="Replace matching tables before import")
+
+    tools_p = sub.add_parser("tools", help="Inspect or update tool policy")
+    tools_sub = tools_p.add_subparsers(dest="tools_command")
+    tools_sub.add_parser("list", help="Show configured tool allow/deny lists")
+    tools_deny_p = tools_sub.add_parser("deny", help="Deny one or more tools in config.toml")
+    tools_deny_p.add_argument("names", nargs="+")
+    tools_allow_p = tools_sub.add_parser("allow", help="Allow one or more tools in config.toml")
+    tools_allow_p.add_argument("names", nargs="+")
 
     chat_p = sub.add_parser("chat", help="Send a message to the running service")
     chat_p.add_argument("message", nargs="+", help="Message to send")
@@ -557,15 +786,43 @@ def main() -> None:
             asyncio.run(_run_eval(args.suite))
     elif args.command == "service":
         if args.service_command == "init":
-            _service_init()
+            _service_init(args.profile)
         elif args.service_command == "start":
             _service_start()
         elif args.service_command == "status":
             asyncio.run(_service_status())
+        elif args.service_command == "doctor":
+            _service_doctor()
         elif args.service_command == "stop":
             asyncio.run(_client_control("stop"))
         else:
             service_p.print_help()
+            sys.exit(1)
+    elif args.command == "db":
+        if args.db_command == "schema":
+            _db_schema(args)
+        elif args.db_command == "migrate":
+            asyncio.run(_db_migrate(args))
+        elif args.db_command == "backup":
+            _db_backup(args)
+        elif args.db_command == "restore":
+            _db_restore(args)
+        elif args.db_command == "export":
+            _db_export(args)
+        elif args.db_command == "import":
+            asyncio.run(_db_import(args))
+        else:
+            db_p.print_help()
+            sys.exit(1)
+    elif args.command == "tools":
+        if args.tools_command == "list":
+            _tools_list()
+        elif args.tools_command == "deny":
+            _tools_deny(args)
+        elif args.tools_command == "allow":
+            _tools_allow(args)
+        else:
+            tools_p.print_help()
             sys.exit(1)
     elif args.command == "chat":
         asyncio.run(_client_chat(" ".join(args.message)))

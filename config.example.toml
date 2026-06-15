@@ -12,6 +12,13 @@ tick_interval = 30
 unsafe_autonomy = false
 pause_on_error = true
 
+[agent]
+# "research" keeps conservative defaults. Use "autonomous_vm" on a dedicated
+# premises VM where shell/code/web tools are part of the agent's normal body.
+profile = "research"
+premises = ""
+external_side_effects = "policy"
+
 [llm]
 base_url = ""
 api_key = ""

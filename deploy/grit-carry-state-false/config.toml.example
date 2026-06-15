@@ -12,6 +12,11 @@ tick_interval = 30
 unsafe_autonomy = false
 pause_on_error = true
 
+[agent]
+profile = "research"
+premises = ""
+external_side_effects = "policy"
+
 [llm]
 base_url = ""
 api_key = ""

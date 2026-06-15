@@ -59,6 +59,39 @@ class ConfigTests(unittest.TestCase):
 
         self.assertTrue(cfg.unsafe_autonomy)
 
+    def test_autonomous_vm_profile_derives_premises_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("[agent]\nprofile = \"autonomous-vm\"\n", encoding="utf-8")
+            cfg = load_config(path)
+
+        self.assertEqual(cfg.agent.profile, "autonomous_vm")
+        self.assertEqual(cfg.agent.premises, "dedicated_vm")
+        self.assertEqual(cfg.agent.external_side_effects, "mostly_free")
+        self.assertTrue(cfg.unsafe_autonomy)
+        self.assertEqual(str(cfg.working_directory), "/opt/conscio/work")
+
+    def test_explicit_values_override_autonomous_vm_profile_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(
+                "[agent]\n"
+                "profile = \"autonomous_vm\"\n"
+                "premises = \"lab\"\n"
+                "external_side_effects = \"policy\"\n"
+                "[service]\n"
+                "unsafe_autonomy = false\n"
+                "[tools]\n"
+                "working_directory = \"/tmp/conscio-work\"\n",
+                encoding="utf-8",
+            )
+            cfg = load_config(path)
+
+        self.assertEqual(cfg.agent.premises, "lab")
+        self.assertEqual(cfg.agent.external_side_effects, "policy")
+        self.assertFalse(cfg.unsafe_autonomy)
+        self.assertEqual(str(cfg.working_directory), "/tmp/conscio-work")
+
     def test_public_bind_rejects_placeholder_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"

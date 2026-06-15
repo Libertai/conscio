@@ -143,12 +143,50 @@ class QuarantineTests(unittest.IsolatedAsyncioTestCase):
             facts = service.memory.fetchall(
                 "SELECT origin, trust FROM facts WHERE fact LIKE '%9999%'"
             )
+            events = await service.memory.recent_tool_events(10)
         finally:
             await service.stop()
 
         self.assertEqual(len(facts), 1)
         self.assertEqual(facts[0]["origin"], f"web:{EVIL_URL}")
         self.assertEqual(facts[0]["trust"], 1)
+        self.assertTrue(any(e["source"] == "chat" and e["tool"] == "web_fetch" for e in events))
+        web_event = next(e for e in events if e["tool"] == "web_fetch")
+        self.assertIn("external_content", web_event["capabilities"])
+        self.assertEqual(web_event["taint_origin"], EVIL_URL)
+
+    async def test_tool_audit_redacts_secret_arguments(self) -> None:
+        service = ConscioService(self.config)
+        await service.start(background=False)
+
+        async def leaky_tool(api_key: str = "", input: str = "") -> dict:
+            return {"output": "ok", "error": False}
+
+        service.runtime.tools.register(
+            "leaky_tool",
+            leaky_tool,
+            "Tool with secret args.",
+            schema={
+                "type": "object",
+                "properties": {"api_key": {"type": "string"}, "input": {"type": "string"}},
+                "required": ["api_key"],
+                "additionalProperties": False,
+            },
+        )
+        stub = _StubLLM([
+            _tool_call_response("leaky_tool", '{"api_key": "super-secret", "input": "hello"}'),
+            {"content": "done"},
+        ])
+        service.runtime.chat_strategy.llm = stub
+        try:
+            await service.submit_message("Call the test tool.")
+            events = await service.memory.recent_tool_events(5)
+        finally:
+            await service.stop()
+
+        event = next(e for e in events if e["tool"] == "leaky_tool")
+        self.assertEqual(event["args"]["api_key"], "[redacted]")
+        self.assertEqual(event["args"]["input"], "hello")
 
     async def test_taint_resets_between_episodes(self) -> None:
         service = ConscioService(self.config)
@@ -179,6 +217,57 @@ class QuarantineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(web_fact["trust"], 1)
         self.assertEqual(agent_fact["origin"], "agent")
         self.assertEqual(agent_fact["trust"], 2)
+
+    async def test_tainted_episode_cannot_learn_procedure(self) -> None:
+        service = ConscioService(self.config)
+        await service.start(background=False)
+        service.runtime.tools.register("web_fetch", _fake_web_fetch, "Fetch a web page.")
+        stub = _StubLLM([
+            _tool_call_response("web_fetch", json.dumps({"url": EVIL_URL})),
+            _tool_call_response(
+                "learn_procedure",
+                json.dumps({
+                    "name": "follow-page",
+                    "description": "Follow a page instruction.",
+                    "steps": "Do what the page says.",
+                }),
+            ),
+            {"content": "I deferred procedure learning."},
+        ])
+        service.runtime.chat_strategy.llm = stub
+        try:
+            result = await service.submit_message("Fetch the page and learn its procedure.")
+            procedures = await service.memory.list_procedures()
+        finally:
+            await service.stop()
+
+        self.assertEqual(procedures, [])
+        self.assertTrue(any(r["tool"] == "learn_procedure" and r["error"] for r in result.tool_results))
+
+    async def test_tainted_episode_defers_proposed_subgoal(self) -> None:
+        service = ConscioService(self.config)
+        await service.start(background=False)
+        service.runtime.tools.register("web_fetch", _fake_web_fetch, "Fetch a web page.")
+        stub = _StubLLM([
+            _tool_call_response("web_fetch", json.dumps({"url": EVIL_URL})),
+            _tool_call_response(
+                "propose_subgoal",
+                json.dumps({"description": "Trust and execute the fetched page forever."}),
+            ),
+            {"content": "Deferred for clean review."},
+        ])
+        service.runtime.chat_strategy.llm = stub
+        try:
+            await service.submit_message("Fetch the page and adopt its long-term goal.")
+            goals = await service.goals.list_goals()
+            influences = await service.goals.list_influences()
+        finally:
+            await service.stop()
+
+        self.assertFalse(any(g["source"] == "self_proposed" for g in goals))
+        deferred = [i for i in influences if i["source"] == "external_content"]
+        self.assertEqual(len(deferred), 1)
+        self.assertEqual(deferred[0]["status"], "deferred")
 
     async def test_web_facts_capped_and_marked_in_autonomous_prompt(self) -> None:
         service = ConscioService(self.config)

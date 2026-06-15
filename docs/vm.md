@@ -12,9 +12,8 @@ sudo git clone <repo-url> /opt/conscio
 sudo chown -R conscio:conscio /opt/conscio
 sudo -u conscio bash
 cd /opt/conscio
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -e .
+uv sync --frozen
+source .venv/bin/activate
 conscio service init
 ```
 
@@ -88,7 +87,8 @@ persists across restart, so a service bounce cannot reset the rate cap.
 ## systemd
 
 After creating `/home/conscio/.conscio/config.toml` as the `conscio` user, copy
-`systemd/conscio.service` to `/etc/systemd/system/conscio.service`, then:
+`deploy/grit-carry-state-false/conscio.service` to
+`/etc/systemd/system/conscio.service`, then:
 
 ```bash
 sudo systemctl daemon-reload

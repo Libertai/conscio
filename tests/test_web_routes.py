@@ -32,6 +32,8 @@ class _StubConfig:
 class _StubServiceStatus:
     running: bool = True
     paused: bool = False
+    agent_profile: str = "research"
+    premises: str = ""
 
 
 @dataclass
@@ -60,6 +62,29 @@ class _StubService:
     async def recent_trace(self) -> str: return ""
     async def recent_facts(self, limit: int) -> list[dict[str, Any]]: return []
     async def list_procedures(self) -> list[dict[str, Any]]: return []
+    async def recent_tool_events(self, limit: int) -> list[dict[str, Any]]:
+        return [{
+            "id": 1,
+            "source": "chat",
+            "tool": "web_fetch",
+            "capabilities": ["external_content", "network_read"],
+            "args": {"url": "https://example.com"},
+            "result_summary": "ok",
+            "error": False,
+            "exit_code": None,
+            "taint_origin": "https://example.com",
+            "created_at": 123.0,
+        }]
+    async def metrics(self) -> dict[str, Any]:
+        return {
+            "running": True,
+            "paused": False,
+            "agent_profile": "research",
+            "premises": "",
+            "external_side_effects": "policy",
+            "tool_events_total": 1,
+            "schema_version": self.memory.schema_version(),
+        }
 
     @property
     def goals(self):
@@ -127,10 +152,27 @@ def test_routes_require_auth(app: FastAPI) -> None:
         for path in [
             "/ui/api/chat/sessions",
             "/ui/api/chat/sessions/main/messages",
+            "/ui/api/metrics",
+            "/ui/api/tools/events",
             "/ui/api/events",
         ]:
             r = client.get(path)
             assert r.status_code == 401, f"{path} should require auth"
+
+
+def test_operations_routes(app: FastAPI) -> None:
+    with TestClient(app) as client:
+        _login(client)
+
+        r = client.get("/ui/api/metrics")
+        assert r.status_code == 200, r.text
+        assert r.json()["tool_events_total"] == 1
+
+        r = client.get("/ui/api/tools/events")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body[0]["tool"] == "web_fetch"
+        assert body[0]["capabilities"] == ["external_content", "network_read"]
 
 
 def test_events_route_registered_with_auth(app: FastAPI) -> None:
@@ -138,7 +180,20 @@ def test_events_route_registered_with_auth(app: FastAPI) -> None:
     against the broker directly. The Starlette TestClient's sync transport
     can't cleanly cancel a long-lived StreamingResponse without a real loop,
     so here we only verify the route exists and enforces the session cookie."""
-    routes = {(r.path, list(r.methods)[0]) for r in app.routes if hasattr(r, "methods")}  # type: ignore[attr-defined]
+    def flatten(routes):
+        for route in routes:
+            if hasattr(route, "path"):
+                yield route
+            original = getattr(route, "original_router", None)
+            if original is not None:
+                yield from flatten(original.routes)
+
+    routes = {
+        (r.path, method)
+        for r in flatten(app.routes)
+        if hasattr(r, "methods")
+        for method in getattr(r, "methods", set())
+    }
     assert ("/ui/api/events", "GET") in routes
     with TestClient(app) as client:
         # Without a session cookie, the route refuses with 401 before the

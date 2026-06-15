@@ -14,7 +14,7 @@ from conscio.config import ServiceConfig, load_config
 from conscio.core.context import ContextSettings, provenance_marker
 from conscio.core.cognition import InputEvent
 from conscio.core.runtime import CognitiveRuntime, EpisodeResult
-from conscio.core.tool_loop import web_taint_origin
+from conscio.core.tool_loop import external_taint_origin
 from conscio.goals import GoalStore
 from conscio.llm.client import LLMClient
 from conscio.memory.consolidation import ConsolidationEngine
@@ -42,6 +42,7 @@ _SELF_MANAGEMENT_TOOLS = {
 
 # Consecutive add-only autonomous ticks before the task-discipline hard rule fires.
 _ADD_ONLY_TICK_LIMIT = 3
+_REDACT_KEYS = ("password", "token", "secret", "api_key", "apikey", "key")
 
 
 @dataclass
@@ -74,6 +75,8 @@ class ServiceStatus:
     uptime: float
     autonomous: bool
     unsafe_autonomy: bool
+    agent_profile: str = ""
+    premises: str = ""
     active_goal: dict[str, Any] | None = None
     queue_depth: int = 0
     current_event: str = ""
@@ -354,16 +357,48 @@ class ConscioService:
             text = description.strip()
             if not text:
                 return {"output": "No description provided.", "error": True}
-            goal = await self.goals.add_goal(
+            if self.episode_taint.web:
+                origin = self.episode_taint.urls[-1] if self.episode_taint.urls else "external content"
+                influence = await self.goals.defer_influence(
+                    text[:500],
+                    kind="goal",
+                    source="external_content",
+                    reasoning=(
+                        "Deferred because the proposal was made in an episode "
+                        f"tainted by external content ({origin})."
+                    ),
+                    response="I deferred this proposed goal for later clean review.",
+                )
+                await self.autonomy.record_action("self_management")
+                return {
+                    "output": f"Deferred proposed goal as influence {influence.id}.",
+                    "error": False,
+                    "accepted": False,
+                    "influence_id": influence.id,
+                }
+            proposed = await self.goals.propose_goal(
                 text[:500],
+                rationale=rationale[:500],
                 source="self_proposed",
                 priority=0.5,
                 confidence=0.5,
                 appraisal_weight=0.5,
-                review_notes=rationale[:500],
             )
             await self.autonomy.record_action("self_management")
-            return {"output": f"Proposed new goal {goal.id}: {text[:200]}.", "error": False, "goal_id": goal.id}
+            if not proposed["accepted"]:
+                return {
+                    "output": str(proposed["reason"]),
+                    "error": False,
+                    "accepted": False,
+                    "similar_goal_id": proposed.get("similar_goal_id"),
+                }
+            goal = proposed["goal"]
+            return {
+                "output": f"Proposed new goal {goal.id}: {text[:200]}.",
+                "error": False,
+                "accepted": True,
+                "goal_id": goal.id,
+            }
 
         async def learn_procedure(
             name: str,
@@ -371,6 +406,14 @@ class ConscioService:
             steps: str,
             trigger: str = "",
         ) -> dict[str, Any]:
+            if self.episode_taint.web:
+                return {
+                    "output": (
+                        "learn_procedure is disabled after external content or "
+                        "network reads in this episode. Re-evaluate it in a clean episode."
+                    ),
+                    "error": True,
+                }
             slug = " ".join(name.strip().split())
             if not slug or not description.strip() or not steps.strip():
                 return {"output": "learn_procedure requires name, description and steps.", "error": True}
@@ -387,6 +430,7 @@ class ConscioService:
             "remember_fact",
             remember_fact,
             "Store one semantic fact in long-term memory.",
+            capabilities={"memory_write"},
             schema={
                 "type": "object",
                 "properties": {
@@ -401,6 +445,7 @@ class ConscioService:
             "remember_facts",
             remember_fact,
             "Store one or more semantic facts in long-term memory.",
+            capabilities={"memory_write"},
             schema={
                 "type": "object",
                 "properties": {
@@ -415,6 +460,7 @@ class ConscioService:
             "search_memory",
             search_memory,
             "Search semantic long-term memory facts.",
+            capabilities={"memory_read"},
             schema={
                 "type": "object",
                 "properties": {
@@ -429,6 +475,7 @@ class ConscioService:
             "set_task_status",
             set_task_status,
             "Mark a task pending/active/done/blocked. Use done when the task is complete; blocked only after attempting it.",
+            capabilities={"self_management"},
             schema={
                 "type": "object",
                 "properties": {
@@ -444,6 +491,7 @@ class ConscioService:
             "add_task",
             add_task,
             "Add a new task to a project. Use to break work into concrete next steps.",
+            capabilities={"self_management"},
             schema={
                 "type": "object",
                 "properties": {
@@ -460,6 +508,7 @@ class ConscioService:
             "note_progress",
             note_progress,
             "Record a free-form progress note in the autonomous trace and episodic memory.",
+            capabilities={"self_management"},
             schema={
                 "type": "object",
                 "properties": {
@@ -474,6 +523,7 @@ class ConscioService:
             "propose_subgoal",
             propose_subgoal,
             "Propose a new self-authored goal. Will be reviewed in the next goal-review cycle.",
+            capabilities={"self_modification"},
             schema={
                 "type": "object",
                 "properties": {
@@ -488,6 +538,7 @@ class ConscioService:
             "learn_procedure",
             learn_procedure,
             "Record a validated, reusable procedure you have confirmed works.",
+            capabilities={"self_modification", "memory_write"},
             schema={
                 "type": "object",
                 "properties": {
@@ -796,6 +847,49 @@ class ConscioService:
             "existing task or make concrete progress — do not add a new task."
         )
 
+    def _tool_capabilities(self, name: str) -> list[str]:
+        getter = getattr(self.runtime.tools, "tool_capabilities", None)
+        if not callable(getter):
+            return []
+        return sorted(str(item) for item in getter(name))
+
+    def _redact_tool_args(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            out: dict[str, Any] = {}
+            for key, item in value.items():
+                lowered = str(key).lower()
+                if any(marker in lowered for marker in _REDACT_KEYS):
+                    out[str(key)] = "[redacted]"
+                else:
+                    out[str(key)] = self._redact_tool_args(item)
+            return out
+        if isinstance(value, list):
+            return [self._redact_tool_args(item) for item in value]
+        return value
+
+    def _record_tool_event(self, source: str, request: Any, result: dict[str, Any]) -> None:
+        name = getattr(request, "name", "")
+        capabilities = self._tool_capabilities(name)
+        taint_origin = external_taint_origin(
+            request, result, capabilities=frozenset(capabilities)
+        ) or ""
+        summary = " ".join(str(result.get("output") or result.get("error") or "").split())[:500]
+        try:
+            self.memory.record_tool_event(
+                episode_id=self.runtime.workspace.current_episode,
+                tick=int(getattr(self.runtime.workspace, "_current_tick", -1)),
+                source=source,
+                tool=name,
+                capabilities=capabilities,
+                args=self._redact_tool_args(getattr(request, "args", {}) or {}),
+                result_summary=summary,
+                error=bool(result.get("error")),
+                exit_code=result.get("exit_code"),
+                taint_origin=taint_origin,
+            )
+        except Exception as exc:  # noqa: BLE001 — audit must not mask the tool result
+            self.last_error = f"tool_audit_failed: {exc}"
+
     async def _autonomous_context_state(self) -> dict[str, Any]:
         goal_obj = await self.goals.active_goal()
         goal = asdict(goal_obj) if goal_obj else {}
@@ -853,18 +947,21 @@ class ConscioService:
         """Mark the episode tainted when a tool touches web content — the
         spotlighted web tools, or bash/execute_code reaching the network via
         curl/wget/python (otherwise a shell fetch bypasses the taint pipeline)."""
-        origin = web_taint_origin(request, result)
+        capabilities = frozenset(self._tool_capabilities(getattr(request, "name", "")))
+        origin = external_taint_origin(request, result, capabilities=capabilities)
         if origin is not None:
             self.episode_taint.note(origin)
 
     async def _on_chat_tool_observation(self, request: Any, result: dict[str, Any]) -> None:
         """Chat-path tool hook: taint tracking only (no autonomous budget)."""
+        self._record_tool_event("chat", request, result)
         self._note_web_taint(request, result)
 
     async def _on_autonomous_tool_observation(self, request: Any, result: dict[str, Any]) -> None:
         """Hook fired by the autonomous tool loop after each tool call. Tracks
         web taint and records a tool action for the per-hour persistent budget.
         Self-management tools record themselves."""
+        self._record_tool_event("autonomous", request, result)
         self._note_web_taint(request, result)
         name = getattr(request, "name", "")
         if name in _SELF_MANAGEMENT_TOOLS:
@@ -882,6 +979,8 @@ class ConscioService:
             uptime=time.time() - self.started_at if self.started_at else 0.0,
             autonomous=self.config.autonomous,
             unsafe_autonomy=self.config.unsafe_autonomy,
+            agent_profile=self.config.agent.profile,
+            premises=self.config.agent.premises,
             active_goal=asdict(goal) if goal else None,
             queue_depth=self.queue.qsize(),
             current_event=self.current_event,
@@ -920,6 +1019,34 @@ class ConscioService:
 
     async def recent_facts(self, limit: int = 10) -> list[dict[str, Any]]:
         return await self.memory.recent_facts(limit)
+
+    async def recent_tool_events(self, limit: int = 50) -> list[dict[str, Any]]:
+        return await self.memory.recent_tool_events(limit)
+
+    async def metrics(self) -> dict[str, Any]:
+        row = self.memory.fetchone("SELECT COUNT(*) AS n FROM tool_events")
+        episode_metrics = [
+            e.get("metrics") or {} for e in await self.memory.recent_episodes(200)
+        ]
+        return {
+            "running": self.running,
+            "paused": self.paused,
+            "agent_profile": self.config.agent.profile,
+            "premises": self.config.agent.premises,
+            "external_side_effects": self.config.agent.external_side_effects,
+            "unsafe_autonomy": self.config.unsafe_autonomy,
+            "queue_depth": self.queue.qsize(),
+            "actions_last_hour": await self.autonomy.count_recent_actions("tool"),
+            "tool_events_total": int(row["n"]) if row else 0,
+            "episode_count": await self.memory.count_episodes(),
+            "llm_calls_recent": sum(int(m.get("llm_calls", 0) or 0) for m in episode_metrics),
+            "tool_calls_recent": sum(int(m.get("tool_calls", 0) or 0) for m in episode_metrics),
+            "latest_model_context_chars": len(self.latest_model_context or ""),
+            "schema_version": self.memory.schema_version(),
+            "db_path": str(self.config.db_path),
+            "working_directory": str(self.config.working_directory),
+            "last_error": self.last_error,
+        }
 
     async def list_procedures(self) -> list[dict[str, Any]]:
         rows = await self.memory.list_procedures()

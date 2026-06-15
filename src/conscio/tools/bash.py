@@ -33,6 +33,7 @@ from conscio.tools.registry import tool
         "required": ["command"],
         "additionalProperties": False,
     },
+    capabilities={"local_read", "local_write", "network_read", "network_write"},
 )
 async def bash(
     command: str | None = None,
@@ -68,5 +69,4 @@ async def bash(
         return {"output": f"Command not found: {e}", "exit_code": -1}
     except Exception as e:
         return {"output": f"Error: {e}", "exit_code": -1}
-
 

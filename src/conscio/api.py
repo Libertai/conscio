@@ -58,6 +58,10 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
     async def status() -> dict[str, Any]:
         return (await svc.status()).__dict__
 
+    @app.get("/metrics", dependencies=[Depends(require_auth)])
+    async def metrics() -> dict[str, Any]:
+        return await svc.metrics()
+
     @app.post("/message", dependencies=[Depends(require_auth)])
     async def message(req: MessageRequest) -> dict[str, Any]:
         result = await svc.submit_message(req.content, source=req.source)

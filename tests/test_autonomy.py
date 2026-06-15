@@ -357,6 +357,9 @@ class PerToolSchemaTests(unittest.IsolatedAsyncioTestCase):
         await service.start(background=False)
         try:
             schemas = service.runtime.tools.tool_schemas()
+            bash_caps = service.runtime.tools.tool_capabilities("bash")
+            web_caps = service.runtime.tools.tool_capabilities("web_fetch")
+            remember_caps = service.runtime.tools.tool_capabilities("remember_fact")
         finally:
             await service.stop()
 
@@ -372,6 +375,9 @@ class PerToolSchemaTests(unittest.IsolatedAsyncioTestCase):
             set(schemas["set_task_status"]["required"]),
             {"task_id", "status"},
         )
+        self.assertIn("network_read", bash_caps)
+        self.assertIn("external_content", web_caps)
+        self.assertIn("memory_write", remember_caps)
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ WORKDIR /opt/conscio
 
 RUN useradd --create-home --home-dir /home/conscio conscio
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 COPY docs ./docs
 
@@ -31,7 +31,10 @@ COPY docs ./docs
 # guarantees we ship the *image-built* assets (canonical), not whatever was committed.
 COPY --from=web /src/conscio/static ./src/conscio/static
 
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir uv \
+    && uv sync --frozen --no-dev --compile-bytecode
+
+ENV PATH="/opt/conscio/.venv/bin:$PATH"
 
 USER conscio
 ENV HOME=/home/conscio

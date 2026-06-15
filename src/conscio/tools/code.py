@@ -34,6 +34,7 @@ from conscio.tools.registry import tool
         "required": ["code"],
         "additionalProperties": False,
     },
+    capabilities={"local_read", "local_write", "network_read", "network_write"},
 )
 async def execute_code(
     code: str | None = None,
@@ -78,5 +79,4 @@ async def execute_code(
             __import__("os").unlink(path)
         except OSError:
             pass
-
 

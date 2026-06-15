@@ -1,6 +1,6 @@
 # conscio web — observatory
 
-The Svelte 5 SPA that ships at `/ui` once Phase 4 swaps it in. Currently dogfooded at `/ui2` while the legacy inline UI still serves `/ui`.
+The Svelte 5 SPA that ships at `/ui`.
 
 ## stack
 
@@ -27,7 +27,7 @@ In another shell:
 conscio service start
 ```
 
-Then open http://127.0.0.1:8765/ui2/ for the production-bundle path, or http://localhost:5174/ui/ for the dev server with HMR.
+Then open http://127.0.0.1:8765/ui/ for the production-bundle path, or http://localhost:5174/ui/ for the dev server with HMR.
 
 ## build
 

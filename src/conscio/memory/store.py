@@ -32,6 +32,7 @@ _TRUST_BY_ORIGIN = {
     "quarantined": 0,
 }
 _CONF_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+SCHEMA_VERSION = 3
 
 # Schema v2 (fresh-start DB, no migration from v1):
 # - unified `episodes` keyed by the runtime's per-episode uuid (canonical id),
@@ -93,6 +94,27 @@ CREATE TABLE IF NOT EXISTS procedures (
     created_at    REAL NOT NULL,
     updated_at    REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key           TEXT PRIMARY KEY,
+    value         TEXT NOT NULL,
+    updated_at    REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tool_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    episode_id    TEXT NOT NULL DEFAULT '',
+    tick          INTEGER NOT NULL DEFAULT -1,
+    source        TEXT NOT NULL DEFAULT '',
+    tool          TEXT NOT NULL,
+    capabilities  TEXT NOT NULL DEFAULT '[]',
+    args          TEXT NOT NULL DEFAULT '{}',
+    result_summary TEXT NOT NULL DEFAULT '',
+    error         INTEGER NOT NULL DEFAULT 0,
+    exit_code     INTEGER,
+    taint_origin  TEXT NOT NULL DEFAULT '',
+    created_at    REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tool_events_created ON tool_events (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tool_events_episode ON tool_events (episode_id, tick);
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(content, memory_type, ref_id UNINDEXED);
 CREATE TABLE IF NOT EXISTS thoughts (
     id TEXT PRIMARY KEY,
@@ -158,6 +180,12 @@ def _get_conn(db_path: str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_SCHEMA)
+    now = time.time()
+    conn.execute(
+        "INSERT INTO schema_meta (key, value, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        ("schema_version", str(SCHEMA_VERSION), now),
+    )
     conn.commit()
     return conn
 
@@ -207,6 +235,80 @@ class MemoryStore:
         with self._lock:
             self._conn().execute(sql, params)
             self._conn().commit()
+
+    def schema_version(self) -> int:
+        row = self.fetchone("SELECT value FROM schema_meta WHERE key = ?", ("schema_version",))
+        if row is None:
+            # Existing fresh-start v2 DBs before public-beta metadata had the
+            # core tables but no schema_meta row.
+            return 2
+        try:
+            return int(row["value"])
+        except (TypeError, ValueError):
+            return 0
+
+    def migrate_schema(self) -> int:
+        """Ensure additive public-beta schema pieces exist and stamp version."""
+        with self._lock:
+            conn = self._conn()
+            conn.executescript(_SCHEMA)
+            now = time.time()
+            conn.execute(
+                "INSERT INTO schema_meta (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                ("schema_version", str(SCHEMA_VERSION), now),
+            )
+            conn.commit()
+        return SCHEMA_VERSION
+
+    def record_tool_event(
+        self,
+        *,
+        episode_id: str,
+        tick: int,
+        source: str = "",
+        tool: str,
+        capabilities: list[str] | tuple[str, ...] | None = None,
+        args: dict[str, Any] | None = None,
+        result_summary: str = "",
+        error: bool = False,
+        exit_code: int | None = None,
+        taint_origin: str = "",
+    ) -> int:
+        now = time.time()
+        with self._lock:
+            conn = self._conn()
+            cursor = conn.execute(
+                "INSERT INTO tool_events "
+                "(episode_id, tick, source, tool, capabilities, args, result_summary, error, exit_code, taint_origin, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    episode_id,
+                    int(tick),
+                    source,
+                    tool,
+                    json.dumps(list(capabilities or [])),
+                    json.dumps(args or {}, ensure_ascii=False),
+                    result_summary,
+                    int(bool(error)),
+                    exit_code,
+                    taint_origin,
+                    now,
+                ),
+            )
+            conn.commit()
+            return int(cursor.lastrowid or 0)
+
+    async def recent_tool_events(self, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self.fetchall(
+            "SELECT * FROM tool_events ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        )
+        for row in rows:
+            row["capabilities"] = json.loads(row.get("capabilities") or "[]")
+            row["args"] = json.loads(row.get("args") or "{}")
+            row["error"] = bool(row.get("error"))
+        return rows
 
     def executescript(self, sql: str) -> None:
         with self._lock:

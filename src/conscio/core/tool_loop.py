@@ -55,6 +55,8 @@ WEB_CONTENT_TOOLS = frozenset({"web_fetch", "web_search"})
 # inspected so taint tracking cannot be bypassed by routing a fetch through a
 # shell instead of web_fetch.
 NETWORK_CAPABLE_TOOLS = frozenset({"bash", "execute_code"})
+EXTERNAL_CONTENT_CAPABILITY = "external_content"
+NETWORK_READ_CAPABILITY = "network_read"
 
 UNTRUSTED_WEB_BEGIN = "<<UNTRUSTED_WEB_CONTENT url={url}>>"
 UNTRUSTED_WEB_END = "<<END_UNTRUSTED>>"
@@ -84,6 +86,15 @@ def web_request_url(request: ToolRequest) -> str:
 
 
 def web_taint_origin(request: ToolRequest, result: dict[str, Any] | None = None) -> str | None:
+    return external_taint_origin(request, result)
+
+
+def external_taint_origin(
+    request: ToolRequest,
+    result: dict[str, Any] | None = None,
+    *,
+    capabilities: set[str] | frozenset[str] | None = None,
+) -> str | None:
     """Origin string when a tool call touched web content, else None.
 
     Covers the spotlighted web tools plus network-capable tools
@@ -92,9 +103,10 @@ def web_taint_origin(request: ToolRequest, result: dict[str, Any] | None = None)
     the episode too — otherwise the whole taint pipeline is bypassable.
     Conservative over-tainting is the accepted trade-off."""
     name = request.name
-    if name in WEB_CONTENT_TOOLS:
+    caps = capabilities or frozenset()
+    if name in WEB_CONTENT_TOOLS or EXTERNAL_CONTENT_CAPABILITY in caps:
         return web_request_url(request)
-    if name in NETWORK_CAPABLE_TOOLS:
+    if name in NETWORK_CAPABLE_TOOLS or NETWORK_READ_CAPABILITY in caps:
         args_blob = json.dumps(request.args or {}, ensure_ascii=False)
         output = str((result or {}).get("output", ""))
         url_match = _URL_RE.search(args_blob) or _URL_RE.search(output)
@@ -146,7 +158,8 @@ async def _execute_tool(tools: Any, request: ToolRequest, workspace: Workspace) 
     if tools is None:
         return {"output": "Tool registry is unavailable.", "error": True}
     result = await tools.call(request.name, request.args)
-    if request.name in WEB_CONTENT_TOOLS:
+    capabilities = _tool_capabilities(tools, request.name)
+    if request.name in WEB_CONTENT_TOOLS or EXTERNAL_CONTENT_CAPABILITY in capabilities:
         result = _spotlight_web_output(request, result)
     output = str(result.get("output", ""))
     workspace.write(
@@ -161,6 +174,16 @@ async def _execute_tool(tools: Any, request: ToolRequest, workspace: Workspace) 
         metadata={"source": "tool", "event_type": "tool_result", "tool": request.name, "result": result},
     )
     return result
+
+
+def _tool_capabilities(tools: Any, name: str) -> frozenset[str]:
+    getter = getattr(tools, "tool_capabilities", None)
+    if not callable(getter):
+        return frozenset()
+    try:
+        return frozenset(str(item) for item in getter(name))
+    except Exception:  # noqa: BLE001 — capability metadata is advisory
+        return frozenset()
 
 
 class ToolLoopSession:

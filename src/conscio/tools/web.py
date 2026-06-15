@@ -373,6 +373,7 @@ async def _fallback_fetch(url: str) -> dict[str, Any]:
         "required": ["query"],
         "additionalProperties": False,
     },
+    capabilities={"external_content", "network_read"},
 )
 async def web_search(
     query: str | None = None,
@@ -418,6 +419,7 @@ async def web_search(
         "required": ["url"],
         "additionalProperties": False,
     },
+    capabilities={"external_content", "network_read"},
 )
 async def web_fetch(
     url: str | None = None,
@@ -449,5 +451,4 @@ async def web_fetch(
             return {"output": "Fetch timed out.", "error": True}
     except Exception as e:
         return {"output": f"Fetch error: {e}", "error": True}
-
 

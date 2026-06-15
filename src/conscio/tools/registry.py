@@ -15,13 +15,19 @@ DEFAULT_TOOL_SCHEMA: dict[str, Any] = {
 }
 
 
-def tool(name: str, description: str, schema: dict[str, Any] | None = None) -> Callable[[TOOL_FN], TOOL_FN]:
+def tool(
+    name: str,
+    description: str,
+    schema: dict[str, Any] | None = None,
+    capabilities: list[str] | set[str] | tuple[str, ...] | None = None,
+) -> Callable[[TOOL_FN], TOOL_FN]:
     """Decorator that attaches name/description/schema metadata to a tool coroutine."""
 
     def decorator(fn: TOOL_FN) -> TOOL_FN:
         fn._tool_name = name  # type: ignore[attr-defined]
         fn._tool_description = description  # type: ignore[attr-defined]
         fn._tool_schema = schema or DEFAULT_TOOL_SCHEMA  # type: ignore[attr-defined]
+        fn._tool_capabilities = frozenset(capabilities or ())  # type: ignore[attr-defined]
         return fn
 
     return decorator
@@ -31,7 +37,7 @@ class ToolRegistry:
     """Registry of available tools that the agent can call."""
 
     def __init__(self) -> None:
-        self._tools: dict[str, tuple[TOOL_FN, str, dict[str, Any]]] = {}
+        self._tools: dict[str, tuple[TOOL_FN, str, dict[str, Any], frozenset[str]]] = {}
 
     def register(
         self,
@@ -39,8 +45,16 @@ class ToolRegistry:
         fn: TOOL_FN,
         description: str = "",
         schema: dict[str, Any] | None = None,
+        capabilities: list[str] | set[str] | tuple[str, ...] | None = None,
     ) -> None:
-        self._tools[name] = (fn, description, schema or DEFAULT_TOOL_SCHEMA)
+        previous = self._tools.get(name)
+        inherited_caps = previous[3] if previous is not None and capabilities is None else frozenset()
+        self._tools[name] = (
+            fn,
+            description,
+            schema or DEFAULT_TOOL_SCHEMA,
+            frozenset(capabilities) if capabilities is not None else inherited_caps,
+        )
 
     async def call(self, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
         if name not in self._tools:
@@ -54,15 +68,22 @@ class ToolRegistry:
             return {"output": f"Error executing {name}: {e}", "error": True}
 
     def list_tools(self) -> dict[str, str]:
-        return {name: desc for name, (_, desc, _) in self._tools.items()}
+        return {name: desc for name, (_, desc, _, _) in self._tools.items()}
 
     def tool_schemas(self) -> dict[str, dict[str, Any]]:
-        return {name: schema for name, (_, _, schema) in self._tools.items()}
+        return {name: schema for name, (_, _, schema, _) in self._tools.items()}
+
+    def tool_capabilities(self, name: str) -> frozenset[str]:
+        record = self._tools.get(name)
+        return record[3] if record is not None else frozenset()
+
+    def tools_with_capability(self, capability: str) -> set[str]:
+        return {name for name in self._tools if capability in self.tool_capabilities(name)}
 
     def tool_descriptions(self) -> str:
         if not self._tools:
             return "No tools available."
-        return "\n".join(f"  - {name}: {desc}" for name, (_, desc, _) in self._tools.items())
+        return "\n".join(f"  - {name}: {desc}" for name, (_, desc, _, _) in self._tools.items())
 
     def load_builtins(self) -> None:
         """Auto-discover and register tools from conscio.tools.* modules."""
@@ -80,7 +101,8 @@ class ToolRegistry:
                         name = attr._tool_name
                         desc = attr._tool_description
                         schema = getattr(attr, "_tool_schema", None)
-                        self.register(name, attr, desc, schema)
+                        capabilities = getattr(attr, "_tool_capabilities", None)
+                        self.register(name, attr, desc, schema, capabilities=capabilities)
             except ImportError:
                 continue
 

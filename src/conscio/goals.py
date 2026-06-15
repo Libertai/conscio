@@ -605,6 +605,50 @@ class GoalStore:
             )
         return influence
 
+    async def defer_influence(
+        self,
+        content: str,
+        *,
+        kind: str = "goal",
+        source: str = "external_content",
+        reasoning: str = "",
+        response: str = "",
+    ) -> Influence:
+        now = time.time()
+        influence = Influence(
+            id=uuid.uuid4().hex,
+            kind=kind,
+            content=content,
+            source=source,
+            status="deferred",
+            appraisal=reasoning,
+            decision="defer",
+            reasoning=reasoning,
+            response=response,
+            created_at=now,
+            updated_at=now,
+        )
+        self.memory.execute(
+            "INSERT INTO influences "
+            "(id, kind, content, source, status, appraisal, decision, reasoning, response, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                influence.id,
+                influence.kind,
+                influence.content,
+                influence.source,
+                influence.status,
+                influence.appraisal,
+                influence.decision,
+                influence.reasoning,
+                influence.response,
+                influence.created_at,
+                influence.updated_at,
+            ),
+        )
+        self.record_action_event("influence_appraised:defer")
+        return influence
+
     @staticmethod
     def _strip_embedding(row: dict[str, Any]) -> dict[str, Any]:
         # Embedding BLOBs never leave the store layer (API/UI rows are JSON).

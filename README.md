@@ -121,9 +121,11 @@ Live suites are paid and double-gated (`--live` plus `CONSCIO_EVAL_LIVE=1`).
 
 ## Quick Start
 
+Public-beta operator documentation starts at [docs/index.md](docs/index.md).
+
 ```bash
-uv venv && source .venv/bin/activate
-uv pip install -e .
+uv sync --frozen
+source .venv/bin/activate
 ```
 
 Run one deterministic offline episode:

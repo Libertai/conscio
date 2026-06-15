@@ -46,6 +46,20 @@ class MotivationConfig:
     stale_block_days: float = 5.0
 
 
+@dataclass(frozen=True)
+class AgentConfig:
+    """Top-level operating posture for public-beta deployments.
+
+    ``research`` keeps the historic conservative defaults. ``autonomous_vm``
+    assumes a dedicated premises VM: broad local agency is normal, while
+    explicit TOML values can still override every derived default.
+    """
+
+    profile: str = "research"
+    premises: str = ""
+    external_side_effects: str = "policy"
+
+
 @dataclass
 class ServiceConfig:
     home: Path = DEFAULT_HOME
@@ -77,6 +91,7 @@ class ServiceConfig:
     shell_timeout: int = 30
     working_directory: Path = field(default_factory=Path.cwd)
     pause_on_error: bool = True
+    agent: AgentConfig = field(default_factory=AgentConfig)
     ablation: AblationFlags = field(default_factory=AblationFlags)
     motivation: MotivationConfig = field(default_factory=MotivationConfig)
     max_ticks: int = 8
@@ -132,6 +147,11 @@ def _as_str_list(value: Any) -> list[str]:
     return [str(value)]
 
 
+def _normalize_profile(value: Any) -> str:
+    profile = str(value or "research").strip().lower().replace("-", "_")
+    return profile or "research"
+
+
 def load_config(path: str | Path | None = None) -> ServiceConfig:
     config_path = Path(path).expanduser() if path else Path(os.environ.get("CONSCIO_CONFIG", DEFAULT_HOME / "config.toml")).expanduser()
     raw: dict[str, Any] = {}
@@ -145,6 +165,18 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
     engine = raw.get("engine", {})
     ablation = raw.get("ablation", {})
     motivation = raw.get("motivation", {})
+    agent_raw = raw.get("agent", {})
+    profile = _normalize_profile(agent_raw.get("profile", "research"))
+    autonomous_vm = profile == "autonomous_vm"
+    agent_cfg = AgentConfig(
+        profile=profile,
+        premises=str(agent_raw.get("premises") or ("dedicated_vm" if autonomous_vm else "")),
+        external_side_effects=str(
+            agent_raw.get("external_side_effects") or ("mostly_free" if autonomous_vm else "policy")
+        ),
+    )
+    unsafe_default = True if autonomous_vm else False
+    working_dir_default = Path("/opt/conscio/work") if autonomous_vm else Path.cwd()
 
     cfg = ServiceConfig(
         home=_as_path(service.get("home"), config_path.parent if config_path.name == "config.toml" else DEFAULT_HOME),
@@ -162,7 +194,7 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         tick_interval=float(service.get("tick_interval", 30.0)),
         consolidation_interval=int(service.get("consolidation_interval", 20)),
         enable_contradiction_check=bool(service.get("enable_contradiction_check", False)),
-        unsafe_autonomy=bool(service.get("unsafe_autonomy", False)),
+        unsafe_autonomy=bool(service.get("unsafe_autonomy", unsafe_default)),
         llm_base_url=str(
             llm.get("base_url")
             or service.get("llm_base_url")
@@ -194,8 +226,9 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         max_actions_per_hour=int(tools.get("max_actions_per_hour", 60)),
         model_tool_rounds=int(tools.get("model_tool_rounds", 32)),
         shell_timeout=int(tools.get("shell_timeout", 30)),
-        working_directory=_as_path(tools.get("working_directory"), Path.cwd()),
+        working_directory=_as_path(tools.get("working_directory"), working_dir_default),
         pause_on_error=bool(service.get("pause_on_error", True)),
+        agent=agent_cfg,
         ablation=AblationFlags(
             attention_gating=bool(ablation.get("attention_gating", True)),
             memory_retrieval=bool(ablation.get("memory_retrieval", True)),
@@ -227,13 +260,19 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
     return cfg
 
 
-def write_default_config(path: str | Path | None = None) -> Path:
+def write_default_config(path: str | Path | None = None, *, profile: str = "research") -> Path:
     config_path = Path(path).expanduser() if path else DEFAULT_HOME / "config.toml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     if config_path.exists():
         return config_path
     api_key = secrets.token_urlsafe(32)
     web_password = secrets.token_urlsafe(24)
+    normalized_profile = _normalize_profile(profile)
+    autonomous_vm = normalized_profile == "autonomous_vm"
+    premises = "dedicated_vm" if autonomous_vm else ""
+    side_effects = "mostly_free" if autonomous_vm else "policy"
+    unsafe_autonomy = "true" if autonomous_vm else "false"
+    working_directory = "/opt/conscio/work" if autonomous_vm else str(Path.cwd())
     text = f"""[service]
 home = "{config_path.parent}"
 host = "127.0.0.1"
@@ -247,8 +286,13 @@ autonomous = true
 tick_interval = 30
 consolidation_interval = 20
 enable_contradiction_check = false
-unsafe_autonomy = false
+unsafe_autonomy = {unsafe_autonomy}
 pause_on_error = true
+
+[agent]
+profile = "{normalized_profile}"
+premises = "{premises}"
+external_side_effects = "{side_effects}"
 
 [llm]
 base_url = ""
@@ -269,7 +313,7 @@ denied = []
 max_actions_per_hour = 60
 model_tool_rounds = 32
 shell_timeout = 30
-working_directory = "{Path.cwd()}"
+working_directory = "{working_directory}"
 
 [engine]
 max_ticks = 8
