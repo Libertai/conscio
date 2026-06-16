@@ -2,9 +2,12 @@
 
 **The consciousness layer for LLM agents.**
 
-Conscio makes LLMs self-observing, goal-driven, and persistent: memory,
-attention, drives, self-monitoring, reflection, and autonomous action in one
-inspectable runtime.
+**Make LLMs self-observing, goal-driven, and persistent.**
+
+Conscio is the consciousness layer for LLM agents: persistent memory, attention,
+drives, self-monitoring, and autonomous action in one inspectable runtime.
+Under the hood, it is a cognitive runtime with memory, attention, prediction,
+self-state, reflection, and tools.
 
 Give an LLM a mind that persists. Start it. Give it a goal. Watch its
 attention, memory, tools, and self-state evolve.
