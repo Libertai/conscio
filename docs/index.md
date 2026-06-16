@@ -28,6 +28,11 @@ a chat feature.
 - [Release Notes](launch/release-notes-public-beta.md)
 - [Known Limits](launch/known-limits.md)
 
+## Science, Limits, Safety
+
+- [Theory Mapping and References](research/theory-and-references.md)
+- [Paper Draft](paper.md)
+
 ## Tutorials
 
 - [Install and Run Local](tutorials/install-and-run-local.md)

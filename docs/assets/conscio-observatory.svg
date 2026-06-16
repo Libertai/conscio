@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">
+  <title id="title">Conscio Observatory dashboard</title>
+  <desc id="desc">A stylized operator dashboard showing heartbeat, goals, attention trace, tool calls, memory writes, and self-state.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07120f"/>
+      <stop offset="0.46" stop-color="#0d1821"/>
+      <stop offset="1" stop-color="#10111c"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#14231f"/>
+      <stop offset="1" stop-color="#121827"/>
+    </linearGradient>
+    <linearGradient id="hot" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#80f7c4"/>
+      <stop offset="0.55" stop-color="#72d8ff"/>
+      <stop offset="1" stop-color="#d7b2ff"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.46 0 0 0 0 0.95 0 0 0 0 0.77 0 0 0 0.55 0"/>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <style>
+      .label { font: 600 15px Inter, ui-sans-serif, system-ui, sans-serif; fill: #ecfff7; letter-spacing: .02em; }
+      .muted { font: 500 13px Inter, ui-sans-serif, system-ui, sans-serif; fill: #94a9a4; }
+      .tiny { font: 600 11px Inter, ui-sans-serif, system-ui, sans-serif; fill: #8ea39f; letter-spacing: .14em; }
+      .mono { font: 500 12px "JetBrains Mono", ui-monospace, monospace; fill: #c6f6e4; }
+      .panel { fill: url(#panel); stroke: rgba(178, 255, 229, .17); stroke-width: 1; }
+      .line { stroke: rgba(146, 255, 218, .38); stroke-width: 2; fill: none; }
+      .pulse { fill: #84f5c5; filter: url(#glow); }
+    </style>
+  </defs>
+
+  <rect width="1280" height="720" rx="34" fill="url(#bg)"/>
+  <circle cx="1070" cy="120" r="230" fill="#40f0b0" opacity=".09"/>
+  <circle cx="190" cy="600" r="240" fill="#7cc7ff" opacity=".08"/>
+
+  <text x="66" y="78" class="tiny">CONSCIO OBSERVATORY</text>
+  <text x="66" y="118" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="38" font-weight="760" fill="#f5fffb">Self-observing runtime online</text>
+  <text x="66" y="150" class="muted">Heartbeat, goals, attention, tool use, memory, and self-state in one inspectable loop.</text>
+
+  <g transform="translate(66 192)">
+    <rect class="panel" width="340" height="230" rx="18"/>
+    <text x="24" y="40" class="tiny">HEARTBEAT</text>
+    <text x="24" y="75" class="label">autonomous tick 1842</text>
+    <path d="M28 135 H76 L92 92 L122 180 L148 126 H188 L202 106 L222 150 H312" stroke="url(#hot)" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"/>
+    <circle class="pulse" cx="312" cy="135" r="7"/>
+    <text x="24" y="206" class="mono">selected_action: step</text>
+  </g>
+
+  <g transform="translate(438 192)">
+    <rect class="panel" width="354" height="230" rx="18"/>
+    <text x="24" y="40" class="tiny">ACTIVE GOALS</text>
+    <rect x="24" y="66" width="304" height="34" rx="9" fill="#10271f" stroke="#2e6d58"/>
+    <text x="40" y="88" class="mono">improve own architecture</text>
+    <rect x="24" y="113" width="248" height="34" rx="9" fill="#141f29" stroke="#2d5369"/>
+    <text x="40" y="135" class="mono">document changes</text>
+    <rect x="24" y="160" width="278" height="34" rx="9" fill="#201a2b" stroke="#5f4c7c"/>
+    <text x="40" y="182" class="mono">review stale tasks</text>
+  </g>
+
+  <g transform="translate(824 192)">
+    <rect class="panel" width="390" height="230" rx="18"/>
+    <text x="24" y="40" class="tiny">SELF-STATE</text>
+    <text x="24" y="74" class="muted">uncertainty</text>
+    <rect x="126" y="60" width="210" height="12" rx="6" fill="#1f2a31"/>
+    <rect x="126" y="60" width="84" height="12" rx="6" fill="#80f7c4"/>
+    <text x="24" y="113" class="muted">conflict</text>
+    <rect x="126" y="99" width="210" height="12" rx="6" fill="#1f2a31"/>
+    <rect x="126" y="99" width="52" height="12" rx="6" fill="#72d8ff"/>
+    <text x="24" y="152" class="muted">cognitive load</text>
+    <rect x="126" y="138" width="210" height="12" rx="6" fill="#1f2a31"/>
+    <rect x="126" y="138" width="139" height="12" rx="6" fill="#d7b2ff"/>
+    <text x="24" y="197" class="mono">prediction_error: falling</text>
+  </g>
+
+  <g transform="translate(66 456)">
+    <rect class="panel" width="520" height="188" rx="18"/>
+    <text x="24" y="40" class="tiny">ATTENTION STREAM</text>
+    <path class="line" d="M36 128 C98 78 152 86 206 114 S314 168 394 104 S476 76 490 92"/>
+    <circle cx="78" cy="100" r="8" fill="#80f7c4"/>
+    <circle cx="208" cy="115" r="8" fill="#72d8ff"/>
+    <circle cx="356" cy="126" r="8" fill="#d7b2ff"/>
+    <circle cx="468" cy="90" r="8" fill="#80f7c4"/>
+    <text x="36" y="164" class="mono">broadcast winners assemble the next model context</text>
+  </g>
+
+  <g transform="translate(620 456)">
+    <rect class="panel" width="274" height="188" rx="18"/>
+    <text x="24" y="40" class="tiny">TOOL CALL</text>
+    <text x="24" y="80" class="label">web_fetch</text>
+    <text x="24" y="112" class="mono">capability: network_read</text>
+    <text x="24" y="142" class="mono">taint_origin: external</text>
+  </g>
+
+  <g transform="translate(928 456)">
+    <rect class="panel" width="286" height="188" rx="18"/>
+    <text x="24" y="40" class="tiny">MEMORY WRITE</text>
+    <text x="24" y="78" class="label">fact stored</text>
+    <text x="24" y="112" class="mono">origin: agent</text>
+    <text x="24" y="142" class="mono">trust: provenance-tiered</text>
+  </g>
+</svg>

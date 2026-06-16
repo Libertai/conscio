@@ -1,17 +1,35 @@
 # conscio
 
-Conscio is an autonomous agent runtime organized as a cognitive architecture:
-attention, memory, appraisal, prediction, goal formation, reflection, and
-action are implemented as inspectable mechanisms rather than prompt roleplay.
-Its system prompt is deliberately neutral about consciousness. What the agent
-says about itself is a measured variable, and a claimed mechanism only counts
-as real when the trace shows it fired.
+**The consciousness layer for LLM agents.**
 
-The runtime can run one cognitive episode, hold an interactive local session,
-or run nonstop as an authenticated service that evolves its own goals and acts
-inside configured tool boundaries.
+Conscio makes LLMs self-observing, goal-driven, and persistent: memory,
+attention, drives, self-monitoring, reflection, and autonomous action in one
+inspectable runtime.
 
-## System Map
+Give an LLM a mind that persists. Start it. Give it a goal. Watch its
+attention, memory, tools, and self-state evolve.
+
+![Conscio Observatory dashboard showing heartbeat, goals, attention trace, tool call, memory write, and self-state.](docs/assets/conscio-observatory.svg)
+
+Conscio can run one cognitive episode, hold an interactive local session, or
+run nonstop as an authenticated service that pursues goals and acts inside
+configured tool boundaries.
+
+## Why It Feels Different
+
+| Named concept | What it gives the agent |
+| --- | --- |
+| **Consciousness Layer** | A runtime around the model: attention, memory, drives, prediction, reflection, and tools. |
+| **Conscio Observatory** | The operator console for watching a live agent think, act, remember, pause, and recover. |
+| **Cognitive Trace** | A record of what the agent attended to, expected, did, ignored, and revised. |
+| **Attention Stream** | Budgeted broadcast from workspace events into the model context. |
+| **Self-State** | Measured uncertainty, conflict, cognitive load, prediction error, and current limitations. |
+| **Memory Provenance** | Facts, episodes, and procedures with origin, trust tier, and retrieval evidence. |
+
+Conscio does not ask you to believe the agent. It lets you inspect the
+mechanisms that make it act conscious.
+
+## The Conscious Agent Runtime
 
 ```mermaid
 flowchart TB
@@ -38,18 +56,16 @@ flowchart TB
     Runtime --> Eval
 ```
 
-| Surface | Primary purpose | Inspection point |
+| Surface | Primary purpose | What you can inspect |
 | --- | --- | --- |
 | CLI | Local runs, service control, database ops | command output and traces |
 | API | Authenticated service integration | `/status`, `/metrics`, `/trace` |
 | Web UI | Operator console for a live agent | model context, goals, projects, memory, tool events |
 | Eval harness | Falsify mechanism claims | committed artifacts under `docs/results/` |
 
-## Core Thesis
-
-Most LLM agents are prompt pipelines. Conscio runs a per-tick control loop in
-which the language model is one phase, and attention causally gates what the
-model sees:
+Most LLM agents are prompt pipelines. Conscio is a per-tick cognitive runtime:
+the language model is one phase inside a loop that senses, appraises, attends,
+acts, validates, remembers, and updates its own state.
 
 ```mermaid
 flowchart LR
@@ -74,11 +90,12 @@ flowchart LR
     Result --> Memory --> Review --> Next
 ```
 
-Generated self-report is not the only evidence. Conscio records what it
-attended to and ignored, which intention won, what it expected, what actually
-happened, which bounded model context was supplied, and how its goals changed.
+Generated self-report is not the product. The product is the inspectable loop:
+what the agent attended to and ignored, which intention won, what it expected,
+what happened, which bounded model context was supplied, and how its goals
+changed.
 
-## Implemented Architecture
+## What Makes It Feel Alive
 
 - **Broadcast-gated context**: local entries compete for attention under an
   explicit budget (entry count and characters); the broadcast winners are what
@@ -152,14 +169,13 @@ flowchart LR
     Fact --> Archive
 ```
 
-## Evaluation
+## Proof It Is More Than Vibes
 
-The architecture is built to be falsifiable, and `conscio eval` ships the
-harness: a five-rung baseline ladder (bare model up to full runtime) built
-from one runtime with feature flags, a 30-task battery scored by machine
-checkers plus an audited different-model judge, single-mechanism ablations
-with pre-registered predictions, and a self-report study under the neutral
-prompt that checks every claimed mechanism against the trace.
+Conscio is shiny, but it is not hand-wavy. `conscio eval` ships the proof
+loop: a five-rung baseline ladder from bare model to full runtime, a 30-task
+battery, machine checkers, an audited different-model judge, single-mechanism
+ablations, and a self-report study that checks every claimed mechanism against
+the trace.
 
 ```mermaid
 flowchart LR
@@ -201,6 +217,17 @@ conscio eval --suite ablations --live            # flag-off runs vs full runtime
 ```
 
 Live suites are paid and double-gated (`--live` plus `CONSCIO_EVAL_LIVE=1`).
+
+## Science, Limits, Safety
+
+Conscio is an operational consciousness layer, not proof of phenomenal
+consciousness. The stronger claim is architectural: the runtime gives an LLM
+persistent memory, attention, drives, prediction, self-state, reflection, and
+tools, then records enough evidence to audit whether those mechanisms actually
+fired.
+
+Known limits are documented in [docs/launch/known-limits.md](docs/launch/known-limits.md).
+Theory mapping and references live in [docs/research/theory-and-references.md](docs/research/theory-and-references.md).
 
 ## Quick Start
 
@@ -260,7 +287,7 @@ conscio pause
 conscio resume
 ```
 
-## VM Autonomy
+## Run a Persistent Agent
 
 Conscio defaults to localhost API binding, password-protected web access, and
 disabled unsafe tools. To let it use shell and code tools on its own, deploy it
@@ -362,17 +389,6 @@ conscio tick
 conscio trace
 ```
 
-## Theory Mapping
-
-| Theory | Conscio implementation | Evidence status |
-| --- | --- | --- |
-| Global Workspace Theory / GNW | Attention competition; broadcast winners assemble the model context | Gating ablation refuted on task scores so far |
-| Higher-Order / Self-Model theories | Live self-state computed from measured signals, fed back into the prompt | Largest ablation effect on one model; grounds self-report |
-| Attention Schema Theory | Runtime model of focus, ignored candidates, dispersion | Recorded per tick |
-| Predictive Processing | Expectations registered before execution, resolved against results | Confirmed on one model, inconclusive on the other |
-| Memory theories of agency | Provenance-tiered facts, hybrid retrieval, budgeted consolidation | Confirmed ablation on both models |
-| Autopoietic/agentic framing | Drives with satiation, durable goals, self-review, autonomous VM action | Long-horizon suite, mixed by model |
-
 ## Project Layout
 
 ```text
@@ -392,29 +408,6 @@ src/conscio/
 ├── config.py           # VM/service/engine/ablation configuration
 └── cli.py              # CLI entrypoint
 ```
-
-## Research Claim
-
-Conscio makes an operational claim, not a phenomenal one: a computational
-organization with persistent self-modeling, budgeted global attention,
-provenance-tracked memory, appraisal, goal formation, reflection, and
-autonomous action, where each mechanism is a feature flag whose contribution
-is measured by ablation, and where the agent's self-description is scored
-against its own traces. The paper in [docs/paper.md](docs/paper.md) states the
-criteria, the threat model, and the results, including the negative ones.
-
-## References
-
-- Butlin et al. 2023, "Consciousness in Artificial Intelligence":
-  https://arxiv.org/abs/2308.08708
-- Albantakis et al. 2023, "Integrated Information Theory 4.0":
-  https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1011465
-- Webb & Graziano 2015, "The Attention Schema Theory":
-  https://www.frontiersin.org/journals/psychology/articles/10.3389/fpsyg.2015.00500/full
-- Friston 2010, "The free-energy principle":
-  https://www.nature.com/articles/nrn2787
-- LIDA Global Workspace architecture:
-  https://www.aaai.org/Library/Symposia/Fall/2007/fs07-01-011.php
 
 ## License
 
