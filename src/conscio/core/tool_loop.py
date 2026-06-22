@@ -410,9 +410,6 @@ class ToolLoop:
                 limit_reached=step.limit_reached,
             )
 
-    async def _execute_tool(self, request: ToolRequest, workspace: Workspace) -> dict[str, Any]:
-        return await _execute_tool(self.tools, request, workspace)
-
     @staticmethod
     def _tool_requests(
         response: dict[str, Any], known_names: set[str] | None = None

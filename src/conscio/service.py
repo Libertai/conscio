@@ -654,11 +654,6 @@ class ConscioService:
             autonomous=True,
         )
 
-    async def run_event(self, event: InputEvent) -> EpisodeResult:
-        result = await self._process_event(event)
-        assert result is not None
-        return result
-
     async def _submit_event(self, event: InputEvent, *, autonomous: bool = False) -> EpisodeResult | None:
         if not self.running:
             await self.start(background=False)
@@ -1179,7 +1174,3 @@ class ConscioService:
             "last_autonomous_action": self.last_autonomous_action,
             "episode_taint": self.episode_taint.to_dict(),
         }
-
-
-def create_service(config_path: str | Path | None = None) -> ConscioService:
-    return ConscioService(load_config(config_path))

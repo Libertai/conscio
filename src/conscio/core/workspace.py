@@ -177,34 +177,6 @@ class Workspace:
         for entry in entries:
             self.broadcast(entry)
 
-    def write_and_broadcast(
-        self,
-        content: str,
-        source: str,
-        type: EntryType = EntryType.OBSERVATION,
-        priority: int = 0,
-        metadata: dict[str, Any] | None = None,
-        salience: float | None = None,
-        confidence: float = 0.5,
-        novelty: float = 0.0,
-        urgency: float = 0.0,
-        evidence: list[str] | None = None,
-    ) -> WorkspaceEntry:
-        entry = self.write(
-            content,
-            source,
-            type,
-            priority,
-            metadata,
-            salience=salience,
-            confidence=confidence,
-            novelty=novelty,
-            urgency=urgency,
-            evidence=evidence,
-        )
-        self.broadcast(entry)
-        return entry
-
     def read(
         self,
         limit: int = 20,
@@ -240,10 +212,6 @@ class Workspace:
     @property
     def local_entries(self) -> list[WorkspaceEntry]:
         return [e for e in self._entries if e.visibility == Visibility.LOCAL]
-
-    def unattended(self, limit: int = 20) -> list[WorkspaceEntry]:
-        entries = [e for e in self._entries if not e.attended]
-        return sorted(entries, key=lambda e: -e.timestamp)[:limit]
 
     @property
     def size(self) -> int:

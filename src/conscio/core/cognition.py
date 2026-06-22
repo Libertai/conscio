@@ -531,33 +531,6 @@ class ActionSelector:
             return TickDecision(ActionKind.STEP, "session live; continue working")
         return TickDecision(ActionKind.WAIT, "nothing to do")
 
-    def select_intention(
-        self,
-        intentions: list[Intention],
-        state: SelfState,
-    ) -> Intention:
-        """Legacy candidate-intention arbitration used by the interim runtime loop."""
-        if not intentions:
-            return Intention(
-                kind=ActionKind.WAIT,
-                content="No actionable intention selected.",
-                source="action_selector",
-                confidence=0.2,
-            )
-        if state.conflict_level >= 0.7 or state.prediction_error >= 0.7:
-            reflective = [i for i in intentions if i.kind == ActionKind.REFLECT]
-            if reflective:
-                return max(reflective, key=lambda i: i.confidence)
-        def score(i: Intention) -> float:
-            return (
-                i.confidence * 0.35
-                + i.expected_value * 0.25
-                + i.urgency * 0.20
-                - i.risk * 0.20
-                - state.uncertainty * 0.10
-            )
-        return max(intentions, key=score)
-
 
 # The legacy (v1) post-hoc PredictionEngine is gone: the v2 engine in
 # ``core/prediction.py`` forms expectations *before* execution and resolves

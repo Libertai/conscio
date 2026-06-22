@@ -36,11 +36,6 @@ class TextRequest(BaseModel):
     content: str
 
 
-class ChatMessageRequest(BaseModel):
-    content: str
-    session_id: str | None = None
-
-
 class ChatSessionCreateRequest(BaseModel):
     title: str | None = None
 

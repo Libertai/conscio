@@ -78,14 +78,6 @@ class ToolRegistry:
         record = self._tools.get(name)
         return record[3] if record is not None else frozenset()
 
-    def tools_with_capability(self, capability: str) -> set[str]:
-        return {name for name in self._tools if capability in self.tool_capabilities(name)}
-
-    def tool_descriptions(self) -> str:
-        if not self._tools:
-            return "No tools available."
-        return "\n".join(f"  - {name}: {desc}" for name, (_, desc, _, _) in self._tools.items())
-
     def load_builtins(self) -> None:
         """Auto-discover and register tools from conscio.tools.* modules."""
         import conscio.tools

@@ -477,17 +477,6 @@ class MemoryStore:
         )
         return [self._episode_from_row(row) for row in rows]
 
-    async def recent_episodes_for_goal(self, goal_id: str, limit: int = 10) -> list[dict]:
-        rows = self._fetchall(
-            "SELECT * FROM episodes WHERE goal_id = ? ORDER BY created_at DESC LIMIT ?",
-            (goal_id, limit),
-        )
-        return [self._episode_from_row(row) for row in rows]
-
-    async def get_episode(self, episode_id: str) -> dict | None:
-        row = self.fetchone("SELECT * FROM episodes WHERE id = ?", (episode_id,))
-        return self._episode_from_row(row) if row else None
-
     async def count_episodes(self) -> int:
         rows = self._fetchall("SELECT COUNT(*) AS count FROM episodes")
         return int(rows[0]["count"]) if rows else 0
@@ -777,45 +766,9 @@ class MemoryStore:
             (name, description, steps, trigger, origin, now, now),
         )
 
-    async def record_procedure_outcome(self, name: str, success: bool) -> None:
-        column = "success_count" if success else "failure_count"
-        self._execute(
-            f"UPDATE procedures SET {column} = {column} + 1, updated_at = ? WHERE name = ?",
-            (time.time(), name),
-        )
-
     async def list_procedures(self) -> list[dict]:
         return self._fetchall(
             "SELECT * FROM procedures ORDER BY success_count DESC, updated_at DESC",
-        )
-
-    # ── Thoughts (inner monologue persistence) ───────────────────
-
-    async def save_thoughts(self, session_id: str, thoughts: list[dict]) -> None:
-        ops = []
-        for t in thoughts:
-            ops.append((
-                "INSERT OR REPLACE INTO thoughts "
-                "(id, session_id, parent_id, type, question, answer, created_at, depth) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    t["id"],
-                    session_id,
-                    t.get("parent_id"),
-                    t["type"],
-                    t.get("question", ""),
-                    t.get("answer", ""),
-                    t.get("timestamp", time.time()),
-                    t.get("depth", 0),
-                ),
-            ))
-        if ops:
-            self._execute_many(ops)
-
-    async def load_thoughts(self, session_id: str) -> list[dict]:
-        return self._fetchall(
-            "SELECT * FROM thoughts WHERE session_id = ? ORDER BY created_at",
-            (session_id,),
         )
 
     # ── Chat (operator console persistence) ──────────────────────

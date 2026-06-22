@@ -118,23 +118,6 @@ class AutonomyStore:
         )
         return project
 
-    async def ensure_next_task(
-        self,
-        project_id: str,
-        description: str,
-        *,
-        tool_name: str | None = None,
-        tool_args: dict[str, Any] | None = None,
-    ) -> Task:
-        row = self.memory.fetchone(
-            "SELECT * FROM tasks WHERE project_id = ? AND status IN ('pending', 'active') "
-            "ORDER BY created_at LIMIT 1",
-            (project_id,),
-        )
-        if row:
-            return self._task_from_row(row)
-        return await self.add_task(project_id, description, tool_name=tool_name, tool_args=tool_args)
-
     async def add_task(
         self,
         project_id: str,

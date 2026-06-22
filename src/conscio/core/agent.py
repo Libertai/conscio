@@ -50,11 +50,6 @@ class ConsciousAgent:
     async def close(self) -> None:
         await self.runtime.close()
 
-    async def observe(self, raw_input: str, source: str = "user") -> dict[str, Any]:
-        event = InputEvent(content=raw_input, source=source)
-        self.runtime._ingest_event(event)
-        return {"source": source, "raw": raw_input, "observation": raw_input}
-
     async def cycle(self, user_input: str, source: str = "user") -> CycleResult:
         result = await self.runtime.run_episode(InputEvent(content=user_input, source=source))
         return _cycle_result_from_episode(result)
