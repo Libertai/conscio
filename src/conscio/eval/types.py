@@ -132,6 +132,8 @@ class RunMeta:
     total_judge_calls: int = 0
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
+    judge_prompt_tokens: int = 0
+    judge_completion_tokens: int = 0
     cost_estimate_usd: float = 0.0
     wall_time_s: float = 0.0
 

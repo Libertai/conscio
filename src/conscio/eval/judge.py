@@ -126,6 +126,8 @@ class Judge:
         self.agent_model = agent_model
         self.log_path = Path(log_path)
         self.calls = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
 
     async def verdict(
         self,
@@ -161,6 +163,7 @@ class Judge:
         messages: list[dict[str, Any]],
     ) -> tuple[str, dict[str, Any] | None]:
         self.calls += 1
+        self.prompt_tokens += sum(len(str(m.get("content") or "")) // 4 for m in messages)
         try:
             response = await self.client.chat_async(
                 messages,
@@ -171,6 +174,7 @@ class Judge:
             raw = str(response.get("content") or "")
         except Exception as exc:  # noqa: BLE001 — recorded, never crashes the run
             raw = f"<judge call failed: {type(exc).__name__}: {exc}>"
+        self.completion_tokens += max(1, len(raw) // 4)
         parsed = _extract_json_object(raw)
         self._log(
             {

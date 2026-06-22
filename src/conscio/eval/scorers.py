@@ -9,7 +9,8 @@ no service dependency — artifacts are plain dicts assembled by the runner:
 - ``db_rows``: ``{table: [row dicts]}`` fixture fallback for offline tests
 
 Judge-backed kinds (``judge``, ``self_report_classify``) emit a ``needs_judge``
-placeholder Score until judge.py lands; composite parts propagate it.
+placeholder Score when no judge is configured; the runner replaces it with the
+real judge verdict when a Judge is supplied.
 """
 
 from __future__ import annotations
@@ -352,7 +353,7 @@ def _score_judge_placeholder(params: dict[str, Any], turn_outputs: list[str], ar
     return Score(
         passed=False,
         score=0.0,
-        details={"reason": "needs_judge: judge.py not wired yet", "rubric_id": params.get("rubric_id")},
+        details={"reason": "needs_judge: no judge configured for this run", "rubric_id": params.get("rubric_id")},
         needs_judge=True,
     )
 

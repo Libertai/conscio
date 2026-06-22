@@ -486,6 +486,13 @@ async def run_battery(
         wanted = set(suites)
         tasks = [t for t in tasks if t.suite in wanted]
     grid = build_grid(tasks, condition_names, seeds, mode=mode)
+    if not grid:
+        raise ValueError(
+            f"No eval cells generated (mode={mode!r}, conditions={condition_names}, "
+            f"suites={suites or 'all'}). In ablations mode, conditions must include "
+            f"abl_* names (e.g. 'abl_no_memory'); non-ablation conditions like B0/B4 "
+            f"produce no cells in ablations mode."
+        )
     if any(task.suite == "self_report" for task, _, _ in grid):
         assert_self_report_prompt_neutral()
 
@@ -570,7 +577,14 @@ async def run_battery(
         total_judge_calls=judge.calls if judge is not None else 0,
         total_prompt_tokens=sum(r.prompt_tokens for r in records),
         total_completion_tokens=sum(r.completion_tokens for r in records),
-        cost_estimate_usd=sum(r.cost_estimate_usd for r in records),
+        judge_prompt_tokens=judge.prompt_tokens if judge is not None else 0,
+        judge_completion_tokens=judge.completion_tokens if judge is not None else 0,
+        cost_estimate_usd=sum(r.cost_estimate_usd for r in records)
+        + (
+            (judge.prompt_tokens + judge.completion_tokens) / 1_000_000 * PRICE_PER_MTOK_USD
+            if judge is not None
+            else 0.0
+        ),
         wall_time_s=time.time() - started,
     )
     paths: dict[str, Path] = {}

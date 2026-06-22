@@ -293,6 +293,9 @@ async def _run_live_eval(args: argparse.Namespace) -> None:
     table.add_row("errored", str(errored))
     table.add_row("agent calls", str(result.meta.total_agent_calls))
     table.add_row("judge calls", str(result.meta.total_judge_calls))
+    table.add_row("agent tokens", f"{result.meta.total_prompt_tokens + result.meta.total_completion_tokens:,}")
+    if result.meta.total_judge_calls:
+        table.add_row("judge tokens", f"{result.meta.judge_prompt_tokens + result.meta.judge_completion_tokens:,}")
     table.add_row("est. cost", f"${result.meta.cost_estimate_usd:.2f}")
     table.add_row("wall time", f"{result.meta.wall_time_s:.0f}s")
     console.print(table)
