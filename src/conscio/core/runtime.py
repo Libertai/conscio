@@ -359,7 +359,9 @@ class CognitiveRuntime:
         episode_id = uuid.uuid4().hex  # canonical episode id (memory provenance)
         carried = self.workspace.begin_episode(episode_id)
         self._reset_modules_for_episode()
-        self.self_state.conflict_level *= 0.5  # decay, not reset
+        # conflict_level carries over via workspace CONFLICT entries (unresolved
+        # conflicts are re-tagged to the new episode by begin_episode), not via
+        # the self-state field — update_tick recomputes it from fresh signals.
         self.prediction.reset_episode()
         self.executor.reset()
         start = time.time()

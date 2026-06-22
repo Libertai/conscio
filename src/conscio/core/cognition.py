@@ -49,7 +49,7 @@ class SelfState:
     |---|---|---|
     | ``active_goal`` | service (``start``/``_plan_and_act``) | AppraisalSystem goal-overlap, prompt CURRENT_STATE |
     | ``uncertainty`` | ``update_tick()`` each tick: ``0.45*prediction_error_ema + 0.35*tool_failure_rate + 0.20*(1 - attention_dispersion)``, blended as an EMA | ``AttentionController.score`` (uncertainty bonus), ActionSelector |
-    | ``conflict_level`` | ``update_tick()``: ``min(1, 0.5*fresh + 0.25*unresolved)``; decays ``×0.5`` at episode start instead of reset-to-0 | ActionSelector reflect path |
+    | ``conflict_level`` | ``update_tick()``: ``min(1, 0.5*fresh + 0.25*unresolved)``; carryover is via workspace CONFLICT entries (re-tagged to the new episode by ``begin_episode``), not via the self-state field | ActionSelector reflect path |
     | ``cognitive_load`` | ``update_load(used_chars, budget)`` after each prompt assembly (context budget fraction) | AttentionController (raises min-score cutoff when > 0.8), self_state dict, prompt |
     | ``prediction_error`` | PredictionEngine EMA on each resolution (set via ``update_tick``) | ActionSelector, attention conflict bonus |
     | ``attention_focus`` | ``AttentionController.attend`` | prompt, api |

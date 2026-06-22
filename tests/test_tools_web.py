@@ -108,7 +108,9 @@ class WebToolTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(url, "https://example.com")
             return FETCH_PAGE
 
-        with patch.object(web, "_run_libertai", fake_run), patch.object(web, "_http_get", fake_get):
+        with patch.object(web, "_run_libertai", fake_run), \
+             patch.object(web, "_http_get", fake_get), \
+             patch.object(web, "_resolve_host", lambda h, p: ["93.184.215.14"]):
             result = await web.web_fetch("https://example.com")
 
         self.assertFalse(result["error"])
@@ -209,6 +211,32 @@ class WebToolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["error"])
         self.assertIn("redirect.example", result["output"])
+
+    def test_tool_env_strips_secret_env_vars(self) -> None:
+        from conscio.tools.env import _is_secret_env
+
+        with patch.dict("os.environ", {
+            "CONSCIO_API_KEY": "secret1",
+            "OPENAI_API_KEY": "secret2",
+            "LIBERTAI_API_KEY": "secret3",
+            "CONSCIO_WEB_PASSWORD": "secret4",
+            "DATABASE_TOKEN": "secret5",
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/tmp",
+        }):
+            env = tool_env()
+
+        self.assertNotIn("CONSCIO_API_KEY", env)
+        self.assertNotIn("OPENAI_API_KEY", env)
+        self.assertNotIn("LIBERTAI_API_KEY", env)
+        self.assertNotIn("CONSCIO_WEB_PASSWORD", env)
+        self.assertNotIn("DATABASE_TOKEN", env)
+        self.assertIn("PATH", env)
+        self.assertIn("HOME", env)
+        self.assertTrue(_is_secret_env("CONSCIO_API_KEY"))
+        self.assertTrue(_is_secret_env("SOME_TOKEN"))
+        self.assertFalse(_is_secret_env("PATH"))
+        self.assertFalse(_is_secret_env("HOME"))
 
 
 if __name__ == "__main__":

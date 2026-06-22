@@ -749,7 +749,7 @@ class MemoryStore:
     async def recent_facts(self, limit: int = 10) -> list[dict]:
         rows = self._fetchall(
             "SELECT id, fact, origin, trust, confidence, status, created_at, updated_at "
-            "FROM facts WHERE status = 'active' ORDER BY updated_at DESC LIMIT ?",
+            "FROM facts WHERE status = 'active' AND trust > 0 ORDER BY updated_at DESC LIMIT ?",
             (limit,),
         )
         return [{**row, "source": row["origin"]} for row in rows]
@@ -892,11 +892,19 @@ class MemoryStore:
     # ── Full-text search ─────────────────────────────────────────
 
     async def search(self, query: str, limit: int = 20) -> list[dict]:
-        return self._fetchall(
-            "SELECT content, memory_type, ref_id, rank FROM memory_fts "
-            "WHERE memory_fts MATCH ? ORDER BY rank LIMIT ?",
-            (query, limit),
-        )
+        from conscio.memory.retrieval import build_fts_query
+
+        fts_query = build_fts_query(query, mode="or")
+        if not fts_query:
+            return []
+        try:
+            return self._fetchall(
+                "SELECT content, memory_type, ref_id, rank FROM memory_fts "
+                "WHERE memory_fts MATCH ? ORDER BY rank LIMIT ?",
+                (fts_query, limit),
+            )
+        except sqlite3.OperationalError:
+            return []
 
     # ── Context assembly ─────────────────────────────────────────
 

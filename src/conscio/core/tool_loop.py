@@ -336,7 +336,9 @@ class ToolLoopSession:
                 for entry in workspace.read(limit=100, type_filter={EntryType.OBSERVATION})
                 if entry.source == "tool"
             ]
-            content = observations[-1] if observations else "Tool-use limit reached before a final answer."
+            # workspace.read sorts by (-priority, -timestamp), so [0] is the
+            # highest-priority most-recent tool observation.
+            content = observations[0] if observations else "Tool-use limit reached before a final answer."
         self.messages.append({"role": "assistant", "content": content})
         return StepResult(kind="final", text=content, rounds_used=rounds_this_step, limit_reached=True)
 
@@ -462,7 +464,9 @@ class ToolLoop:
 
 
 def latest_tool_observation(workspace: Workspace, name: str) -> WorkspaceEntry | None:
-    for entry in reversed(workspace.read(limit=100, type_filter={EntryType.OBSERVATION})):
+    # workspace.read sorts by (-priority, -timestamp); the first matching
+    # entry is the highest-priority most-recent one (the actual "latest").
+    for entry in workspace.read(limit=100, type_filter={EntryType.OBSERVATION}):
         if entry.source == "tool" and entry.metadata.get("tool") == name:
             return entry
     return None

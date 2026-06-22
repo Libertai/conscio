@@ -228,6 +228,35 @@ class MemoryV2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].fact, "Database password rotation happens monthly.")
 
+    async def test_recent_facts_excludes_quarantined(self) -> None:
+        memory = self._store(embedder=None)
+        await memory.initialize()
+        try:
+            await memory.add_fact("User-stated fact one.", origin="user")
+            await memory.add_fact("Agent-stated fact two.", origin="agent")
+            await memory.add_fact("Quarantined fact three.", origin="quarantined")
+            recent = await memory.recent_facts(limit=10)
+        finally:
+            await memory.close()
+
+        trusts = [row["trust"] for row in recent]
+        self.assertNotIn(0, trusts)
+        self.assertTrue(all(row["trust"] > 0 for row in recent))
+        self.assertEqual(len(recent), 2)
+
+    async def test_search_handles_special_fts_characters(self) -> None:
+        memory = self._store(embedder=None)
+        await memory.initialize()
+        try:
+            await memory.add_fact("The API endpoint is ready.", origin="user")
+            await memory.add_fact("Docker containers restart cleanly.", origin="agent")
+            # These would raise sqlite3.OperationalError with raw MATCH.
+            for bad_query in ["(", ":", "*", ")", "OR", '"', "AND"]:
+                results = await memory.search(bad_query, limit=10)
+                self.assertIsInstance(results, list)
+        finally:
+            await memory.close()
+
     async def test_contradiction_judge_marks_lower_trust_loser(self) -> None:
         base = _unit(0)
         embedder = FixedEmbedder({

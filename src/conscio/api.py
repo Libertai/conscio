@@ -19,6 +19,15 @@ from conscio.webui import create_web_router
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
+# API clients may submit messages/influences as "user" (default, executable)
+# or "system" (observation-only). They must not mint "autonomous" or "tool"
+# provenance — that would let an API caller forge the agent's own actions.
+_ALLOWED_API_SOURCES = frozenset({"user", "system"})
+
+
+def _validated_source(source: str) -> str:
+    return source if source in _ALLOWED_API_SOURCES else "user"
+
 
 class MessageRequest(BaseModel):
     content: str
@@ -37,7 +46,11 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
         expected = svc.config.api_key
         if not expected:
             raise HTTPException(status_code=500, detail="API key is not configured")
-        if not hmac.compare_digest(authorization or "", f"Bearer {expected}"):
+        # Encode to bytes so a non-ASCII Authorization header raises a clean
+        # 401 instead of a TypeError → 500 (matches web/auth.py hardening).
+        provided = (authorization or "").encode("utf-8", "replace")
+        wanted = f"Bearer {expected}".encode("utf-8", "replace")
+        if not hmac.compare_digest(provided, wanted):
             raise HTTPException(status_code=401, detail="invalid API key")
 
     @asynccontextmanager
@@ -64,7 +77,7 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
 
     @app.post("/message", dependencies=[Depends(require_auth)])
     async def message(req: MessageRequest) -> dict[str, Any]:
-        result = await svc.submit_message(req.content, source=req.source)
+        result = await svc.submit_message(req.content, source=_validated_source(req.source))
         return {
             "output": result.output,
             "selected_action": result.selected_action,
@@ -75,11 +88,11 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
 
     @app.post("/influence/goal", dependencies=[Depends(require_auth)])
     async def influence_goal(req: InfluenceRequest) -> dict[str, Any]:
-        return await svc.submit_influence(req.content, kind="goal", source=req.source)
+        return await svc.submit_influence(req.content, kind="goal", source=_validated_source(req.source))
 
     @app.post("/influence/constraint", dependencies=[Depends(require_auth)])
     async def influence_constraint(req: InfluenceRequest) -> dict[str, Any]:
-        return await svc.submit_influence(req.content, kind="constraint", source=req.source)
+        return await svc.submit_influence(req.content, kind="constraint", source=_validated_source(req.source))
 
     @app.post("/control/pause", dependencies=[Depends(require_auth)])
     async def pause() -> dict[str, Any]:

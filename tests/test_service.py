@@ -670,7 +670,29 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(denied.status_code, 401)
         self.assertEqual(allowed.status_code, 200)
 
-    async def test_web_ui_requires_password_session(self) -> None:
+    async def test_api_auth_uses_bytesafe_comparison(self) -> None:
+        import hmac
+
+        # Verify the encoding pattern used by require_auth doesn't raise
+        # TypeError on non-ASCII input (the old str-based compare_digest did).
+        provided = "Bearer kěy".encode("utf-8", "replace")
+        wanted = "Bearer test-key".encode("utf-8", "replace")
+        # Must not raise; result is False (mismatch).
+        self.assertFalse(hmac.compare_digest(provided, wanted))
+        # Correct key still matches.
+        self.assertTrue(hmac.compare_digest(
+            "Bearer test-key".encode("utf-8", "replace"),
+            "Bearer test-key".encode("utf-8", "replace"),
+        ))
+
+    async def test_api_source_validation_coerces_forbidden_sources(self) -> None:
+        from conscio.api import _validated_source
+
+        self.assertEqual(_validated_source("user"), "user")
+        self.assertEqual(_validated_source("system"), "system")
+        self.assertEqual(_validated_source("autonomous"), "user")
+        self.assertEqual(_validated_source("tool"), "user")
+        self.assertEqual(_validated_source(""), "user")
         try:
             import httpx
             from conscio.api import create_app

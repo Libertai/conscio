@@ -72,7 +72,11 @@ def _validate_url_basic(url: str) -> tuple[bool, str]:
 
 
 def _validate_url_full(url: str) -> tuple[bool, str]:
-    """Full validation including DNS resolution; rejects hosts resolving to private addresses."""
+    """Full validation including DNS resolution; rejects hosts resolving to private addresses.
+
+    Synchronous — blocks the event loop on DNS. Prefer ``_validate_url_full_async``
+    from async code.
+    """
     ok, reason = _validate_url_basic(url)
     if not ok:
         return False, reason
@@ -85,6 +89,28 @@ def _validate_url_full(url: str) -> tuple[bool, str]:
         pass
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     addresses = _resolve_host(host, port)
+    if not addresses:
+        return False, f"DNS resolution failed for host '{host}'."
+    for address in addresses:
+        if _is_unsafe_address(address):
+            return False, f"Host '{host}' resolves to blocked address {address}."
+    return True, ""
+
+
+async def _validate_url_full_async(url: str) -> tuple[bool, str]:
+    """Full validation with DNS resolution offloaded to a thread (non-blocking)."""
+    ok, reason = _validate_url_basic(url)
+    if not ok:
+        return False, reason
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    try:
+        ipaddress.ip_address(host)
+        return True, ""
+    except ValueError:
+        pass
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    addresses = await asyncio.to_thread(_resolve_host, host, port)
     if not addresses:
         return False, f"DNS resolution failed for host '{host}'."
     for address in addresses:
@@ -256,7 +282,7 @@ async def _http_get(url: str) -> str:
     current = url
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=False, headers=headers) as client:
         for _ in range(_MAX_REDIRECTS + 1):
-            ok, reason = _validate_url_full(current)
+            ok, reason = await _validate_url_full_async(current)
             if not ok:
                 raise ValueError(reason)
             response = await client.get(current)
@@ -429,7 +455,7 @@ async def web_fetch(
     url = url if url is not None else input
     if not url:
         return {"output": "No URL provided.", "error": True}
-    ok, reason = _validate_url_basic(url)
+    ok, reason = await _validate_url_full_async(url)
     if not ok:
         return {"output": reason, "error": True}
     try:

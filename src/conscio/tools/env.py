@@ -10,9 +10,23 @@ _TOOL_PATH_PREFIXES = (
     "/home/conscio/.local/bin",
 )
 
+# Env vars whose names contain these substrings are stripped from the
+# subprocess environment so that a model with shell/code access cannot
+# exfiltrate the service's own secrets (API keys, passwords, tokens).
+_SECRET_ENV_PATTERNS = ("_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_PASS", "_CREDENTIAL")
+
+
+def _is_secret_env(name: str) -> bool:
+    upper = name.upper()
+    return any(pat in upper for pat in _SECRET_ENV_PATTERNS)
+
 
 def tool_env() -> dict[str, str]:
-    env = dict(os.environ)
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not _is_secret_env(key)
+    }
     existing = env.get("PATH", "")
     parts = [path for path in _TOOL_PATH_PREFIXES if path]
     parts.extend(path for path in existing.split(os.pathsep) if path and path not in parts)
