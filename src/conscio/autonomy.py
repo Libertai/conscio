@@ -256,8 +256,17 @@ class AutonomyStore:
         for row in rows:
             task = asdict(self._task_from_row(row))
             if float(row["updated_at"]) < block_cutoff:
-                await self.update_task(row["id"], status="blocked", result="auto-blocked: stale")
-                await self.record_action("task_auto_blocked")
+                block_ts = time.time()
+                self.memory.transaction([
+                    (
+                        "UPDATE tasks SET status = ?, result = ?, updated_at = ? WHERE id = ?",
+                        ("blocked", "auto-blocked: stale", block_ts, row["id"]),
+                    ),
+                    (
+                        "INSERT INTO action_events (kind, created_at) VALUES (?, ?)",
+                        ("task_auto_blocked", block_ts),
+                    ),
+                ])
                 task["status"] = "blocked"
                 task["result"] = "auto-blocked: stale"
                 blocked.append(task)

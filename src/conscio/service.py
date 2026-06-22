@@ -44,6 +44,12 @@ _SELF_MANAGEMENT_TOOLS = {
 _ADD_ONLY_TICK_LIMIT = 3
 _REDACT_KEYS = ("password", "token", "secret", "api_key", "apikey", "key")
 
+# In-memory episode list and on-disk event-file caps to prevent unbounded
+# growth in long-running services. The SQLite store is the source of truth;
+# these are just fast-access caches / audit files.
+_MAX_IN_MEMORY_EPISODES = 200
+_MAX_EVENT_FILES = 500
+
 
 @dataclass
 class EpisodeTaint:
@@ -988,7 +994,7 @@ class ConscioService:
             current_task=current_task,
             last_autonomous_action=self.last_autonomous_action,
             actions_last_hour=await self.autonomy.count_recent_actions("tool"),
-            episode_count=len(await self.recent_episodes(1000)),
+            episode_count=await self.memory.count_episodes(),
             last_error=self.last_error,
         )
 
@@ -1099,6 +1105,21 @@ class ConscioService:
         items[:] = recent
         return len(recent) < limit
 
+    def _prune_event_files(self) -> None:
+        """Delete oldest event JSON files when the events directory exceeds the cap."""
+        events_dir = self.config.home / "events"
+        try:
+            files = sorted(events_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
+        except OSError:
+            return
+        if len(files) <= _MAX_EVENT_FILES:
+            return
+        for path in files[: len(files) - _MAX_EVENT_FILES]:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
     async def _store_episode(self, event: InputEvent, result: EpisodeResult) -> None:
         ep = StoredEpisode(
             id=result.episode_id or f"{int(time.time() * 1000)}-{len(self._episodes) + 1}",
@@ -1111,8 +1132,11 @@ class ConscioService:
             metrics=asdict(result.metrics),
         )
         self._episodes.append(ep)
+        if len(self._episodes) > _MAX_IN_MEMORY_EPISODES:
+            del self._episodes[: len(self._episodes) - _MAX_IN_MEMORY_EPISODES]
         path = self.config.home / "events" / f"{ep.id}.json"
         path.write_text(json.dumps(asdict(ep), indent=2), encoding="utf-8")
+        self._prune_event_files()
         await self.memory.record_episode(
             episode_id=ep.id,
             source=ep.source,

@@ -6,10 +6,13 @@ from typing import Any
 from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAI
 
-load_dotenv()
-
 _DEFAULT_BASE_URL = "https://api.libertai.io/v1"
 _DEFAULT_MODEL = "deepseek-v4-flash"
+# A single LLM call should not hang for 10 minutes (the SDK default). 120s
+# is generous enough for large completions while keeping the service
+# responsive; a timeout now produces a caught exception instead of a hang.
+_LLM_TIMEOUT = 120
+_LLM_MAX_RETRIES = 2
 
 
 class LLMClient:
@@ -21,6 +24,7 @@ class LLMClient:
         api_key: str | None = None,
         model: str | None = None,
     ) -> None:
+        load_dotenv()
         self.base_url = (
             base_url
             or os.environ.get("LIBERTAI_BASE_URL")
@@ -40,13 +44,23 @@ class LLMClient:
     @property
     def sync(self) -> OpenAI:
         if self._sync is None:
-            self._sync = OpenAI(base_url=self.base_url, api_key=self.api_key)
+            self._sync = OpenAI(
+                base_url=self.base_url,
+                api_key=self.api_key,
+                timeout=_LLM_TIMEOUT,
+                max_retries=_LLM_MAX_RETRIES,
+            )
         return self._sync
 
     @property
     def async_(self) -> AsyncOpenAI:
         if self._async is None:
-            self._async = AsyncOpenAI(base_url=self.base_url, api_key=self.api_key)
+            self._async = AsyncOpenAI(
+                base_url=self.base_url,
+                api_key=self.api_key,
+                timeout=_LLM_TIMEOUT,
+                max_retries=_LLM_MAX_RETRIES,
+            )
         return self._async
 
     def chat(

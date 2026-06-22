@@ -270,17 +270,20 @@ class DriveScheduler:
         if row is None:
             return
         now = time.time()
-        self.store.memory.execute(
-            "UPDATE goals SET last_serviced_at = ?, updated_at = ? WHERE id = ?",
-            (now, now, goal_id),
-        )
+        ops: list[tuple[str, tuple]] = [
+            (
+                "UPDATE goals SET last_serviced_at = ?, updated_at = ? WHERE id = ?",
+                (now, now, goal_id),
+            ),
+        ]
         drive_id = row.get("drive_id")
         if drive_id:
-            self.store.memory.execute(
+            ops.append((
                 "UPDATE drives SET satiation = MIN(1.0, satiation + ?), "
                 "last_serviced_at = ?, updated_at = ? WHERE id = ?",
                 (self.satiate_step, now, now, drive_id),
-            )
+            ))
+        self.store.memory.transaction(ops)
 
     async def decay_tick(self) -> None:
         """Per-tick drive homeostasis: satiation decays toward 0 and appetite
