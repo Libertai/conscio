@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
 DEFAULT_HOME = Path.home() / ".conscio"
 PLACEHOLDER_SECRETS = {"", "replace-me", "replace-me-too", "changeme", "password"}
 
@@ -144,8 +146,8 @@ class ServiceConfig:
             raise ValueError(f"engine.attention_char_budget must be >= 0 (got {self.attention_char_budget}).")
         if self.attention_broadcast_limit <= 0:
             raise ValueError(f"engine.attention_broadcast_limit must be > 0 (got {self.attention_broadcast_limit}).")
-        if self.max_actions_per_hour <= 0:
-            raise ValueError(f"tools.max_actions_per_hour must be > 0 (got {self.max_actions_per_hour}).")
+        if self.max_actions_per_hour < 0:
+            raise ValueError(f"tools.max_actions_per_hour must be >= 0 (got {self.max_actions_per_hour}).")
         if self.shell_timeout <= 0:
             raise ValueError(f"tools.shell_timeout must be > 0 (got {self.shell_timeout}).")
         if self.motivation.stale_block_days <= self.motivation.stale_flag_days:
@@ -175,6 +177,7 @@ def _normalize_profile(value: Any) -> str:
 
 
 def load_config(path: str | Path | None = None) -> ServiceConfig:
+    load_dotenv()
     if path:
         config_path = Path(path).expanduser()
     else:

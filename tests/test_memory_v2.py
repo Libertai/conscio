@@ -257,6 +257,18 @@ class MemoryV2Tests(unittest.IsolatedAsyncioTestCase):
         finally:
             await memory.close()
 
+    async def test_search_short_query_falls_back_to_like(self) -> None:
+        memory = self._store(embedder=None)
+        await memory.initialize()
+        try:
+            await memory.add_fact("AI stands for artificial intelligence.", origin="user")
+            # 2-char query is too short for FTS (build_fts_query drops <3 chars);
+            # the LIKE fallback should still find it.
+            results = await memory.search("AI", limit=10)
+            self.assertTrue(any("artificial intelligence" in r["content"] for r in results))
+        finally:
+            await memory.close()
+
     async def test_contradiction_judge_marks_lower_trust_loser(self) -> None:
         base = _unit(0)
         embedder = FixedEmbedder({

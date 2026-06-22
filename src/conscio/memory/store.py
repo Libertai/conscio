@@ -851,16 +851,35 @@ class MemoryStore:
         from conscio.memory.retrieval import build_fts_query
 
         fts_query = build_fts_query(query, mode="or")
-        if not fts_query:
-            return []
-        try:
-            return self._fetchall(
-                "SELECT content, memory_type, ref_id, rank FROM memory_fts "
-                "WHERE memory_fts MATCH ? ORDER BY rank LIMIT ?",
-                (fts_query, limit),
-            )
-        except sqlite3.OperationalError:
-            return []
+        if fts_query:
+            try:
+                return self._fetchall(
+                    "SELECT content, memory_type, ref_id, rank FROM memory_fts "
+                    "WHERE memory_fts MATCH ? ORDER BY rank LIMIT ?",
+                    (fts_query, limit),
+                )
+            except sqlite3.OperationalError:
+                pass
+        # Fallback for short/special queries FTS cannot tokenize.
+        like = f"%{query}%"
+        facts = self._fetchall(
+            "SELECT fact AS content, 'fact' AS memory_type, "
+            "CAST(id AS TEXT) AS ref_id, 0 AS rank "
+            "FROM facts WHERE status = 'active' AND trust > 0 AND fact LIKE ? "
+            "ORDER BY updated_at DESC LIMIT ?",
+            (like, limit),
+        )
+        if len(facts) >= limit:
+            return facts
+        remaining = limit - len(facts)
+        episodes = self._fetchall(
+            "SELECT COALESCE(summary, input) AS content, 'episode' AS memory_type, "
+            "CAST(id AS TEXT) AS ref_id, 0 AS rank "
+            "FROM episodes WHERE (summary LIKE ? OR input LIKE ?) "
+            "ORDER BY created_at DESC LIMIT ?",
+            (like, like, remaining),
+        )
+        return facts + episodes
 
     # ── Context assembly ─────────────────────────────────────────
 

@@ -12,12 +12,16 @@ _TOOL_PATH_PREFIXES = (
 # Env vars whose names contain these substrings are stripped from the
 # subprocess environment so that a model with shell/code access cannot
 # exfiltrate the service's own secrets (API keys, passwords, tokens).
-_SECRET_ENV_PATTERNS = ("_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_PASS", "_CREDENTIAL")
+# Matched as whole-word tokens (split on underscore) to avoid false
+# positives like KEYRING or TOKENIZER.
+_SECRET_ENV_TOKENS = frozenset({
+    "KEY", "TOKEN", "SECRET", "PASSWORD", "PASS", "PWD", "CREDENTIAL", "CREDENTIALS",
+})
 
 
 def _is_secret_env(name: str) -> bool:
-    upper = name.upper()
-    return any(pat in upper for pat in _SECRET_ENV_PATTERNS)
+    parts = name.upper().split("_")
+    return any(part in _SECRET_ENV_TOKENS for part in parts)
 
 
 def tool_env() -> dict[str, str]:

@@ -9,24 +9,27 @@ on:
 jobs:
   lint-type-test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install uv
         run: pip install uv
 
-      - name: Install package + dev deps
+      - name: Install package + dev deps from lockfile
         run: uv pip install --system -e ".[dev]"
 
       - name: Ruff
         run: ruff check src/ tests/
 
       - name: Mypy
-        run: mypy src/conscio/ --ignore-missing-imports
+        run: mypy src/conscio/
 
       - name: Pytest
-        run: python -m pytest tests/ -q
+        run: python -m pytest tests/

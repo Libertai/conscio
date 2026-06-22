@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from conscio.core.workspace import EntryType, Workspace, WorkspaceEntry
+from conscio.core.workspace import EntryType, Workspace
 
 DEFAULT_LIMIT_MESSAGE = (
     "Tool-use limit reached for this turn. Stop calling tools and provide a concise final answer "
@@ -458,16 +458,6 @@ class ToolLoop:
                 for call_id, request in executed
             ],
         }
-
-
-def latest_tool_observation(workspace: Workspace, name: str) -> WorkspaceEntry | None:
-    # workspace.read sorts by (-priority, -timestamp); the first matching
-    # entry is the highest-priority most-recent one (the actual "latest").
-    for entry in workspace.read(limit=100, type_filter={EntryType.OBSERVATION}):
-        if entry.source == "tool" and entry.metadata.get("tool") == name:
-            return entry
-    return None
-
 
 # Recovers DeepSeek-style native tool-call markers that leak into the assistant
 # `content` field instead of arriving as proper OpenAI `tool_calls`. Tokens
