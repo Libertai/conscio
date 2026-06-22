@@ -368,7 +368,7 @@ async def _run_cell(
             record.output_excerpt = (outputs[-1] if outputs else "")[:400]
         except BudgetExceededError as exc:
             record.error = str(exc)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             record.error = "cell timeout"
             raise
         except Exception as exc:  # noqa: BLE001 — captured per cell, run continues
@@ -532,7 +532,7 @@ async def run_battery(
                 ),
                 timeout=cell_timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return TaskRecord(
                 run_id=run_id,
                 timestamp=time.strftime("%Y-%m-%dT%H:%M:%S"),

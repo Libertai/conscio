@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import os
 import asyncio
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -683,6 +683,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_api_requires_auth_for_status(self) -> None:
         try:
             import httpx
+
             from conscio.api import create_app
         except ModuleNotFoundError:
             self.skipTest("fastapi is not installed in this environment")
@@ -736,6 +737,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_validated_source(""), "user")
         try:
             import httpx
+
             from conscio.api import create_app
         except ModuleNotFoundError:
             self.skipTest("fastapi is not installed in this environment")
@@ -781,6 +783,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_web_logout_revokes_session(self) -> None:
         try:
             import httpx
+
             from conscio.api import create_app
         except ModuleNotFoundError:
             self.skipTest("fastapi is not installed in this environment")
@@ -816,6 +819,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_web_login_is_rate_limited(self) -> None:
         try:
             import httpx
+
             from conscio.api import create_app
         except ModuleNotFoundError:
             self.skipTest("fastapi is not installed in this environment")
@@ -848,6 +852,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_project_pause_returns_404(self) -> None:
         try:
             import httpx
+
             from conscio.api import create_app
         except ModuleNotFoundError:
             self.skipTest("fastapi is not installed in this environment")

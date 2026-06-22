@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-
 DEFAULT_HOME = Path.home() / ".conscio"
 PLACEHOLDER_SECRETS = {"", "replace-me", "replace-me-too", "changeme", "password"}
 
@@ -176,7 +175,10 @@ def _normalize_profile(value: Any) -> str:
 
 
 def load_config(path: str | Path | None = None) -> ServiceConfig:
-    config_path = Path(path).expanduser() if path else Path(os.environ.get("CONSCIO_CONFIG", DEFAULT_HOME / "config.toml")).expanduser()
+    if path:
+        config_path = Path(path).expanduser()
+    else:
+        config_path = Path(os.environ.get("CONSCIO_CONFIG", DEFAULT_HOME / "config.toml")).expanduser()
     raw: dict[str, Any] = {}
     if config_path.exists():
         with config_path.open("rb") as f:
@@ -208,7 +210,10 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         client_url=str(os.environ.get("CONSCIO_CLIENT_URL") or service.get("client_url") or ""),
         api_key=str(os.environ.get("CONSCIO_API_KEY") or service.get("api_key") or ""),
         web_password=str(os.environ.get("CONSCIO_WEB_PASSWORD") or service.get("web_password") or ""),
-        web_secure_cookies=bool(service.get("web_secure_cookies", False) or os.environ.get("CONSCIO_WEB_SECURE_COOKIES") == "1"),
+        web_secure_cookies=bool(
+            service.get("web_secure_cookies", False)
+            or os.environ.get("CONSCIO_WEB_SECURE_COOKIES") == "1"
+        ),
         allow_insecure_public_bind=bool(
             service.get("allow_insecure_public_bind", False)
             or os.environ.get("CONSCIO_ALLOW_INSECURE_BIND") == "1"

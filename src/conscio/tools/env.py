@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import shutil
 
-
 _TOOL_PATH_PREFIXES = (
     "/usr/local/bin",
     "/home/conscio/.cargo/bin",

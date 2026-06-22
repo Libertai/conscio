@@ -3,8 +3,9 @@ from __future__ import annotations
 import importlib
 import inspect
 import pkgutil
-from typing import Any, Callable, Coroutine
+from collections.abc import Callable, Coroutine
 from pathlib import Path
+from typing import Any
 
 TOOL_FN = Callable[..., Coroutine[Any, Any, dict[str, Any]]]
 

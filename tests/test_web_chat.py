@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import tempfile
 from pathlib import Path
 
 import pytest
 
 from conscio.memory.store import MemoryStore
-from conscio.web.chat import ChatStore, DEFAULT_SESSION_ID
+from conscio.web.chat import DEFAULT_SESSION_ID, ChatStore
 
 
 @pytest.fixture

@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal
-
+from typing import Any, Literal
 
 Checker = Callable[[str], tuple[bool, str]]
 

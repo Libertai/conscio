@@ -8,8 +8,12 @@ from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 
 from conscio.service import ConscioService
-from conscio.web.auth import (
+
+# Re-export for backwards compatibility with existing tests + callers.
+from conscio.web.auth import (  # noqa: F401
     LOGIN_FAILURE_LIMIT,
+    MAX_LOGIN_FAILURE_TRACKERS,
+    MAX_SESSIONS,
     SESSION_COOKIE,
     SESSION_TTL_SECONDS,
     check_password,
@@ -20,14 +24,7 @@ from conscio.web.auth import (
     sweep_login_failures,
     sweep_sessions,
 )
-# Re-export for backwards compatibility with existing tests + callers.
-from conscio.web.auth import (  # noqa: F401
-    MAX_LOGIN_FAILURE_TRACKERS,
-    MAX_SESSIONS,
-    sweep_sessions as _sweep_sessions,
-    sweep_login_failures as _sweep_login_failures,
-)
-from conscio.web.chat import ChatStore, DEFAULT_SESSION_ID  # noqa: F401
+from conscio.web.chat import DEFAULT_SESSION_ID, ChatStore  # noqa: F401
 from conscio.web.events import stream_events
 
 

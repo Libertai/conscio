@@ -15,10 +15,10 @@ import httpx
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.rule import Rule
 from rich.table import Table
 from rich.tree import Tree
 
+from conscio.config import DEFAULT_HOME, load_config, write_default_config
 from conscio.core.agent import ConsciousAgent
 from conscio.core.cognition import InputEvent
 from conscio.core.runtime import CognitiveRuntime
@@ -32,7 +32,6 @@ from conscio.memory.lifecycle import (
     schema_status,
 )
 from conscio.memory.store import MemoryStore
-from conscio.config import DEFAULT_HOME, load_config, write_default_config
 
 console = Console()
 
@@ -442,7 +441,13 @@ async def _client_projects(project_id: str | None = None) -> None:
 
 async def _client_tick() -> None:
     data = await _client_request("POST", "/autonomy/tick")
-    console.print(Panel(Markdown(data.get("output", "")), title=f"Autonomy: {data.get('selected_action', '')}", border_style="green"))
+    console.print(
+        Panel(
+            Markdown(data.get("output", "")),
+            title=f"Autonomy: {data.get('selected_action', '')}",
+            border_style="green",
+        )
+    )
 
 
 async def _client_trace() -> None:

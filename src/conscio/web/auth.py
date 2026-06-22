@@ -9,12 +9,11 @@ from __future__ import annotations
 import hmac
 import secrets
 import time
-from typing import Iterable
+from collections.abc import Sequence
 
 from fastapi import HTTPException
 
 from conscio.service import ConscioService
-
 
 SESSION_COOKIE = "conscio_web_session"
 MAX_SESSIONS = 10000
@@ -106,7 +105,7 @@ def login_failure_count(
     return len([t for t in failures.get(client, []) if t >= now - LOGIN_FAILURE_WINDOW_SECONDS])
 
 
-__all__: Iterable[str] = (
+__all__: Sequence[str] = (
     "LOGIN_FAILURE_LIMIT",
     "MAX_SESSIONS",
     "MAX_LOGIN_FAILURE_TRACKERS",

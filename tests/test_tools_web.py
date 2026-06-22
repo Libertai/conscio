@@ -3,9 +3,8 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from conscio.tools.env import resolve_tool, tool_env
 from conscio.tools import web
-
+from conscio.tools.env import resolve_tool, tool_env
 
 SEARCH_PAGE = """
 <html>
@@ -190,7 +189,7 @@ class WebToolTests(unittest.IsolatedAsyncioTestCase):
                     raise httpx.HTTPStatusError("err", request=None, response=None)  # type: ignore[arg-type]
 
         class FakeClient:
-            async def __aenter__(self) -> "FakeClient":
+            async def __aenter__(self) -> FakeClient:
                 return self
 
             async def __aexit__(self, *exc: Any) -> None:
@@ -201,8 +200,9 @@ class WebToolTests(unittest.IsolatedAsyncioTestCase):
                     return FakeResponse(302, location="http://redirect.example/private")
                 return FakeResponse(200, text="should not reach")
 
-        import httpx
         from typing import Any
+
+        import httpx
 
         with patch.object(web, "_run_libertai", fake_run), \
              patch.object(web, "_resolve_host", fake_resolve), \

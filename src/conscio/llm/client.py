@@ -80,7 +80,7 @@ class LLMClient:
             kwargs["tools"] = tools
         response = self.sync.chat.completions.create(
             model=model or self.model,
-            messages=messages,
+            messages=messages,  # type: ignore[arg-type]
             **kwargs,
         )
         choice = response.choices[0]
@@ -92,8 +92,8 @@ class LLMClient:
                     "id": tc.id,
                     "type": "function",
                     "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
+                        "name": tc.function.name,  # type: ignore[union-attr]
+                        "arguments": tc.function.arguments,  # type: ignore[union-attr]
                     },
                 }
                 for tc in message.tool_calls
@@ -117,7 +117,7 @@ class LLMClient:
             kwargs["tools"] = tools
         response = await self.async_.chat.completions.create(
             model=model or self.model,
-            messages=messages,
+            messages=messages,  # type: ignore[arg-type]
             **kwargs,
         )
         choice = response.choices[0]
@@ -129,8 +129,8 @@ class LLMClient:
                     "id": tc.id,
                     "type": "function",
                     "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
+                        "name": tc.function.name,  # type: ignore[union-attr]
+                        "arguments": tc.function.arguments,  # type: ignore[union-attr]
                     },
                 }
                 for tc in message.tool_calls
@@ -182,13 +182,13 @@ class LLMClient:
             kwargs["tools"] = tools
         stream = await self.async_.chat.completions.create(
             model=model or self.model,
-            messages=messages,
+            messages=messages,  # type: ignore[arg-type]
             stream=True,
             **kwargs,
         )
         content_chunks: list[str] = []
         tool_call_deltas: dict[int, dict] = {}
-        async for chunk in stream:
+        async for chunk in stream:  # type: ignore[union-attr]
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta is None:
                 continue

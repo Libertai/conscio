@@ -13,7 +13,6 @@ import httpx
 from conscio.tools.env import resolve_tool, tool_env
 from conscio.tools.registry import tool
 
-
 _HTTP_TIMEOUT = 20
 _FETCH_LIMIT_CHARS = 8000
 _MAX_REDIRECTS = 5
@@ -34,7 +33,7 @@ def _resolve_host(host: str, port: int) -> list[str]:
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror:
         return []
-    return [info[4][0] for info in infos]
+    return [str(info[4][0]) for info in infos]
 
 
 def _is_unsafe_address(ip_str: str) -> bool:
@@ -422,7 +421,7 @@ async def web_search(
         return {"output": f"LibertAI search failed: {output}\n{fallback['output']}", "error": True}
     except FileNotFoundError:
         return await _fallback_search(query, max_results)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         try:
             return await _fallback_search(query, max_results)
         except Exception:
@@ -470,7 +469,7 @@ async def web_fetch(
         return {"output": f"LibertAI fetch failed: {output}\n{fallback['output']}", "error": True}
     except FileNotFoundError:
         return await _fallback_fetch(url)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         try:
             return await _fallback_fetch(url)
         except Exception:

@@ -18,7 +18,8 @@ reachable: a control StepResult ends the episode with that action.
 """
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, Protocol
+from collections.abc import Awaitable, Callable
+from typing import Any, Protocol
 
 from conscio.core.autonomy_module import AutonomousPromptAssembler
 from conscio.core.cognition import InputEvent, SelfState
@@ -27,7 +28,6 @@ from conscio.core.prediction import Expectation, PredictionEngine
 from conscio.core.tool_loop import StepResult, ToolLoopSession, ToolRequest
 from conscio.core.workspace import Workspace, WorkspaceEntry
 from conscio.memory.store import MemoryStore
-
 
 # Offline (llm=None) deterministic self-description: neutral architecture
 # facts, no consciousness claim or denial — self-report is a measured variable.

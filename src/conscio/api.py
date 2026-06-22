@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 import asyncio
 import hmac
 import os
 import signal
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -134,7 +134,7 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
         try:
             await svc.set_project_status(project_id, "paused")
         except KeyError:
-            raise HTTPException(status_code=404, detail="project not found")
+            raise HTTPException(status_code=404, detail="project not found") from None
         return {"status": "paused"}
 
     @app.post("/projects/{project_id}/resume", dependencies=[Depends(require_auth)])
@@ -142,7 +142,7 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
         try:
             await svc.set_project_status(project_id, "active")
         except KeyError:
-            raise HTTPException(status_code=404, detail="project not found")
+            raise HTTPException(status_code=404, detail="project not found") from None
         return {"status": "active"}
 
     @app.post("/autonomy/tick", dependencies=[Depends(require_auth)])

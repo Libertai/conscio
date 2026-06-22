@@ -9,8 +9,9 @@ consumers (``service.py``, ``eval/legacy.py``) keep working unmodified.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from conscio.core.cognition import (
     ActionKind,
@@ -23,7 +24,6 @@ from conscio.core.context import provenance_marker
 from conscio.core.tool_loop import ToolLoop, ToolRequest
 from conscio.core.workspace import EntryType, Workspace, WorkspaceEntry
 from conscio.memory.store import MemoryStore
-
 
 STABLE_AUTONOMY_PROMPT = (
     "You are Conscio acting autonomously. The runtime fired a heartbeat. "

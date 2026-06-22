@@ -78,7 +78,10 @@ class AutonomyMetaToolTests(unittest.IsolatedAsyncioTestCase):
             task = await service.autonomy.add_task(project.id, "First step.")
 
             stub = _StubLLM([
-                _tool_call_response("set_task_status", f'{{"task_id": "{task.id}", "status": "done", "result": "did it"}}'),
+                _tool_call_response(
+                    "set_task_status",
+                    f'{{"task_id": "{task.id}", "status": "done", "result": "did it"}}',
+                ),
                 {"content": "Marked the task done."},
             ])
             service.runtime._autonomous_module.llm = stub
@@ -194,7 +197,8 @@ class GoalReviewWithLLMTests(unittest.IsolatedAsyncioTestCase):
             decisions_payload = (
                 '['
                 f'{{"goal_id": "{target_retire}", "action": "retire", "reason": "Stale."}},'
-                f'{{"goal_id": "{target_reprioritize}", "action": "reprioritize", "new_priority": 0.95, "reason": "Top focus."}}'
+                f'{{"goal_id": "{target_reprioritize}", "action": "reprioritize", '
+                f'"new_priority": 0.95, "reason": "Top focus."}}'
                 ']'
             )
             stub = _StubLLM([{"content": decisions_payload}])

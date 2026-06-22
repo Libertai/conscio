@@ -70,7 +70,7 @@ async def execute_code(
         if proc.returncode and proc.returncode != 0 and not err.strip():
             parts.append(f"[exit code: {proc.returncode}]")
         return {"output": "\n".join(parts) if parts else "(no output)", "exit_code": proc.returncode or 0}
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return {"output": f"[timed out after {timeout}s]", "exit_code": -1}
     except Exception as e:
         return {"output": f"Error: {e}", "exit_code": -1}

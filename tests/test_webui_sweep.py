@@ -6,7 +6,11 @@ import unittest
 from conscio.web.auth import (
     MAX_LOGIN_FAILURE_TRACKERS,
     MAX_SESSIONS,
+)
+from conscio.web.auth import (
     sweep_login_failures as _sweep_login_failures,
+)
+from conscio.web.auth import (
     sweep_sessions as _sweep_sessions,
 )
 

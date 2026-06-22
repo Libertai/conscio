@@ -11,13 +11,12 @@ carry over across ticks and episodes; ``error_ema`` feeds SelfState.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from conscio.core.constraints import ConstraintReport, ParsedConstraint
 from conscio.core.tool_loop import ToolRequest
 from conscio.core.workspace import EntryType, Workspace, WorkspaceEntry
-
 
 ExpectationKind = Literal[
     "tool_succeeded",

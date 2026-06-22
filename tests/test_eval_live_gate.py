@@ -14,8 +14,8 @@ from pathlib import Path
 
 from conscio.cli import LIVE_EVAL_GATE_EXPLANATION, _run_live_eval, main
 from conscio.eval import LIVE_SUITES
-from conscio.eval.types import RunMeta
 from conscio.eval.runner import RunResult
+from conscio.eval.types import RunMeta
 
 
 def _live_args(*, live: bool, suite: str = "ladder", out: str = "docs/results") -> argparse.Namespace:
@@ -102,20 +102,18 @@ class LiveEvalGateCliDispatchTests(unittest.TestCase):
                 argv = ["conscio", "eval", "--suite", suite]
                 with (
                     unittest.mock.patch.dict(os.environ, _env_without_gate(), clear=True),
-                    unittest.mock.patch.object(sys, "argv", argv),
+                    unittest.mock.patch.object(sys, "argv", argv),self.assertRaises(SystemExit) as ctx
                 ):
-                    with self.assertRaises(SystemExit) as ctx:
-                        main()
+                    main()
                 self.assertEqual(str(ctx.exception), LIVE_EVAL_GATE_EXPLANATION)
 
     def test_live_flag_alone_is_still_gated_at_the_cli(self) -> None:
         argv = ["conscio", "eval", "--suite", "ladder", "--live"]
         with (
             unittest.mock.patch.dict(os.environ, _env_without_gate(), clear=True),
-            unittest.mock.patch.object(sys, "argv", argv),
+            unittest.mock.patch.object(sys, "argv", argv),self.assertRaises(SystemExit) as ctx
         ):
-            with self.assertRaises(SystemExit) as ctx:
-                main()
+            main()
         self.assertEqual(str(ctx.exception), LIVE_EVAL_GATE_EXPLANATION)
 
 

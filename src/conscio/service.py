@@ -11,8 +11,8 @@ from typing import Any
 
 from conscio.autonomy import AutonomyStore
 from conscio.config import ServiceConfig, load_config
-from conscio.core.context import ContextSettings, provenance_marker
 from conscio.core.cognition import InputEvent
+from conscio.core.context import ContextSettings, provenance_marker
 from conscio.core.runtime import CognitiveRuntime, EpisodeResult
 from conscio.core.tool_loop import external_taint_origin
 from conscio.goals import GoalStore
@@ -480,7 +480,8 @@ class ConscioService:
         tools.register(
             "set_task_status",
             set_task_status,
-            "Mark a task pending/active/done/blocked. Use done when the task is complete; blocked only after attempting it.",
+            "Mark a task pending/active/done/blocked. Use done when the task is "
+            "complete; blocked only after attempting it.",
             capabilities={"self_management"},
             schema={
                 "type": "object",
@@ -738,7 +739,10 @@ class ConscioService:
             self.last_autonomous_action = "wait:project_paused"
             return await self._run_episode(
                 InputEvent(
-                    content=f"Autonomous heartbeat: active goal '{goal.description}' has a paused project, so I will not continue it.",
+                    content=(
+                        f"Autonomous heartbeat: active goal '{goal.description}' has a "
+                        f"paused project, so I will not continue it."
+                    ),
                     source="autonomous",
                     event_type="project_paused",
                 )

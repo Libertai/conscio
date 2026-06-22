@@ -4,10 +4,10 @@ import os
 import tempfile
 import unittest
 
-from conscio.core.context import ContextSettings, PromptAssembler
 from conscio.core.cognition import InputEvent
-from conscio.core.workspace import EntryType, Visibility
+from conscio.core.context import ContextSettings, PromptAssembler
 from conscio.core.runtime import CognitiveRuntime
+from conscio.core.workspace import EntryType, Visibility
 from conscio.eval import run_eval_suite
 from conscio.memory.store import MemoryStore
 from conscio.tools import ToolRegistry

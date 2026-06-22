@@ -9,7 +9,6 @@ from typing import Any
 
 from conscio.memory.store import MemoryStore
 
-
 # Stale-task watchdog thresholds (days). Defaults mirror config.MotivationConfig;
 # override per-deploy via the [motivation] TOML table.
 STALE_FLAG_DAYS = 2.0
@@ -158,7 +157,8 @@ class AutonomyStore:
             updated_at=now,
         )
         self.memory.execute(
-            "INSERT INTO tasks (id, project_id, description, status, tool_name, tool_args, result, created_at, updated_at) "
+            "INSERT INTO tasks (id, project_id, description, status, tool_name, tool_args, result, "
+            "created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 task.id,

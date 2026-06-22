@@ -231,7 +231,7 @@ class CompositeScorerTests(unittest.TestCase):
             params={
                 "parts": [
                     {"turn": 2, "weight": 0.7, "scorer": {"kind": "word_count", "params": {"max_words": 1}}},
-                    {"turn": 2, "weight": 0.3, "scorer": {"kind": "regex", "params": {"pattern": "paris", "flags": "i"}}},
+                    {"turn": 2, "weight": 0.3, "scorer": {"kind": "regex", "params": {"pattern": "paris", "flags": "i"}}},  # noqa: E501
                 ]
             },
         )

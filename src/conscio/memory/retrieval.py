@@ -119,7 +119,7 @@ async def retrieve_facts(
     bm_lo, bm_hi = min(bm_values), max(bm_values)
     now = time.time()
     scored: list[tuple[float, dict]] = []
-    for row, bm in zip(rows, bm_values):
+    for row, bm in zip(rows, bm_values, strict=False):
         # bm25() is lower-is-better; normalize to [0, 1] with 1 = best match.
         bm_norm = 1.0 if bm_hi == bm_lo else (bm_hi - bm) / (bm_hi - bm_lo)
         if query_vec is None:

@@ -13,7 +13,6 @@ from typing import Any
 
 from conscio.memory.store import MemoryStore
 
-
 DEFAULT_SESSION_ID = "main"
 DEFAULT_SESSION_TITLE = "operator console"
 

@@ -24,3 +24,6 @@ Thumbs.db
 *.db
 *.db-wal
 *.db-shm
+
+# opencode
+.opencode/

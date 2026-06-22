@@ -11,11 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from conscio.config import ServiceConfig
 from conscio.autonomy import migrate_autonomy_schema
+from conscio.config import ServiceConfig
 from conscio.goals import migrate_goal_schema
-from conscio.memory.store import MemoryStore, SCHEMA_VERSION
-
+from conscio.memory.store import SCHEMA_VERSION, MemoryStore
 
 EXPORT_TABLES = (
     "episodes",

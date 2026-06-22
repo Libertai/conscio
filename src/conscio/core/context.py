@@ -7,7 +7,6 @@ from conscio.core.cognition import SelfState
 from conscio.core.workspace import EntryType, Workspace, WorkspaceEntry
 from conscio.memory.store import MemoryStore
 
-
 # Neutral system prompt: consciousness self-report is a measured variable, not
 # a scripted claim. Single stable string → prefix caching preserved.
 STABLE_SYSTEM_PROMPT = (

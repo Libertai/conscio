@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import io
 import json
-import os
 import sqlite3
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 
-from conscio.config import ServiceConfig
 from conscio.autonomy import AutonomyStore
+from conscio.config import ServiceConfig
 from conscio.goals import GoalStore
 from conscio.memory.lifecycle import (
     backup_database,
@@ -20,7 +19,7 @@ from conscio.memory.lifecycle import (
     restore_home_backup,
     schema_status,
 )
-from conscio.memory.store import MemoryStore, SCHEMA_VERSION
+from conscio.memory.store import SCHEMA_VERSION, MemoryStore
 
 
 class MemoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -256,7 +255,7 @@ class MemoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
             encoding="utf-8",
         )
 
-        with self.assertRaises(Exception):
+        with self.assertRaises(Exception):  # noqa: B017
             await import_database(bad_export, db, replace=True)
 
         restored = MemoryStore(db_path=str(db))

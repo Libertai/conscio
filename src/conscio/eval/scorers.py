@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from conscio.eval.types import ScorerSpec, Task
 
@@ -397,7 +398,12 @@ def _score_composite(params: dict[str, Any], turn_outputs: list[str], artifacts:
             }
         )
     score = (weighted / total_weight) if total_weight else 0.0
-    return Score(passed=all_passed and total_weight > 0, score=score, details={"parts": part_details}, needs_judge=needs_judge)
+    return Score(
+        passed=all_passed and total_weight > 0,
+        score=score,
+        details={"parts": part_details},
+        needs_judge=needs_judge,
+    )
 
 
 SCORERS: dict[str, Callable[[dict[str, Any], list[str], dict[str, Any]], Score]] = {

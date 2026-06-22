@@ -9,6 +9,8 @@ import uuid
 from dataclasses import asdict, dataclass
 from typing import Any
 
+import numpy as np
+
 from conscio.memory import embeddings as _embeddings
 from conscio.memory.store import MemoryStore
 
@@ -200,7 +202,7 @@ class DriveScheduler:
     scores for the autonomous context state and trace.
     """
 
-    def __init__(self, store: "GoalStore", *, motivation: Any | None = None) -> None:
+    def __init__(self, store: GoalStore, *, motivation: Any | None = None) -> None:
         self.store = store
         self.w_priority = float(getattr(motivation, "w_priority", W_PRIORITY))
         self.w_appetite = float(getattr(motivation, "w_appetite", W_APPETITE))
@@ -323,7 +325,8 @@ class GoalStore:
             ))
             items.append((
                 "INSERT OR IGNORE INTO goals "
-                "(id, description, source, status, priority, confidence, appraisal_weight, drive_id, created_at, updated_at) "
+                "(id, description, source, status, priority, confidence, "
+                "appraisal_weight, drive_id, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (drive_id, drive, "seed", "active", base_weight, 0.75, 0.75, drive_id, now, now),
             ))
@@ -442,7 +445,7 @@ class GoalStore:
             best_desc = ""
             best_cos = 0.0
             for row in rows:
-                cos = _embeddings.cosine(vec, _embeddings.unpack(row["embedding"]))
+                cos = _embeddings.cosine(np.asarray(vec), _embeddings.unpack(row["embedding"]))
                 if cos > best_cos:
                     best_cos = cos
                     best_id = row["id"]

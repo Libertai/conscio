@@ -63,7 +63,7 @@ async def bash(
             "output": output.strip() or "(no output)",
             "exit_code": proc.returncode or 0,
         }
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return {"output": f"[timed out after {timeout}s]", "exit_code": -1}
     except FileNotFoundError as e:
         return {"output": f"Command not found: {e}", "exit_code": -1}

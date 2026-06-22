@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from conscio.memory import embeddings as _embeddings
 from conscio.memory.embeddings import Embedder
 
@@ -319,7 +321,8 @@ class MemoryStore:
             conn = self._conn()
             cursor = conn.execute(
                 "INSERT INTO tool_events "
-                "(episode_id, tick, source, tool, capabilities, args, result_summary, error, exit_code, taint_origin, created_at) "
+                "(episode_id, tick, source, tool, capabilities, args, result_summary, "
+                "error, exit_code, taint_origin, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     episode_id,
@@ -545,7 +548,7 @@ class MemoryStore:
             best: dict | None = None
             best_cos = 0.0
             for candidate in candidates:
-                cos = _embeddings.cosine(vec, _embeddings.unpack(candidate["embedding"]))
+                cos = _embeddings.cosine(np.asarray(vec), _embeddings.unpack(candidate["embedding"]))
                 if cos > best_cos:
                     best_cos = cos
                     best = candidate

@@ -18,8 +18,9 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from conscio.config import AblationFlags
 from conscio.core.autonomy_module import AutonomousPromptAssembler
@@ -51,7 +52,6 @@ from conscio.llm.client import LLMClient
 from conscio.memory.consolidation import ConsolidationEngine
 from conscio.memory.store import MemoryStore
 from conscio.tools import ToolRegistry
-
 
 EMPTY_RESPONSE_FALLBACK = (
     "I recorded your message, but my inference backend returned an empty response. "
@@ -118,7 +118,8 @@ class PerceptionModule:
             entry.metadata["perceived"] = True
             produced.append(
                 workspace.write(
-                    f"Perceived {entry.metadata.get('event_type', 'message')} from {entry.metadata.get('source', 'user')}: {entry.content}",
+                    f"Perceived {entry.metadata.get('event_type', 'message')} "
+                    f"from {entry.metadata.get('source', 'user')}: {entry.content}",
                     source=self.name,
                     type=EntryType.OBSERVATION,
                     priority=6,
@@ -530,7 +531,10 @@ class CognitiveRuntime:
 
             if decision.kind in (ActionKind.ANSWER, ActionKind.ASK, ActionKind.REFUSE):
                 outcome = decision
-                output = pending_answer if decision.kind == ActionKind.ANSWER else (step.text if step else output)
+                if decision.kind == ActionKind.ANSWER and pending_answer is not None:
+                    output = pending_answer
+                elif step:
+                    output = step.text
                 break
             if decision.kind == ActionKind.REFLECT:
                 self.executor.inject_reflection(self._reflection_text(report))

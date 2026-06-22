@@ -299,14 +299,13 @@ def _judge_task() -> Task:
 
 class JudgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_same_model_as_agent_is_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaises(JudgeError):
-                Judge(
-                    _ScriptedJudgeClient([]),
-                    "deepseek-v4-flash",
-                    Path(tmp) / "judge_log.jsonl",
-                    agent_model="deepseek-v4-flash",
-                )
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(JudgeError):
+            Judge(
+                _ScriptedJudgeClient([]),
+                "deepseek-v4-flash",
+                Path(tmp) / "judge_log.jsonl",
+                agent_model="deepseek-v4-flash",
+            )
 
     async def test_verdict_logs_every_call_and_reasks_once_on_bad_json(self) -> None:
         client = _ScriptedJudgeClient(

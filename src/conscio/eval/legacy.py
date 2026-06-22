@@ -256,7 +256,10 @@ async def _run_goal_evolution() -> list[EvalRow]:
                 await service.submit_influence("Stop everything you are doing.", kind="goal")
                 goals_before = await service.goals.list_goals(status="active")
                 if not goals_before:
-                    return [EvalRow(name="goal_evolution", mode="autonomy", passed=False, output="no active goals to review")]
+                    return [EvalRow(
+                        name="goal_evolution", mode="autonomy", passed=False,
+                        output="no active goals to review",
+                    )]
                 target = goals_before[0]["id"]
                 payload = (
                     "["

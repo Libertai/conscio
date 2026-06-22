@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-
-import pytest
+from typing import Any
 
 from conscio.core.workspace import EntryType, Workspace, WorkspaceEntry
 from conscio.web.events import (

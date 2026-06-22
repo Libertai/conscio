@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Literal
 
 from conscio.core.workspace import EntryType, Workspace, WorkspaceEntry
-
 
 DEFAULT_LIMIT_MESSAGE = (
     "Tool-use limit reached for this turn. Stop calling tools and provide a concise final answer "

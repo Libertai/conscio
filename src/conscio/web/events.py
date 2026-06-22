@@ -21,11 +21,11 @@ import asyncio
 import json
 import time
 from collections import deque
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable
+from typing import Any
 
 from conscio.core.workspace import Workspace, WorkspaceEntry
-
 
 CLIENT_QUEUE_SIZE = 256
 HEARTBEAT_SECONDS = 15.0
@@ -197,8 +197,8 @@ def encode_sse(payload: dict[str, Any], *, event: str | None = None, retry_ms: i
 async def stream_events(
     broker: WorkspaceEventBroker,
     *,
-    is_disconnected: Callable[[], "asyncio.Future[bool] | bool"] | None = None,
-) -> Iterable[bytes]:
+    is_disconnected: Callable[[], bool | Awaitable[bool]] | None = None,
+) -> AsyncGenerator[bytes, None]:
     """Async generator yielding SSE-encoded bytes for a single client.
 
     ``is_disconnected`` is an optional async callable (Starlette's
@@ -217,7 +217,7 @@ async def stream_events(
                     break
             try:
                 payload = await asyncio.wait_for(client.queue.get(), timeout=HEARTBEAT_SECONDS)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # A named event, not an SSE comment: comments never reach JS,
                 # so the client's stall detector could not see comment pings.
                 yield encode_sse({"type": "ping", "ts": time.time()}).encode("utf-8")
