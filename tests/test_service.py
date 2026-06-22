@@ -108,6 +108,35 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cfg.validate_public_bind()
 
+    def test_validate_rejects_zero_tick_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("[service]\ntick_interval = 0\n", encoding="utf-8")
+            cfg = load_config(path)
+
+        with self.assertRaises(ValueError) as ctx:
+            cfg.validate()
+        self.assertIn("tick_interval", str(ctx.exception))
+
+    def test_validate_rejects_zero_max_ticks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("[engine]\nmax_ticks = 0\n", encoding="utf-8")
+            cfg = load_config(path)
+
+        with self.assertRaises(ValueError) as ctx:
+            cfg.validate()
+        self.assertIn("max_ticks", str(ctx.exception))
+
+    def test_env_api_key_overrides_toml(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("[service]\napi_key = \"from-toml\"\n", encoding="utf-8")
+            with unittest.mock.patch.dict(os.environ, {"CONSCIO_API_KEY": "from-env"}):
+                cfg = load_config(path)
+
+        self.assertEqual(cfg.api_key, "from-env")
+
     def test_env_config_supports_docker_bind_and_client_url(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"
@@ -130,16 +159,28 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.base_url, "http://127.0.0.1:8765")
 
     def test_llm_config_loads_from_dedicated_section(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "config.toml"
-            path.write_text(
-                "[llm]\n"
-                "base_url = \"https://example.test/v1\"\n"
-                "api_key = \"test-llm-key\"\n"
-                "model = \"test-model\"\n",
-                encoding="utf-8",
-            )
-            cfg = load_config(path)
+        # Env vars take precedence over TOML (by design), so pop LLM env vars
+        # to test TOML loading in isolation.
+        llm_env_keys = (
+            "LIBERTAI_BASE_URL", "LIBERTAI_API_KEY", "LIBERTAI_MODEL",
+            "OPENAI_BASE_URL", "OPENAI_API_KEY",
+        )
+        saved = {k: os.environ.pop(k, None) for k in llm_env_keys}
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "config.toml"
+                path.write_text(
+                    "[llm]\n"
+                    "base_url = \"https://example.test/v1\"\n"
+                    "api_key = \"test-llm-key\"\n"
+                    "model = \"test-model\"\n",
+                    encoding="utf-8",
+                )
+                cfg = load_config(path)
+        finally:
+            for k, v in saved.items():
+                if v is not None:
+                    os.environ[k] = v
 
         self.assertEqual(cfg.llm_base_url, "https://example.test/v1")
         self.assertEqual(cfg.llm_api_key, "test-llm-key")

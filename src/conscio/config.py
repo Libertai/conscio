@@ -125,12 +125,35 @@ class ServiceConfig:
             (self.home / child).mkdir(parents=True, exist_ok=True)
 
     def validate_public_bind(self) -> None:
+        self.validate()
         if self.host in {"127.0.0.1", "localhost", "::1"}:
             return
         if self.api_key in PLACEHOLDER_SECRETS or self.web_password in PLACEHOLDER_SECRETS:
             raise ValueError("Public bind requires non-placeholder service.api_key and service.web_password.")
         if not self.web_secure_cookies and not self.allow_insecure_public_bind:
             raise ValueError("Public bind requires service.web_secure_cookies = true.")
+
+    def validate(self) -> None:
+        """Range-check critical fields. Raises ValueError on clearly invalid values."""
+        if self.tick_interval <= 0:
+            raise ValueError(f"service.tick_interval must be > 0 (got {self.tick_interval}).")
+        if self.max_ticks <= 0:
+            raise ValueError(f"engine.max_ticks must be > 0 (got {self.max_ticks}).")
+        if self.tool_rounds_per_tick <= 0:
+            raise ValueError(f"engine.tool_rounds_per_tick must be > 0 (got {self.tool_rounds_per_tick}).")
+        if self.attention_char_budget < 0:
+            raise ValueError(f"engine.attention_char_budget must be >= 0 (got {self.attention_char_budget}).")
+        if self.attention_broadcast_limit <= 0:
+            raise ValueError(f"engine.attention_broadcast_limit must be > 0 (got {self.attention_broadcast_limit}).")
+        if self.max_actions_per_hour <= 0:
+            raise ValueError(f"tools.max_actions_per_hour must be > 0 (got {self.max_actions_per_hour}).")
+        if self.shell_timeout <= 0:
+            raise ValueError(f"tools.shell_timeout must be > 0 (got {self.shell_timeout}).")
+        if self.motivation.stale_block_days <= self.motivation.stale_flag_days:
+            raise ValueError(
+                f"motivation.stale_block_days ({self.motivation.stale_block_days}) must be > "
+                f"stale_flag_days ({self.motivation.stale_flag_days})."
+            )
 
 
 def _as_path(value: Any, default: Path) -> Path:
@@ -182,9 +205,9 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         home=_as_path(service.get("home"), config_path.parent if config_path.name == "config.toml" else DEFAULT_HOME),
         host=str(os.environ.get("CONSCIO_HOST") or service.get("host", "127.0.0.1")),
         port=int(os.environ.get("CONSCIO_PORT") or service.get("port", 8765)),
-        client_url=str(service.get("client_url") or os.environ.get("CONSCIO_CLIENT_URL", "")),
-        api_key=str(service.get("api_key") or os.environ.get("CONSCIO_API_KEY", "")),
-        web_password=str(service.get("web_password") or os.environ.get("CONSCIO_WEB_PASSWORD", "")),
+        client_url=str(os.environ.get("CONSCIO_CLIENT_URL") or service.get("client_url") or ""),
+        api_key=str(os.environ.get("CONSCIO_API_KEY") or service.get("api_key") or ""),
+        web_password=str(os.environ.get("CONSCIO_WEB_PASSWORD") or service.get("web_password") or ""),
         web_secure_cookies=bool(service.get("web_secure_cookies", False) or os.environ.get("CONSCIO_WEB_SECURE_COOKIES") == "1"),
         allow_insecure_public_bind=bool(
             service.get("allow_insecure_public_bind", False)
@@ -196,23 +219,23 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         enable_contradiction_check=bool(service.get("enable_contradiction_check", False)),
         unsafe_autonomy=bool(service.get("unsafe_autonomy", unsafe_default)),
         llm_base_url=str(
-            llm.get("base_url")
-            or service.get("llm_base_url")
-            or os.environ.get("LIBERTAI_BASE_URL")
+            os.environ.get("LIBERTAI_BASE_URL")
             or os.environ.get("OPENAI_BASE_URL")
+            or llm.get("base_url")
+            or service.get("llm_base_url")
             or ""
         ),
         llm_api_key=str(
-            llm.get("api_key")
-            or service.get("llm_api_key")
-            or os.environ.get("LIBERTAI_API_KEY")
+            os.environ.get("LIBERTAI_API_KEY")
             or os.environ.get("OPENAI_API_KEY")
+            or llm.get("api_key")
+            or service.get("llm_api_key")
             or ""
         ),
         llm_model=str(
-            llm.get("model")
+            os.environ.get("LIBERTAI_MODEL")
+            or llm.get("model")
             or service.get("llm_model")
-            or os.environ.get("LIBERTAI_MODEL")
             or "deepseek-v4-flash"
         ),
         context_recent_episodes=int(context.get("recent_episodes", 3)),
