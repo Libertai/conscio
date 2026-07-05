@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,7 @@ async def bash(
     command = command if command is not None else input
     if not command:
         return {"output": "No command provided.", "exit_code": -1}
+    proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
@@ -64,7 +66,17 @@ async def bash(
             "exit_code": proc.returncode or 0,
         }
     except TimeoutError:
+        if proc is not None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            await proc.wait()
         return {"output": f"[timed out after {timeout}s]", "exit_code": -1}
+    except asyncio.CancelledError:
+        # Reap the child on cancellation too; otherwise it outlives the episode.
+        if proc is not None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        raise
     except FileNotFoundError as e:
         return {"output": f"Command not found: {e}", "exit_code": -1}
     except Exception as e:

@@ -18,16 +18,19 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
 
+from conscio import __version__
 from conscio.config import DEFAULT_HOME, load_config, write_default_config
 from conscio.core.agent import ConsciousAgent
 from conscio.core.cognition import InputEvent
 from conscio.core.runtime import CognitiveRuntime
 from conscio.eval import LIVE_SUITES, run_eval_suite
 from conscio.memory.lifecycle import (
+    DatabaseCorruptError,
     create_home_backup,
     export_database,
     import_database,
     migrate,
+    preflight_database,
     restore_home_backup,
     schema_status,
 )
@@ -474,6 +477,13 @@ def _service_start() -> None:
         cfg.validate_public_bind()
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+    try:
+        preflight_database(cfg)
+    except DatabaseCorruptError as exc:
+        console.print(f"[red]{exc}[/]")
+        # Exit code 3 is reserved for corrupt state: RestartPreventExitStatus=3
+        # in the systemd units stops the crash loop.
+        raise SystemExit(3) from exc
     app = create_app(config=cfg)
     uvicorn.run(app, host=cfg.host, port=cfg.port)
 
@@ -514,6 +524,12 @@ def _service_doctor() -> None:
         add("database_schema", status.ok, f"version={status.version} missing={status.missing_core or 'none'}")
     else:
         add("database_schema", True, "state.db does not exist yet; it will be created on start")
+
+    try:
+        preflight_database(cfg)
+        add("database_integrity", True, "quick_check ok" if status.exists else "state.db does not exist yet")
+    except DatabaseCorruptError as exc:
+        add("database_integrity", False, str(exc))
 
     static_index = Path(__file__).resolve().parent / "static" / "index.html"
     add("web_assets", static_index.is_file(), str(static_index))
@@ -666,6 +682,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="conscio — a conscious autonomous agent runtime",
     )
+    parser.add_argument("--version", action="version", version=f"conscio {__version__}")
     sub = parser.add_subparsers(dest="command", help="Command to run")
 
     run_p = sub.add_parser("run", help="Start an interactive conscious agent session")

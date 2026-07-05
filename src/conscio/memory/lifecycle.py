@@ -14,7 +14,7 @@ from typing import Any
 from conscio.autonomy import migrate_autonomy_schema
 from conscio.config import ServiceConfig
 from conscio.goals import migrate_goal_schema
-from conscio.memory.store import SCHEMA_VERSION, MemoryStore
+from conscio.memory.store import BUSY_TIMEOUT_MS, SCHEMA_VERSION, MemoryStore
 
 EXPORT_TABLES = (
     "episodes",
@@ -51,7 +51,7 @@ class SchemaStatus:
 def _connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
     return conn
 
 
@@ -60,6 +60,40 @@ def _table_names(conn: sqlite3.Connection) -> set[str]:
         "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
     ).fetchall()
     return {str(row["name"]) for row in rows}
+
+
+class DatabaseCorruptError(RuntimeError):
+    """state.db failed an integrity check; supervisors must not auto-restart."""
+
+
+def preflight_database(config: ServiceConfig) -> None:
+    """Fail fast (before binding the service) when state.db is unreadable.
+
+    A corrupt store under Restart=always becomes a crash loop; exit code 3 +
+    RestartPreventExitStatus=3 breaks it with an actionable message instead.
+    """
+    path = config.db_path
+    if not path.exists():
+        return
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            row = conn.execute("PRAGMA quick_check(1)").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError as exc:
+        raise DatabaseCorruptError(_corrupt_message(path, str(exc))) from exc
+    result = str(row[0]) if row else "no result"
+    if result != "ok":
+        raise DatabaseCorruptError(_corrupt_message(path, result))
+
+
+def _corrupt_message(path: Path, detail: str) -> str:
+    return (
+        f"State database failed integrity check: {path} ({detail}). "
+        f'Inspect with: sqlite3 {path} "PRAGMA integrity_check;" and restore a backup '
+        "with: conscio db restore <archive>. See docs/runbooks/db-locked-or-corrupted.md."
+    )
 
 
 def schema_status(db_path: str | Path) -> SchemaStatus:

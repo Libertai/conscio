@@ -176,11 +176,17 @@ class FactWriteResult:
     contradicted: list[int] = field(default_factory=list)
 
 
+# Cross-process writers (CLI export/backup against a live service) get 5s of
+# grace instead of an immediate "database is locked" error.
+BUSY_TIMEOUT_MS = 5000
+
+
 def _get_conn(db_path: str) -> sqlite3.Connection:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
     conn.executescript(_SCHEMA)
     _repair_legacy_schema(conn)
     now = time.time()

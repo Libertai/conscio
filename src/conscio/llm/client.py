@@ -23,6 +23,9 @@ class LLMClient:
         base_url: str | None = None,
         api_key: str | None = None,
         model: str | None = None,
+        *,
+        timeout: float = _LLM_TIMEOUT,
+        max_retries: int = _LLM_MAX_RETRIES,
     ) -> None:
         load_dotenv()
         self.base_url = (
@@ -38,6 +41,8 @@ class LLMClient:
             or "not-needed"
         )
         self.model = model or os.environ.get("LIBERTAI_MODEL") or _DEFAULT_MODEL
+        self.timeout = float(timeout)
+        self.max_retries = int(max_retries)
         self._sync: OpenAI | None = None
         self._async: AsyncOpenAI | None = None
 
@@ -47,8 +52,8 @@ class LLMClient:
             self._sync = OpenAI(
                 base_url=self.base_url,
                 api_key=self.api_key,
-                timeout=_LLM_TIMEOUT,
-                max_retries=_LLM_MAX_RETRIES,
+                timeout=self.timeout,
+                max_retries=self.max_retries,
             )
         return self._sync
 
@@ -58,8 +63,8 @@ class LLMClient:
             self._async = AsyncOpenAI(
                 base_url=self.base_url,
                 api_key=self.api_key,
-                timeout=_LLM_TIMEOUT,
-                max_retries=_LLM_MAX_RETRIES,
+                timeout=self.timeout,
+                max_retries=self.max_retries,
             )
         return self._async
 

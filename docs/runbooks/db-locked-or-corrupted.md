@@ -34,6 +34,11 @@ sqlite3 /home/conscio/.conscio/state.db "PRAGMA integrity_check;"
 If integrity fails, restore from backup. Do not run ad hoc writes against the
 only copy.
 
+`conscio service start` runs this integrity check itself and exits with code 3
+when it fails; the systemd units set `RestartPreventExitStatus=3` so a corrupt
+database does not crash-loop. After restoring a backup, start the service
+normally.
+
 ## Restart
 
 ```bash

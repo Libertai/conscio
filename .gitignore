@@ -27,3 +27,6 @@ Thumbs.db
 
 # opencode
 .opencode/
+
+# Claude Code personal settings
+.claude/settings.local.json

@@ -7,7 +7,7 @@ The service API is rooted at the configured host and port, defaulting to
 Authorization: Bearer <api_key>
 ```
 
-`/health` is unauthenticated.
+`/health` is unauthenticated and reports `{ok, running, version}`.
 
 ## Service API
 

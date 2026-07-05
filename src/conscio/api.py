@@ -13,6 +13,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from conscio import __version__
 from conscio.config import ServiceConfig
 from conscio.service import ConscioService
 from conscio.webui import create_web_router
@@ -61,11 +62,11 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
         finally:
             await svc.stop()
 
-    app = FastAPI(title="Conscio", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Conscio", version=__version__, lifespan=lifespan)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
-        return {"ok": True, "running": svc.running}
+        return {"ok": True, "running": svc.running, "version": __version__}
 
     @app.get("/status", dependencies=[Depends(require_auth)])
     async def status() -> dict[str, Any]:

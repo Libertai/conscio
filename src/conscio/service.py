@@ -178,6 +178,8 @@ class ConscioService:
                 base_url=self.config.llm_base_url,
                 api_key=self.config.llm_api_key,
                 model=self.config.llm_model,
+                timeout=self.config.llm_timeout,
+                max_retries=self.config.llm_max_retries,
             )
             self.memory.embedder = LibertAIEmbedder(llm)
         context_settings = ContextSettings(

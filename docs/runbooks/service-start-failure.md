@@ -32,3 +32,7 @@ sudo journalctl -u conscio -f
 ```
 
 If the error is a stale lock, use the DB locked runbook.
+
+If the service exited with code 3, the state database failed its integrity
+check — follow the DB locked-or-corrupted runbook; systemd will not restart it
+until the database is repaired.

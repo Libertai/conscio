@@ -166,6 +166,25 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.host, "0.0.0.0")
         self.assertEqual(cfg.base_url, "http://127.0.0.1:8765")
 
+    def test_llm_timeout_and_retries_load_and_validate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("[llm]\ntimeout = 45.5\nmax_retries = 0\n", encoding="utf-8")
+            cfg = load_config(path)
+
+        self.assertEqual(cfg.llm_timeout, 45.5)
+        self.assertEqual(cfg.llm_max_retries, 0)
+        cfg.validate()
+
+    def test_validate_rejects_nonpositive_llm_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("[llm]\ntimeout = 0\n", encoding="utf-8")
+            cfg = load_config(path)
+
+        with self.assertRaises(ValueError):
+            cfg.validate()
+
     def test_llm_config_loads_from_dedicated_section(self) -> None:
         # Env vars take precedence over TOML (by design), and load_config()
         # calls load_dotenv() which re-populates unset vars from .env.

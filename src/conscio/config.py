@@ -79,6 +79,8 @@ class ServiceConfig:
     llm_base_url: str = ""
     llm_api_key: str = ""
     llm_model: str = "deepseek-v4-flash"
+    llm_timeout: float = 120.0
+    llm_max_retries: int = 2
     context_recent_episodes: int = 3
     context_retrieved_memories: int = 5
     context_workspace_entries: int = 12
@@ -150,6 +152,10 @@ class ServiceConfig:
             raise ValueError(f"tools.max_actions_per_hour must be >= 0 (got {self.max_actions_per_hour}).")
         if self.shell_timeout <= 0:
             raise ValueError(f"tools.shell_timeout must be > 0 (got {self.shell_timeout}).")
+        if self.llm_timeout <= 0:
+            raise ValueError(f"llm.timeout must be > 0 (got {self.llm_timeout}).")
+        if self.llm_max_retries < 0:
+            raise ValueError(f"llm.max_retries must be >= 0 (got {self.llm_max_retries}).")
         if self.motivation.stale_block_days <= self.motivation.stale_flag_days:
             raise ValueError(
                 f"motivation.stale_block_days ({self.motivation.stale_block_days}) must be > "
@@ -246,6 +252,8 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
             or service.get("llm_model")
             or "deepseek-v4-flash"
         ),
+        llm_timeout=float(llm.get("timeout", 120.0)),
+        llm_max_retries=int(llm.get("max_retries", 2)),
         context_recent_episodes=int(context.get("recent_episodes", 3)),
         context_retrieved_memories=int(context.get("retrieved_memories", 5)),
         context_workspace_entries=int(context.get("workspace_entries", 12)),
@@ -329,6 +337,8 @@ external_side_effects = "{side_effects}"
 base_url = ""
 api_key = ""
 model = "deepseek-v4-flash"
+timeout = 120
+max_retries = 2
 
 [context]
 recent_episodes = 3

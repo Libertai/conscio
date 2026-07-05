@@ -41,10 +41,14 @@ Operational notes:
 base_url = "https://api.libertai.io/v1"
 api_key = ""
 model = "deepseek-v4-flash"
+timeout = 120
+max_retries = 2
 ```
 
 Environment fallbacks are `LIBERTAI_BASE_URL`, `LIBERTAI_API_KEY`,
 `LIBERTAI_MODEL`, `OPENAI_BASE_URL`, and `OPENAI_API_KEY`.
+`timeout` bounds each model call in seconds; `max_retries` is the per-call retry budget
+the OpenAI-compatible SDK applies to transport-level failures.
 
 ## Context, Engine, and Tools
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,7 @@ async def execute_code(
     if not code:
         return {"output": "No code provided.", "exit_code": -1}
     fd, path = tempfile.mkstemp(suffix=".py", prefix="conscio_")
+    proc: asyncio.subprocess.Process | None = None
     try:
         with __import__("os").fdopen(fd, "w") as f:
             f.write(code)
@@ -71,7 +73,17 @@ async def execute_code(
             parts.append(f"[exit code: {proc.returncode}]")
         return {"output": "\n".join(parts) if parts else "(no output)", "exit_code": proc.returncode or 0}
     except TimeoutError:
+        if proc is not None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            await proc.wait()
         return {"output": f"[timed out after {timeout}s]", "exit_code": -1}
+    except asyncio.CancelledError:
+        # Reap the child on cancellation too; otherwise it outlives the episode.
+        if proc is not None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        raise
     except Exception as e:
         return {"output": f"Error: {e}", "exit_code": -1}
     finally:

@@ -108,7 +108,7 @@ for key in \
   compaction_interval enable_semantic_compaction allowed denied \
   max_actions_per_hour model_tool_rounds shell_timeout working_directory \
   max_ticks tool_rounds_per_tick max_reflections attention_broadcast_limit \
-  attention_char_budget; do
+  attention_char_budget timeout max_retries; do
   has src/conscio/config.py "$key"
 done
 

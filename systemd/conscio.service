@@ -10,6 +10,9 @@ Environment=CONSCIO_CONFIG=/home/conscio/.conscio/config.toml
 ExecStart=/opt/conscio/.venv/bin/conscio service start
 Restart=always
 RestartSec=5
+# Exit code 3 = corrupt state database (see docs/runbooks/db-locked-or-corrupted.md);
+# restarting cannot help and would crash-loop.
+RestartPreventExitStatus=3
 User=conscio
 Group=conscio
 
