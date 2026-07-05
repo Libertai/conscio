@@ -299,10 +299,20 @@ class ConstraintValidator:
             {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
+        request_kwargs: dict[str, Any] = {
+            "temperature": 0.0,
+            "max_tokens": self.judge_max_tokens,
+        }
+        # The judge prompts for and parses strict JSON, so request structured
+        # output when the backend advertises it (the router downgrades an
+        # endpoint that rejects response_format and reports "none" thereafter).
+        support = getattr(self.llm, "response_format_support", None)
+        if callable(support):
+            mode = support()
+            if mode != "none":
+                request_kwargs["response_format"] = {"type": mode}
         try:
-            response = await self.llm.chat_async(
-                messages, temperature=0.0, max_tokens=self.judge_max_tokens
-            )
+            response = await self.llm.chat_async(messages, **request_kwargs)
         except Exception:
             return {}
         content = str(response.get("content", "") or "")

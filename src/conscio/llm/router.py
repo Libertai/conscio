@@ -8,6 +8,9 @@ holds an ``llm``: same ``chat_async(messages, **kwargs) -> dict`` shape and a
 (connection, timeout, 429, 5xx) fall through the target chain with jittered
 exponential backoff; a BadRequest while ``response_format`` was set downgrades
 that endpoint's structured-output capability and retries the same target once.
+Per-endpoint ``tool_choice`` support is honoured on tool-carrying calls, and
+``response_format_support`` resolves the endpoint's structured-output mode
+(consulted by JSON-parsing callers such as the constraint judge).
 """
 from __future__ import annotations
 
@@ -168,6 +171,22 @@ class RoleClient:
     def response_format_support(self) -> str:
         return self._router.response_format_support(self.spec.targets[0].endpoint)
 
+    def _apply_tool_choice(self, endpoint: str, call_kwargs: dict[str, Any]) -> None:
+        """Gate the ``tool_choice`` request arg on the endpoint's declared support.
+
+        Endpoints that advertise ``tool_choice`` get an explicit ``"auto"`` for
+        tool-carrying calls (unless the caller set one); endpoints that disable
+        it never receive the arg, so a backend that rejects the parameter is
+        never sent it.
+        """
+        if not call_kwargs.get("tools"):
+            return
+        spec = self._router.endpoints.get(endpoint)
+        if spec is None or not spec.tool_choice:
+            call_kwargs.pop("tool_choice", None)
+        else:
+            call_kwargs.setdefault("tool_choice", "auto")
+
     async def _backoff(self, attempt: int) -> None:
         base = self._router.retry_backoff
         if base > 0:
@@ -180,6 +199,7 @@ class RoleClient:
             client = self._router.client(target.endpoint)
             call_kwargs = dict(kwargs)
             call_kwargs.setdefault("model", target.model)
+            self._apply_tool_choice(target.endpoint, call_kwargs)
             try:
                 return await client.chat_async(messages, **call_kwargs)
             except openai.BadRequestError:
@@ -205,6 +225,7 @@ class RoleClient:
     def chat(self, messages: list[dict], **kwargs: Any) -> dict:
         target = self.spec.targets[0]
         kwargs.setdefault("model", target.model)
+        self._apply_tool_choice(target.endpoint, kwargs)
         return self._router.client(target.endpoint).chat(messages, **kwargs)
 
     async def chat_stream(self, messages: list[dict], **kwargs: Any):
@@ -213,6 +234,7 @@ class RoleClient:
             client = self._router.client(target.endpoint)
             call_kwargs = dict(kwargs)
             call_kwargs.setdefault("model", target.model)
+            self._apply_tool_choice(target.endpoint, call_kwargs)
             yielded = False
             try:
                 async for event in client.chat_stream(messages, **call_kwargs):

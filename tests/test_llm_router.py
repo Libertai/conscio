@@ -274,6 +274,37 @@ class RouterFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(stub_b.calls), 1)
 
 
+class ToolChoiceCapabilityTests(unittest.IsolatedAsyncioTestCase):
+    def _router(self, *, tool_choice: bool) -> tuple[LLMRouter, _StubClient]:
+        stub = _StubClient({"role": "assistant", "content": "ok"}, model="m")
+        endpoints = {
+            "a": EndpointSpec(name="a", base_url="http://a/v1", tool_choice=tool_choice)
+        }
+        roles = {"main": RoleSpec(name="main", targets=(RoleTarget("a", "m"),))}
+        return LLMRouter(endpoints, roles, client_factory=lambda spec: stub), stub
+
+    async def test_supported_endpoint_injects_auto_for_tool_calls(self) -> None:
+        router, stub = self._router(tool_choice=True)
+        await router.for_role("main").chat_async(
+            [{"role": "user", "content": "hi"}], tools=[{"type": "function"}]
+        )
+        self.assertEqual(stub.calls[0][1].get("tool_choice"), "auto")
+
+    async def test_supported_endpoint_leaves_toolless_calls_alone(self) -> None:
+        router, stub = self._router(tool_choice=True)
+        await router.for_role("main").chat_async([{"role": "user", "content": "hi"}])
+        self.assertNotIn("tool_choice", stub.calls[0][1])
+
+    async def test_unsupported_endpoint_strips_tool_choice(self) -> None:
+        router, stub = self._router(tool_choice=False)
+        await router.for_role("main").chat_async(
+            [{"role": "user", "content": "hi"}],
+            tools=[{"type": "function"}],
+            tool_choice="required",
+        )
+        self.assertNotIn("tool_choice", stub.calls[0][1])
+
+
 class ResponseFormatSupportTests(unittest.TestCase):
     def _router_with(self, mode: str) -> LLMRouter:
         endpoints = {"a": EndpointSpec(name="a", base_url="http://a/v1", response_format=mode)}

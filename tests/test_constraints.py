@@ -17,6 +17,17 @@ class JudgeStubLLM:
         return {"content": self.content}
 
 
+class StructuredJudgeStubLLM(JudgeStubLLM):
+    """Judge stub advertising a structured-output mode, like a RoleClient."""
+
+    def __init__(self, content: str, mode: str = "json_object") -> None:
+        super().__init__(content)
+        self._mode = mode
+
+    def response_format_support(self) -> str:
+        return self._mode
+
+
 class StructuralCheckerTests(unittest.IsolatedAsyncioTestCase):
     async def test_one_word_constraint_rejects_long_answer(self) -> None:
         validator = ConstraintValidator()
@@ -167,6 +178,28 @@ class SemanticConstraintTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(by_id["inf-9"].passed)
         self.assertIn("internals", by_id["inf-9"].detail)
         self.assertFalse(report.passed)
+
+    async def test_judge_requests_structured_output_when_supported(self) -> None:
+        llm = StructuredJudgeStubLLM(
+            '[{"constraint_id": "inf-8", "passed": true, "reason": "ok"}]'
+        )
+        validator = ConstraintValidator(llm=llm, judge_enabled=True)
+        constraints = validator.parse([{"id": "inf-8", "content": "Be polite."}])
+
+        await validator.validate("Sure!", constraints)
+
+        self.assertEqual(llm.kwargs[0].get("response_format"), {"type": "json_object"})
+
+    async def test_judge_omits_response_format_when_unsupported(self) -> None:
+        llm = StructuredJudgeStubLLM(
+            '[{"constraint_id": "inf-8", "passed": true, "reason": "ok"}]', mode="none"
+        )
+        validator = ConstraintValidator(llm=llm, judge_enabled=True)
+        constraints = validator.parse([{"id": "inf-8", "content": "Be polite."}])
+
+        await validator.validate("Sure!", constraints)
+
+        self.assertNotIn("response_format", llm.kwargs[0])
 
     async def test_judge_garbage_output_degrades_to_none(self) -> None:
         llm = JudgeStubLLM("I cannot judge this.")
