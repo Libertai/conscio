@@ -4,18 +4,20 @@ import asyncio
 import hmac
 import os
 import signal
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from conscio import __version__
 from conscio.config import ServiceConfig
 from conscio.service import ConscioService, EpisodeCancelled
+from conscio.web.events import encode_sse, stream_events
 from conscio.webui import create_web_router
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -76,6 +78,15 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
     async def metrics() -> dict[str, Any]:
         return await svc.metrics()
 
+    def _message_blob(result: Any) -> dict[str, Any]:
+        return {
+            "output": result.output,
+            "selected_action": result.selected_action,
+            "session_id": result.session_id,
+            "self_state": result.self_state,
+            "attention_schema": result.attention_schema,
+        }
+
     @app.post("/message", dependencies=[Depends(require_auth)])
     async def message(req: MessageRequest) -> dict[str, Any]:
         try:
@@ -90,13 +101,74 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
             ) from None
         except EpisodeCancelled as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {
-            "output": result.output,
-            "selected_action": result.selected_action,
-            "session_id": result.session_id,
-            "self_state": result.self_state,
-            "attention_schema": result.attention_schema,
+        return _message_blob(result)
+
+    @app.post("/message/stream", dependencies=[Depends(require_auth)])
+    async def message_stream(req: MessageRequest) -> StreamingResponse:
+        """SSE variant of /message: chat.token / chat.discard events for this
+        submission (matched by ref), terminated by message.result or
+        message.error. Not subject to message_timeout — the caller sees live
+        progress and can cancel instead."""
+        ref = uuid.uuid4().hex
+        broker = svc.event_broker
+        client = broker.register()  # before enqueue: no token can be missed
+        task = asyncio.create_task(
+            svc.submit_message(req.content, source=_validated_source(req.source), ref=ref)
+        )
+
+        async def _gen():
+            try:
+                while True:
+                    if task.done():
+                        while not client.queue.empty():
+                            payload = client.queue.get_nowait()
+                            if payload.get("ref") == ref and payload.get("type") in ("chat.token", "chat.discard"):
+                                yield encode_sse(payload, event=str(payload.get("type"))).encode("utf-8")
+                        try:
+                            blob = _message_blob(task.result())
+                            yield encode_sse(
+                                {"type": "message.result", "ref": ref, **blob}, event="message.result"
+                            ).encode("utf-8")
+                        except EpisodeCancelled as exc:
+                            yield encode_sse(
+                                {"type": "message.error", "ref": ref, "status": 409, "detail": str(exc)},
+                                event="message.error",
+                            ).encode("utf-8")
+                        except Exception as exc:  # noqa: BLE001 — terminal SSE frame, never a 500 mid-stream
+                            yield encode_sse(
+                                {"type": "message.error", "ref": ref, "status": 500, "detail": str(exc)},
+                                event="message.error",
+                            ).encode("utf-8")
+                        return
+                    try:
+                        payload = await asyncio.wait_for(client.queue.get(), timeout=0.25)
+                    except TimeoutError:
+                        continue
+                    if payload.get("ref") == ref and payload.get("type") in ("chat.token", "chat.discard"):
+                        yield encode_sse(payload, event=str(payload.get("type"))).encode("utf-8")
+            finally:
+                broker.unregister(client)
+
+        headers = {
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Content-Encoding": "identity",
         }
+        return StreamingResponse(_gen(), media_type="text/event-stream", headers=headers)
+
+    @app.get("/events", dependencies=[Depends(require_auth)])
+    async def events(request: Request) -> StreamingResponse:
+        """Bearer-authed mirror of the operator console SSE stream."""
+        headers = {
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Content-Encoding": "identity",
+        }
+        return StreamingResponse(
+            stream_events(svc.event_broker, is_disconnected=request.is_disconnected),
+            media_type="text/event-stream",
+            headers=headers,
+        )
 
     @app.post("/influence/goal", dependencies=[Depends(require_auth)])
     async def influence_goal(req: InfluenceRequest) -> dict[str, Any]:

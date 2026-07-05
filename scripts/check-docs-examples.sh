@@ -121,7 +121,8 @@ done
 
 # Public service endpoints in docs must exist in the FastAPI app.
 for endpoint in \
-  "/health" "/status" "/metrics" "/message" "/influence/goal" "/influence/constraint" \
+  "/health" "/status" "/metrics" "/message" "/message/stream" "/events" \
+  "/influence/goal" "/influence/constraint" \
   "/control/pause" "/control/resume" "/control/cancel" "/control/stop" "/goals" \
   "/influences" "/projects" "/autonomy/tick" "/episodes" "/trace" \
   "/memory/search"; do

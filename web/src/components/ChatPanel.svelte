@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { chat, loadHistory, sendMessage } from "$lib/stores/chat.svelte";
+  import { chatStream } from "$lib/stores/events.svelte";
 
   let composer = $state("");
   let textarea: HTMLTextAreaElement | undefined;
@@ -18,6 +19,7 @@
     if (!text) return;
     composer = "";
     await sendMessage(text);
+    chatStream.reset();
     await tick();
     scroller?.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" });
   }
@@ -35,8 +37,8 @@
   });
 
   $effect(() => {
-    // Re-scroll on each new message.
-    if (chat.messages.length && scroller) {
+    // Re-scroll on each new message or streamed token.
+    if ((chat.messages.length || chatStream.text) && scroller) {
       const isAtBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
       if (isAtBottom) scroller.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" });
     }
@@ -93,6 +95,22 @@
             </div>
           </li>
         {/each}
+        {#if chat.sending && chatStream.text}
+          <li class="grid grid-cols-[4rem_1fr] gap-4 items-baseline">
+            <span class="font-mono text-[10px] tabular smallcaps text-right pt-1"
+                  style="color: var(--color-fg-faint)">
+              agent
+              <br/>
+              <span style="color: color-mix(in oklab, var(--color-fg-faint) 70%, transparent)">live</span>
+            </span>
+            <div class="prose-tight">
+              <p class="text-base leading-relaxed whitespace-pre-wrap"
+                 style="color: var(--color-fg); opacity: 0.75; border-left: 2px solid var(--color-accent); padding-left: 0.875rem">
+                {chatStream.text}<span class="animate-pulse">▍</span>
+              </p>
+            </div>
+          </li>
+        {/if}
       </ul>
     {/if}
   </div>

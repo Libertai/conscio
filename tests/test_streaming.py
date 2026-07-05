@@ -379,3 +379,133 @@ class StreamingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(token.get("episode_id"))
         self.assertTrue(token.get("text"))
         self.assertIn("chat.final", types)
+
+
+LONG_TEXT = (
+    "The quick brown fox jumps over the lazy dog near the riverbank at dawn "
+    "before the sun has fully risen above the misty hills."
+)
+
+
+class ApiStreamingTests(unittest.IsolatedAsyncioTestCase):
+    """M7: /events and /message/stream SSE surfaces, mirroring the ApiTests
+    fixture pattern from tests/test_service.py."""
+
+    async def asyncSetUp(self) -> None:
+        import unittest.mock
+        from pathlib import Path
+
+        from conscio.config import load_config
+
+        self._env_patch = unittest.mock.patch.dict(
+            os.environ,
+            {
+                "LIBERTAI_BASE_URL": "",
+                "LIBERTAI_API_KEY": "",
+                "LIBERTAI_MODEL": "",
+                "OPENAI_BASE_URL": "",
+                "OPENAI_API_KEY": "",
+            },
+            clear=False,
+        )
+        self._env_patch.start()
+        self.tmp = tempfile.TemporaryDirectory()
+        config_path = Path(self.tmp.name) / "config.toml"
+        config_path.write_text(
+            "[service]\n"
+            f"home = \"{self.tmp.name}\"\n"
+            "api_key = \"test-key\"\n"
+            "autonomous = false\n",
+            encoding="utf-8",
+        )
+        self.config = load_config(config_path)
+
+    async def asyncTearDown(self) -> None:
+        self.tmp.cleanup()
+        self._env_patch.stop()
+
+    def _make_client(self, service):
+        import httpx
+
+        from conscio.api import create_app
+
+        app = create_app(service=service)
+        transport = httpx.ASGITransport(app=app)
+        return httpx.AsyncClient(transport=transport, base_url="http://test")
+
+    async def test_events_requires_auth(self) -> None:
+        try:
+            from conscio.service import ConscioService
+        except ModuleNotFoundError:
+            self.skipTest("fastapi is not installed in this environment")
+
+        service = ConscioService(self.config)
+        await service.start(background=False)
+        try:
+            async with self._make_client(service) as client:
+                denied = await client.get("/events")
+        finally:
+            await service.stop()
+
+        self.assertEqual(denied.status_code, 401)
+
+    async def test_message_stream_tokens_then_result(self) -> None:
+        import json
+
+        try:
+            from conscio.service import ConscioService
+        except ModuleNotFoundError:
+            self.skipTest("fastapi is not installed in this environment")
+
+        service = ConscioService(self.config)
+        service.runtime.chat_strategy.llm = StreamingStubLLM([{"content": LONG_TEXT}])
+        await service.start(background=False)
+        try:
+            async with self._make_client(service) as client:
+                async with client.stream(
+                    "POST",
+                    "/message/stream",
+                    headers={"Authorization": "Bearer test-key"},
+                    json={"content": "hello"},
+                ) as response:
+                    self.assertEqual(response.status_code, 200)
+                    self.assertTrue(response.headers["content-type"].startswith("text/event-stream"))
+                    events: list[tuple[str, dict]] = []
+                    name = ""
+                    async for line in response.aiter_lines():
+                        if line.startswith("event: "):
+                            name = line[len("event: "):].strip()
+                        elif line.startswith("data: "):
+                            events.append((name, json.loads(line[len("data: "):])))
+                            if name in ("message.result", "message.error"):
+                                break
+        finally:
+            await service.stop()
+
+        tokens = [(n, p) for n, p in events if n == "chat.token"]
+        self.assertTrue(tokens, f"expected at least one chat.token, got {events}")
+        for _, payload in tokens:
+            self.assertTrue(payload.get("text"), f"token text empty: {payload}")
+            self.assertTrue(payload.get("ref"), f"token missing ref: {payload}")
+        final_name, final_payload = events[-1]
+        self.assertEqual(final_name, "message.result", f"expected message.result, got {events[-1]}")
+        self.assertEqual(final_payload.get("output"), LONG_TEXT)
+        ref = tokens[0][1].get("ref")
+        self.assertEqual(final_payload.get("ref"), ref)
+        self.assertEqual("".join(payload["text"] for _, payload in tokens), LONG_TEXT)
+
+    async def test_message_stream_requires_auth(self) -> None:
+        try:
+            from conscio.service import ConscioService
+        except ModuleNotFoundError:
+            self.skipTest("fastapi is not installed in this environment")
+
+        service = ConscioService(self.config)
+        await service.start(background=False)
+        try:
+            async with self._make_client(service) as client:
+                denied = await client.post("/message/stream", json={"content": "hello"})
+        finally:
+            await service.stop()
+
+        self.assertEqual(denied.status_code, 401)

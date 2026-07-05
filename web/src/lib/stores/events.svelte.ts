@@ -27,6 +27,9 @@ let entries = $state<ActivityEntry[]>([]);
 let health = $state<StreamHealth>("connecting");
 let totalReceived = $state(0);
 
+let streamingText = $state("");
+let streamingActive = $state(false);
+
 // The server replays its backlog on every (re)connect; remember what we've
 // already shown so reconnects don't duplicate rows. `seq` keeps entry ids
 // unique even when two events share a timestamp.
@@ -83,6 +86,33 @@ export function startEventStream(): void {
     });
   }
 
+  // Live token stream for the in-flight chat episode. Kept out of `entries`
+  // (high-frequency, ephemeral); ChatPanel renders it as a provisional bubble.
+  // MUST filter on source: autonomous episodes stream through the same
+  // executor hook (payload source "autonomous:heartbeat" etc. — the service
+  // stamps `source = f"{event.source}:{event.event_type}"`), and one can be
+  // finishing while the user's message waits in the priority queue; its
+  // tokens must not contaminate the user chat bubble. The web chat POST
+  // (webui submit_message, default source "user") yields "user:message".
+  const _isUserChat = (e: any) => e.source === "user:message";
+  _stream.on("chat.token", (e: any) => {
+    if (!_isUserChat(e)) return;
+    streamingActive = true;
+    streamingText += typeof e.text === "string" ? e.text : "";
+  });
+  _stream.on("chat.discard", (e: any) => {
+    if (!_isUserChat(e)) return;
+    streamingText = "";
+  });
+  _stream.on("chat.final", (e: any) => {
+    if (!_isUserChat(e)) return;
+    streamingActive = false;
+  });
+  _stream.on("chat.message", () => {
+    streamingText = "";
+    streamingActive = false;
+  });
+
   // Service-level events.
   for (const t of ["chat.message", "episode.created", "project.updated", "goal.changed", "control.paused"]) {
     _stream.on(t, (e: any) => {
@@ -105,6 +135,12 @@ export function stopEventStream(): void {
   _stream?.stop();
   _stream = null;
 }
+
+export const chatStream = {
+  get text() { return streamingText; },
+  get active() { return streamingActive; },
+  reset() { streamingText = ""; streamingActive = false; },
+};
 
 export const events = {
   get entries() { return entries; },

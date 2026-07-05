@@ -25,6 +25,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Token streaming from the tool loop: `ToolLoopSession` can emit per-round token events
   (DSML-leak-gated) that the service republishes as `chat.token` / `chat.discard` /
   `chat.final` SSE events.
+- `POST /message/stream` and bearer-authed `GET /events` SSE endpoints; `conscio chat
+  --stream`; live token rendering in the CLI (`run`/`ask`) and the web chat panel.
 
 ### Fixed
 - `bash` and `execute_code` terminate their child process on timeout or cancellation

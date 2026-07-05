@@ -73,6 +73,20 @@ def _print_monologue(monologue_text: str) -> None:
     console.print(tree)
 
 
+def _attach_stream_printer(agent: ConsciousAgent) -> None:
+    """Print tokens live during local episodes; the result panel that follows
+    is the authoritative rendering."""
+
+    def _on_stream_event(data: dict[str, Any]) -> None:
+        event = data.get("event")
+        if event == "token":
+            console.print(data.get("text", ""), end="", soft_wrap=True, style="dim")
+        elif event in ("discard", "final"):
+            console.print()
+
+    agent.runtime.executor.on_stream_event = _on_stream_event
+
+
 def _print_result(result) -> None:
     info = Table.grid(padding=(0, 2))
     info.add_column(style="bold")
@@ -127,6 +141,7 @@ async def _run_interactive(
     ))
     agent = ConsciousAgent(name=name, persona=persona, model=model, use_llm=not offline)
     await agent.initialize()
+    _attach_stream_printer(agent)
     try:
         while True:
             try:
@@ -169,6 +184,8 @@ async def _run_ask(
 ) -> None:
     agent = ConsciousAgent(name=name, persona=persona, model=model, use_llm=not offline)
     await agent.initialize()
+    if not quiet:
+        _attach_stream_printer(agent)
     try:
         if not quiet:
             console.print("[dim]Thinking...[/]")
@@ -371,6 +388,46 @@ async def _service_status() -> None:
 async def _client_chat(message: str) -> None:
     data = await _client_request("POST", "/message", json_data={"content": message})
     console.print(Panel(Markdown(data.get("output", "")), title="Conscio", border_style="green"))
+
+
+async def _client_chat_stream(message: str) -> None:
+    """Live-token variant of _client_chat; falls back to /message on 404
+    (older service without the streaming endpoint)."""
+    cfg = load_config()
+    if not cfg.api_key:
+        raise SystemExit("No API key configured. Run `conscio service init` first.")
+    async with httpx.AsyncClient(base_url=cfg.base_url, timeout=None) as client:
+        async with client.stream(
+            "POST",
+            "/message/stream",
+            headers=_service_headers(cfg.api_key),
+            json={"content": message},
+        ) as response:
+            if response.status_code == 404:
+                await _client_chat(message)
+                return
+            response.raise_for_status()
+            event_name = ""
+            streamed = False
+            async for line in response.aiter_lines():
+                if line.startswith("event: "):
+                    event_name = line[len("event: "):].strip()
+                    continue
+                if not line.startswith("data: "):
+                    continue
+                payload = json.loads(line[len("data: "):])
+                if event_name == "chat.token":
+                    streamed = True
+                    console.print(payload.get("text", ""), end="", soft_wrap=True)
+                elif event_name == "chat.discard":
+                    console.print("\n[dim]… running tools …[/]")
+                elif event_name == "message.result":
+                    if streamed:
+                        console.print()
+                    console.print(Panel(Markdown(payload.get("output", "")), title="Conscio", border_style="green"))
+                    return
+                elif event_name == "message.error":
+                    raise SystemExit(f"agent error ({payload.get('status')}): {payload.get('detail')}")
 
 
 async def _client_influence(kind: str, content: str) -> None:
@@ -775,6 +832,7 @@ def main() -> None:
 
     chat_p = sub.add_parser("chat", help="Send a message to the running service")
     chat_p.add_argument("message", nargs="+", help="Message to send")
+    chat_p.add_argument("--stream", action="store_true", help="Stream tokens live over /message/stream")
     influence_p = sub.add_parser("influence", help="Influence the running service")
     influence_sub = influence_p.add_subparsers(dest="influence_kind")
     influence_goal_p = influence_sub.add_parser("goal", help="Submit a goal influence")
@@ -851,7 +909,10 @@ def main() -> None:
             tools_p.print_help()
             sys.exit(1)
     elif args.command == "chat":
-        asyncio.run(_client_chat(" ".join(args.message)))
+        if args.stream:
+            asyncio.run(_client_chat_stream(" ".join(args.message)))
+        else:
+            asyncio.run(_client_chat(" ".join(args.message)))
     elif args.command == "influence":
         if args.influence_kind in {"goal", "constraint"}:
             asyncio.run(_client_influence(args.influence_kind, " ".join(args.content)))
