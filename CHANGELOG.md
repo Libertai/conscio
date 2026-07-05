@@ -8,6 +8,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Structured output (response_format/json_schema) for the constraint judge, appraisal, and goal review, with tolerant hand-parse fallback.
 - LLM router: named endpoints ([llm.endpoints.*]), per-role models ([llm.roles.*]) for main/fast/embeddings/subagent, and fallback chains with jittered backoff.
 - `conscio --version`, and the package version in `/health` and the OpenAPI schema.
 - `[llm] timeout` and `[llm] max_retries` configuration keys (previously hardcoded).

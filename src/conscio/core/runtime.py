@@ -48,6 +48,7 @@ from conscio.core.executor import AutonomousStrategy, ChatStrategy, EpisodeExecu
 from conscio.core.prediction import PredictionEngine
 from conscio.core.tool_loop import StepResult
 from conscio.core.workspace import EntryType, Workspace, WorkspaceEntry
+from conscio.llm.structured import structured_json
 from conscio.memory.consolidation import ConsolidationEngine
 from conscio.memory.store import MemoryStore
 from conscio.tools import ToolRegistry
@@ -249,6 +250,26 @@ _LLM_APPRAISAL_SYSTEM_PROMPT = (
     "return salience, novelty and urgency in [0,1]. Respond with ONLY a JSON "
     'array: [{"index": 0, "salience": 0.5, "novelty": 0.5, "urgency": 0.5}].'
 )
+
+_APPRAISAL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "scores": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer"},
+                    "salience": {"type": "number"},
+                    "novelty": {"type": "number"},
+                    "urgency": {"type": "number"},
+                },
+                "required": ["index"],
+            },
+        }
+    },
+    "required": ["scores"],
+}
 
 # Event sources that are pure observations: ingested into the workspace but
 # never executed against the LLM (no user to answer, no heartbeat to act on).
@@ -706,21 +727,20 @@ class CognitiveRuntime:
         ]
         try:
             llm = self.llm_fast or self.chat_strategy.llm
-            response = await llm.chat_async(
-                messages, temperature=0.0, max_tokens=self._appraisal_max_tokens
+            data = await structured_json(
+                llm,
+                messages,
+                schema=_APPRAISAL_SCHEMA,
+                schema_name="appraisal_scores",
+                max_tokens=self._appraisal_max_tokens,
             )
         except Exception:  # noqa: BLE001 — heuristics already stamped
             return False
-        content = str(response.get("content", "") or "")
-        start, end = content.find("["), content.rfind("]")
-        if start == -1 or end <= start:
+        if isinstance(data, dict):
+            data = data.get("scores")
+        if not isinstance(data, list):
             return True
-        try:
-            items = json.loads(content[start : end + 1])
-        except (json.JSONDecodeError, ValueError):
-            return True
-        if not isinstance(items, list):
-            return True
+        items = data
         for item in items:
             if not isinstance(item, dict):
                 continue

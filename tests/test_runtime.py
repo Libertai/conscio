@@ -4,10 +4,11 @@ import os
 import tempfile
 import unittest
 
+from conscio.config import AblationFlags
 from conscio.core.cognition import InputEvent
 from conscio.core.context import ContextSettings, PromptAssembler
 from conscio.core.runtime import CognitiveRuntime
-from conscio.core.workspace import EntryType, Visibility
+from conscio.core.workspace import EntryType, Visibility, WorkspaceEntry
 from conscio.eval import run_eval_suite
 from conscio.memory.store import MemoryStore
 from conscio.tools import ToolRegistry
@@ -587,6 +588,45 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.output, "Final summary from observed tools.")
         self.assertEqual(result.metrics.tool_calls, 4)
         self.assertNotIn("tool limit", result.output.lower())
+
+    async def test_llm_appraisal_accepts_wrapped_scores_object(self) -> None:
+        # Flag-gated LLM appraisal with a json_schema-style {"scores": [...]}
+        # wrapped object: the entry's salience is raised (hand-parse handles the
+        # new shape, plain stub gets no response_format).
+        class AppraisalStubLLM:
+            def __init__(self, content: str) -> None:
+                self.content = content
+                self.kwargs: list[dict] = []
+
+            async def chat_async(self, messages, **kwargs):
+                self.kwargs.append(kwargs)
+                return {"content": self.content}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            llm = AppraisalStubLLM('{"scores": [{"index": 0, "salience": 1.0}]}')
+            runtime = CognitiveRuntime(
+                llm=llm,  # type: ignore[arg-type]
+                memory=MemoryStore(db_path=os.path.join(tmp, "appraisal.db")),
+                ablation=AblationFlags(llm_appraisal=True),
+            )
+            await runtime.initialize()
+            try:
+                entry = WorkspaceEntry(
+                    content="an urgent observation that needs attention",
+                    source="user",
+                    type=EntryType.OBSERVATION,
+                    salience=0.2,
+                    novelty=0.2,
+                    urgency=0.2,
+                )
+                raised = await runtime._llm_appraise([entry])
+            finally:
+                await runtime.close()
+
+        self.assertTrue(raised)
+        self.assertEqual(entry.salience, 1.0)
+        # Plain stub never receives a response_format kwarg.
+        self.assertNotIn("response_format", llm.kwargs[0])
 
 
 class DsmlToolCallParserTests(unittest.IsolatedAsyncioTestCase):

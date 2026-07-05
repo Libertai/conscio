@@ -248,6 +248,37 @@ class SemanticConstraintTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(report.passed)
         self.assertEqual([v.constraint_id for v in report.violations], ["inf-11"])
 
+    async def test_judge_sends_response_format_when_supported(self) -> None:
+        # A json_schema-capable endpoint judging with the wrapped-object shape:
+        # the check passes AND structured_json sends the full schema payload.
+        llm = StructuredJudgeStubLLM(
+            '{"verdicts": [{"constraint_id": "inf-8", "passed": true, "reason": "ok"}]}',
+            mode="json_schema",
+        )
+        validator = ConstraintValidator(llm=llm, judge_enabled=True)
+        constraints = validator.parse([{"id": "inf-8", "content": "Be polite."}])
+
+        report = await validator.validate("Sure!", constraints)
+
+        by_id = {check.constraint_id: check for check in report.checks}
+        self.assertTrue(by_id["inf-8"].passed)
+        fmt = llm.kwargs[0].get("response_format", {})
+        self.assertEqual(fmt.get("type"), "json_schema")
+        self.assertIn("schema", fmt.get("json_schema") or {})
+
+    async def test_judge_accepts_wrapped_verdicts(self) -> None:
+        # The hand-parse path tolerates the json_schema-style {"verdicts": [...]}
+        # shape too, even from a plain stub that advertises no support.
+        llm = JudgeStubLLM('{"verdicts": [{"constraint_id": "inf-8", "passed": true, "reason": "ok"}]}')
+        validator = ConstraintValidator(llm=llm, judge_enabled=True)
+        constraints = validator.parse([{"id": "inf-8", "content": "Be polite."}])
+
+        report = await validator.validate("Sure!", constraints)
+
+        by_id = {check.constraint_id: check for check in report.checks}
+        self.assertTrue(by_id["inf-8"].passed)
+        self.assertNotIn("response_format", llm.kwargs[0])
+
 
 if __name__ == "__main__":
     unittest.main()

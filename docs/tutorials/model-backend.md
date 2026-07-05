@@ -70,3 +70,12 @@ conscio chat "Reply with one short sentence."
 Use a model that emits valid OpenAI-style tool calls if you expect autonomous
 tool use. If tool calls appear as plain text in `/trace`, switch models or
 reduce autonomy until parser support is confirmed.
+
+Internal JSON calls (the constraint judge, appraisal, and goal review) send an
+OpenAI `response_format` parameter when the endpoint's `response_format`
+capability flag allows it (`json_schema` when a schema is supported, else
+`json_object`), and always fall back to tolerant balanced-bracket text parsing
+of the reply content — structured mode is decoration, the hand-parse is the
+contract. Set `response_format = "none"` on an endpoint that 400s on the
+parameter; auto-detection also downgrades to plain text at runtime when a
+request is rejected.

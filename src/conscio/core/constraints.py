@@ -15,6 +15,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from conscio.llm.structured import structured_json
+
 Checker = Callable[[str], tuple[bool, str]]
 
 
@@ -176,6 +178,25 @@ _JUDGE_SYSTEM_PROMPT = (
     'JSON array: [{"constraint_id": "...", "passed": true|false, "reason": "..."}].'
 )
 
+_JUDGE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "verdicts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "constraint_id": {"type": "string"},
+                    "passed": {"type": "boolean"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["constraint_id", "passed"],
+            },
+        }
+    },
+    "required": ["verdicts"],
+}
+
 
 class ConstraintValidator:
     """Parses constraint rows / user input into checkable constraints and validates answers.
@@ -299,27 +320,17 @@ class ConstraintValidator:
             {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
-        request_kwargs: dict[str, Any] = {
-            "temperature": 0.0,
-            "max_tokens": self.judge_max_tokens,
-        }
-        # The judge prompts for and parses strict JSON, so request structured
-        # output when the backend advertises it (the router downgrades an
-        # endpoint that rejects response_format and reports "none" thereafter).
-        support = getattr(self.llm, "response_format_support", None)
-        if callable(support):
-            mode = support()
-            if mode in ("json_object", "json_schema"):
-                # No schema at this callsite, and {"type": "json_schema"}
-                # without a json_schema payload is an invalid request body —
-                # schema-capable endpoints still get plain json_object here.
-                request_kwargs["response_format"] = {"type": "json_object"}
         try:
-            response = await self.llm.chat_async(messages, **request_kwargs)
+            data = await structured_json(
+                self.llm,
+                messages,
+                schema=_JUDGE_SCHEMA,
+                schema_name="constraint_verdicts",
+                max_tokens=self.judge_max_tokens,
+            )
         except Exception:
             return {}
-        content = str(response.get("content", "") or "")
-        items = self._parse_judge_json(content)
+        items = self._normalize_judge_items(data)
         verdicts: dict[str, tuple[bool | None, str]] = {}
         for item in items:
             if not isinstance(item, dict):
@@ -334,16 +345,12 @@ class ConstraintValidator:
         return verdicts
 
     @staticmethod
-    def _parse_judge_json(content: str) -> list[Any]:
-        start = content.find("[")
-        end = content.rfind("]")
-        if start == -1 or end == -1 or end < start:
-            return []
-        try:
-            parsed = json.loads(content[start : end + 1])
-        except (json.JSONDecodeError, ValueError):
-            return []
-        return parsed if isinstance(parsed, list) else []
+    def _normalize_judge_items(data: Any) -> list[Any]:
+        """Accept the prompt's bare array or json_schema's {"verdicts": [...]}."""
+        if isinstance(data, dict):
+            wrapped = data.get("verdicts")
+            return wrapped if isinstance(wrapped, list) else []
+        return data if isinstance(data, list) else []
 
     @staticmethod
     def _coerce_bool(value: Any) -> bool | None:

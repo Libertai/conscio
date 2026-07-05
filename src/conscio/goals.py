@@ -11,6 +11,8 @@ from typing import Any
 
 import numpy as np
 
+from conscio.llm.structured import first_json_value as _first_json_value
+from conscio.llm.structured import structured_json
 from conscio.memory import embeddings as _embeddings
 from conscio.memory.store import MemoryStore
 
@@ -88,65 +90,35 @@ GOAL_DUP_THRESHOLD = 0.88
 
 _INFLUENCE_DECISIONS = ("adopt", "negotiate", "defer", "reject")
 
-_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
+_INFLUENCE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "decision": {"type": "string", "enum": list(_INFLUENCE_DECISIONS)},
+        "reasoning": {"type": "string"},
+        "response_to_user": {"type": "string"},
+    },
+    "required": ["decision"],
+}
 
-
-def _extract_balanced(text: str, start: int) -> str | None:
-    """Balanced-bracket scan from `start` (a '[' or '{'), string-aware.
-
-    Generalizes tool_loop's object-only `_extract_balanced_json` to arrays.
-    """
-    if text[start] not in "[{":
-        return None
-    depth = 0
-    in_string = False
-    escape = False
-    for i in range(start, len(text)):
-        ch = text[i]
-        if in_string:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_string = False
-            continue
-        if ch == '"':
-            in_string = True
-        elif ch in "[{":
-            depth += 1
-        elif ch in "]}":
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
-    return None
-
-
-def _first_json_value(raw: str) -> Any | None:
-    """Extract the first parseable JSON array/object from free-form LLM text.
-
-    Tries fenced ```json blocks first, then a balanced-bracket scan over the
-    raw text (replaces the greedy `\\[.*\\]` regex that choked on prose).
-    """
-    if not raw:
-        return None
-    candidates: list[str] = []
-    fence = _JSON_FENCE_RE.search(raw)
-    if fence:
-        candidates.append(fence.group(1))
-    candidates.append(raw)
-    for text in candidates:
-        for idx, ch in enumerate(text):
-            if ch not in "[{":
-                continue
-            chunk = _extract_balanced(text, idx)
-            if chunk is None:
-                continue
-            try:
-                return json.loads(chunk)
-            except json.JSONDecodeError:
-                continue
-    return None
+_REVIEW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "decisions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "goal_id": {"type": "string"},
+                    "action": {"type": "string", "enum": ["keep", "retire", "reprioritize"]},
+                    "new_priority": {"type": "number"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["goal_id", "action"],
+            },
+        }
+    },
+    "required": ["decisions"],
+}
 
 
 @dataclass
@@ -525,13 +497,18 @@ class GoalStore:
             },
             {"role": "user", "content": "\n".join(lines)},
         ]
-        raw = ""
+        data: Any | None = None
         try:
-            response = await llm.chat_async(messages, temperature=0.2, max_tokens=400)
-            raw = str(response.get("content") or "").strip()
+            data = await structured_json(
+                llm,
+                messages,
+                schema=_INFLUENCE_SCHEMA,
+                schema_name="influence_decision",
+                temperature=0.2,
+                max_tokens=400,
+            )
         except Exception as exc:  # noqa: BLE001 — appraisal is best-effort
             logger.warning("influence appraisal LLM call failed: %s", exc)
-        data = _first_json_value(raw)
         if not isinstance(data, dict):
             return InfluenceDecision(
                 decision="negotiate",
@@ -784,8 +761,20 @@ class GoalStore:
             },
             {"role": "user", "content": prompt},
         ]
-        response = await llm.chat_async(messages, temperature=0.2, max_tokens=2400)
-        raw = str(response.get("content") or "").strip()
+        support = getattr(llm, "response_format_support", None)
+        if callable(support) and support() != "none":
+            data = await structured_json(
+                llm,
+                messages,
+                schema=_REVIEW_SCHEMA,
+                schema_name="goal_review",
+                temperature=0.2,
+                max_tokens=2400,
+            )
+            raw = json.dumps(data) if data is not None else ""
+        else:
+            response = await llm.chat_async(messages, temperature=0.2, max_tokens=2400)
+            raw = str(response.get("content") or "").strip()
         decisions = self._parse_review_decisions(raw)
         if not decisions:
             if raw:
