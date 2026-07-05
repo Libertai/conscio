@@ -48,7 +48,6 @@ from conscio.core.executor import AutonomousStrategy, ChatStrategy, EpisodeExecu
 from conscio.core.prediction import PredictionEngine
 from conscio.core.tool_loop import StepResult
 from conscio.core.workspace import EntryType, Workspace, WorkspaceEntry
-from conscio.llm.client import LLMClient
 from conscio.memory.consolidation import ConsolidationEngine
 from conscio.memory.store import MemoryStore
 from conscio.tools import ToolRegistry
@@ -262,7 +261,7 @@ class CognitiveRuntime:
     def __init__(
         self,
         *,
-        llm: LLMClient | None = None,
+        llm: Any | None = None,
         memory: MemoryStore | None = None,
         tools: ToolRegistry | None = None,
         session_id: str | None = None,
@@ -277,6 +276,12 @@ class CognitiveRuntime:
         constraint_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None,
         context_settings: ContextSettings | None = None,
         context_provider: Any | None = None,
+        llm_fast: Any | None = None,
+        chat_temperature: float = 0.4,
+        autonomous_temperature: float = 0.3,
+        loop_max_tokens: int = 2400,
+        judge_max_tokens: int = 200,
+        appraisal_max_tokens: int = 400,
     ) -> None:
         self.session_id = session_id or uuid.uuid4().hex[:16]
         self.ablation = ablation or AblationFlags()
@@ -302,8 +307,12 @@ class CognitiveRuntime:
         self.context_settings = context_settings or ContextSettings()
         self.prompt_assembler = PromptAssembler(self.context_settings)
         self.last_model_context = ""
+        self.llm_fast = llm_fast
+        self._appraisal_max_tokens = appraisal_max_tokens
         self.validator = ConstraintValidator(
-            llm=llm, judge_enabled=self.ablation.constraint_judge
+            llm=llm_fast or llm,
+            judge_enabled=self.ablation.constraint_judge,
+            judge_max_tokens=judge_max_tokens,
         )
         self.chat_strategy = ChatStrategy(
             assembler=self.prompt_assembler,
@@ -319,6 +328,8 @@ class CognitiveRuntime:
             context_provider=context_provider,
             llm=llm,
         )
+        self.chat_strategy.temperature = chat_temperature
+        self.autonomous_strategy.temperature = autonomous_temperature
         self.executor = EpisodeExecutor(
             tools=self.tools,
             memory=self.memory,
@@ -327,6 +338,7 @@ class CognitiveRuntime:
             autonomous=self.autonomous_strategy,
             max_total_rounds=max_tool_rounds,
             rounds_per_tick=tool_rounds_per_tick,
+            max_tokens=loop_max_tokens,
             prediction=self.prediction,
         )
         self.modules = modules or self._default_modules()
@@ -693,8 +705,9 @@ class CognitiveRuntime:
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
         try:
-            response = await self.chat_strategy.llm.chat_async(
-                messages, temperature=0.0, max_tokens=400
+            llm = self.llm_fast or self.chat_strategy.llm
+            response = await llm.chat_async(
+                messages, temperature=0.0, max_tokens=self._appraisal_max_tokens
             )
         except Exception:  # noqa: BLE001 — heuristics already stamped
             return False

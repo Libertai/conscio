@@ -16,7 +16,7 @@ from conscio.core.context import ContextSettings, provenance_marker
 from conscio.core.runtime import CognitiveRuntime, EpisodeResult
 from conscio.core.tool_loop import external_taint_origin
 from conscio.goals import GoalStore
-from conscio.llm.client import LLMClient
+from conscio.llm.router import LLMRouter
 from conscio.memory.consolidation import ConsolidationEngine
 from conscio.memory.embeddings import LibertAIEmbedder
 from conscio.memory.store import MemoryStore
@@ -172,16 +172,12 @@ class ConscioService:
         )
         tools.load_builtins()
         self._register_self_tools(tools)
-        llm = None
-        if self.config.llm_base_url:
-            llm = LLMClient(
-                base_url=self.config.llm_base_url,
-                api_key=self.config.llm_api_key,
-                model=self.config.llm_model,
-                timeout=self.config.llm_timeout,
-                max_retries=self.config.llm_max_retries,
-            )
-            self.memory.embedder = LibertAIEmbedder(llm)
+        self.router = LLMRouter.from_config(self.config)
+        llm = self.router.for_role("main") if self.router is not None else None
+        self.llm_fast = self.router.for_role("fast") if self.router is not None else None
+        if self.router is not None:
+            embed_client = self.router.for_role("embeddings")
+            self.memory.embedder = LibertAIEmbedder(embed_client, model=embed_client.model)
         context_settings = ContextSettings(
             recent_episodes=self.config.context_recent_episodes,
             retrieved_memories=self.config.context_retrieved_memories,
@@ -210,6 +206,12 @@ class ConscioService:
             attention_char_budget=self.config.attention_char_budget,
             ablation=self.config.ablation,
             constraint_provider=self.goals.active_constraints,
+            llm_fast=self.llm_fast,
+            chat_temperature=self.config.chat_temperature,
+            autonomous_temperature=self.config.autonomous_temperature,
+            loop_max_tokens=(self.router.roles["main"].max_tokens if self.router is not None else None) or 2400,
+            judge_max_tokens=self.config.judge_max_tokens,
+            appraisal_max_tokens=self.config.appraisal_max_tokens,
         )
         # Strategy wiring through the public surface (no module-private pokes).
         self.runtime.autonomous_strategy.context_provider = self._autonomous_context_state
@@ -218,7 +220,7 @@ class ConscioService:
         self.episode_taint = EpisodeTaint()
         # Periodic budgeted consolidation (design §4.3): one persistent engine
         # so _last_cycle_ts carries the summarization window across cycles.
-        self.consolidation = ConsolidationEngine(self.memory, llm=llm)
+        self.consolidation = ConsolidationEngine(self.memory, llm=self.llm_fast or llm)
         self._consolidation_ticks = 0
         self._add_only_ticks = 0
         self._current_goal_id: str | None = None
@@ -625,7 +627,7 @@ class ConscioService:
 
     async def submit_influence(self, content: str, *, kind: str = "goal", source: str = "user") -> dict[str, Any]:
         influence = await self.goals.add_influence(
-            content, kind=kind, source=source, llm=self.runtime.autonomous_strategy.llm
+            content, kind=kind, source=source, llm=self.llm_fast or self.runtime.autonomous_strategy.llm
         )
         await self._submit_event(
             InputEvent(
@@ -766,7 +768,7 @@ class ConscioService:
             try:
                 await self.autonomy.record_action("goal_review_attempt")
                 applied = await self.goals.review_with_llm(
-                    self.runtime.autonomous_strategy.llm,
+                    self.llm_fast or self.runtime.autonomous_strategy.llm,
                     recent_episodes=await self.memory.recent_episodes(15),
                     recent_influences=await self.goals.list_influences(15),
                 )
@@ -809,7 +811,7 @@ class ConscioService:
         write hot path, only inside the consolidation cycle)."""
         if not self.config.enable_contradiction_check:
             return None
-        llm = self.runtime.autonomous_strategy.llm
+        llm = self.llm_fast or self.runtime.autonomous_strategy.llm
         if llm is None:
             return None
 

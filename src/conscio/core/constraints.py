@@ -186,9 +186,12 @@ class ConstraintValidator:
     otherwise recorded with ``passed=None`` (not blocking).
     """
 
-    def __init__(self, *, llm: Any = None, judge_enabled: bool = False) -> None:
+    def __init__(
+        self, *, llm: Any = None, judge_enabled: bool = False, judge_max_tokens: int = 200
+    ) -> None:
         self.llm = llm
         self.judge_enabled = judge_enabled
+        self.judge_max_tokens = judge_max_tokens
 
     def parse(self, rows: list[dict]) -> list[ParsedConstraint]:
         """Parse persistent constraint rows (from ``goals.active_constraints()``)."""
@@ -297,7 +300,9 @@ class ConstraintValidator:
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
         try:
-            response = await self.llm.chat_async(messages, temperature=0.0, max_tokens=200)
+            response = await self.llm.chat_async(
+                messages, temperature=0.0, max_tokens=self.judge_max_tokens
+            )
         except Exception:
             return {}
         content = str(response.get("content", "") or "")

@@ -273,6 +273,7 @@ class EpisodeExecutor:
         autonomous: AutonomousStrategy,
         max_total_rounds: int = 32,
         rounds_per_tick: int = 4,
+        max_tokens: int = 2400,
         prediction: PredictionEngine,
     ) -> None:
         self.tools = tools
@@ -282,6 +283,7 @@ class EpisodeExecutor:
         self.autonomous = autonomous
         self.max_total_rounds = max(1, int(max_total_rounds))
         self.rounds_per_tick = max(1, int(rounds_per_tick))
+        self.max_tokens = max_tokens
         self.prediction = prediction
         self.last_model_context = ""
         self.tool_requests: list[ToolRequest] = []
@@ -359,6 +361,7 @@ class EpisodeExecutor:
                 messages=list(assembled.messages),
                 temperature=self._strategy.temperature,
                 max_total_rounds=self.max_total_rounds,
+                max_tokens=self.max_tokens,
                 on_tool_observation=self._on_tool_observation,
                 pre_tool_hook=self._pre_tool_hook,
             )

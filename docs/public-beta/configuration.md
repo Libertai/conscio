@@ -43,12 +43,60 @@ api_key = ""
 model = "deepseek-v4-flash"
 timeout = 120
 max_retries = 2
+retry_backoff = 0.5
+embedding_model = "bge-m3"
 ```
 
 Environment fallbacks are `LIBERTAI_BASE_URL`, `LIBERTAI_API_KEY`,
 `LIBERTAI_MODEL`, `OPENAI_BASE_URL`, and `OPENAI_API_KEY`.
 `timeout` bounds each model call in seconds; `max_retries` is the per-call retry budget
-the OpenAI-compatible SDK applies to transport-level failures.
+the OpenAI-compatible SDK applies to transport-level failures. `retry_backoff` is the
+base (seconds) for jittered exponential backoff between fallback attempts.
+`embedding_model` selects the model used by memory embedding retrieval.
+
+### Named endpoints and roles
+
+For multi-provider or multi-model setups, define named endpoints under
+`[llm.endpoints.<name>]` and assign roles under `[llm.roles.<role>]`. Endpoint
+keys are `base_url`, `api_key`, `timeout`, `max_retries`, `response_format`, and
+`tool_choice`; role keys are `endpoint`, `model`, `max_tokens`, and `fallback`.
+
+```toml
+[llm.endpoints.primary]
+base_url = "https://api.libertai.io/v1"
+api_key = ""
+timeout = 120
+max_retries = 2
+response_format = "auto"   # auto | none | json_object | json_schema
+tool_choice = true
+
+[llm.endpoints.local]
+base_url = "http://127.0.0.1:8080/v1"
+api_key = ""
+timeout = 60
+max_retries = 1
+response_format = "none"
+tool_choice = true
+
+[llm.roles.main]
+endpoint = "primary"
+model = "deepseek-v4-flash"
+max_tokens = 2400
+fallback = [{ endpoint = "local", model = "qwen3.6-27b" }]
+
+[llm.roles.fast]
+endpoint = "local"
+model = "qwen3.6-27b"
+```
+
+`fallback` is an ordered list of `{ endpoint, model }` pairs tried after the
+primary target on transport-class failures (connection, timeout, 429, 5xx); the
+router walks the chain with jittered exponential backoff.
+
+Roles select a model for a purpose: `main` drives the tool loop; `fast` handles
+the constraint judge, LLM appraisal, consolidation, and goal review; `embeddings`
+serves memory retrieval; `subagent` is reserved for spawned sub-tasks. Any role
+left unset falls back to `main`.
 
 ## Context, Engine, and Tools
 
@@ -67,6 +115,10 @@ tool_rounds_per_tick = 4
 max_reflections = 2
 attention_broadcast_limit = 6
 attention_char_budget = 4000
+chat_temperature = 0.4
+autonomous_temperature = 0.3
+judge_max_tokens = 200
+appraisal_max_tokens = 400
 
 [tools]
 allowed = []

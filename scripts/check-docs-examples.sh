@@ -108,7 +108,9 @@ for key in \
   compaction_interval enable_semantic_compaction allowed denied \
   max_actions_per_hour model_tool_rounds shell_timeout working_directory \
   max_ticks tool_rounds_per_tick max_reflections attention_broadcast_limit \
-  attention_char_budget timeout max_retries; do
+  attention_char_budget timeout max_retries \
+  retry_backoff embedding_model endpoint fallback response_format tool_choice \
+  chat_temperature autonomous_temperature judge_max_tokens appraisal_max_tokens; do
   has src/conscio/config.py "$key"
 done
 

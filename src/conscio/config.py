@@ -47,6 +47,38 @@ class MotivationConfig:
     stale_block_days: float = 5.0
 
 
+_RESPONSE_FORMAT_MODES = ("auto", "none", "json_object", "json_schema")
+_LLM_ROLE_NAMES = ("main", "fast", "embeddings", "subagent")
+
+
+@dataclass(frozen=True)
+class LLMEndpointConfig:
+    """One named OpenAI-compatible endpoint from an [llm.endpoints.<name>] table."""
+
+    name: str
+    base_url: str
+    api_key: str = ""
+    timeout: float = 120.0
+    max_retries: int = 2
+    response_format: str = "auto"  # "auto" | "none" | "json_object" | "json_schema"
+    tool_choice: bool = True
+
+
+@dataclass(frozen=True)
+class LLMRoleConfig:
+    """Model selection for one role from an [llm.roles.<role>] table.
+
+    ``fallback`` is an ordered tuple of (endpoint, model) pairs tried after the
+    primary target on transport-class failures.
+    """
+
+    role: str
+    endpoint: str
+    model: str
+    max_tokens: int | None = None
+    fallback: tuple[tuple[str, str], ...] = ()
+
+
 @dataclass(frozen=True)
 class AgentConfig:
     """Top-level operating posture for public-beta deployments.
@@ -81,6 +113,10 @@ class ServiceConfig:
     llm_model: str = "deepseek-v4-flash"
     llm_timeout: float = 120.0
     llm_max_retries: int = 2
+    llm_retry_backoff: float = 0.5
+    llm_embedding_model: str = "bge-m3"
+    llm_endpoints: dict[str, LLMEndpointConfig] = field(default_factory=dict)
+    llm_roles: dict[str, LLMRoleConfig] = field(default_factory=dict)
     context_recent_episodes: int = 3
     context_retrieved_memories: int = 5
     context_workspace_entries: int = 12
@@ -102,6 +138,10 @@ class ServiceConfig:
     max_reflections: int = 2
     attention_broadcast_limit: int = 6
     attention_char_budget: int = 4000
+    chat_temperature: float = 0.4
+    autonomous_temperature: float = 0.3
+    judge_max_tokens: int = 200
+    appraisal_max_tokens: int = 400
 
     @property
     def db_path(self) -> Path:
@@ -156,6 +196,37 @@ class ServiceConfig:
             raise ValueError(f"llm.timeout must be > 0 (got {self.llm_timeout}).")
         if self.llm_max_retries < 0:
             raise ValueError(f"llm.max_retries must be >= 0 (got {self.llm_max_retries}).")
+        if self.llm_retry_backoff < 0:
+            raise ValueError(f"llm.retry_backoff must be >= 0 (got {self.llm_retry_backoff}).")
+        for name, endpoint in self.llm_endpoints.items():
+            if not endpoint.base_url:
+                raise ValueError(f"llm.endpoints.{name}.base_url is required.")
+            if endpoint.timeout <= 0 or endpoint.max_retries < 0:
+                raise ValueError(f"llm.endpoints.{name} timeout/max_retries out of range.")
+            if endpoint.response_format not in _RESPONSE_FORMAT_MODES:
+                raise ValueError(
+                    f"llm.endpoints.{name}.response_format must be one of {_RESPONSE_FORMAT_MODES}."
+                )
+        known_endpoints = set(self.llm_endpoints)
+        if self.llm_base_url:
+            known_endpoints.add("default")
+        for role, spec in self.llm_roles.items():
+            if role not in _LLM_ROLE_NAMES:
+                raise ValueError(f"llm.roles.{role} is not a known role {_LLM_ROLE_NAMES}.")
+            targets = [(spec.endpoint, spec.model), *spec.fallback]
+            for endpoint_name, _model in targets:
+                if endpoint_name and endpoint_name not in known_endpoints:
+                    raise ValueError(
+                        f"llm.roles.{role} references unknown endpoint '{endpoint_name}'."
+                    )
+            if spec.max_tokens is not None and spec.max_tokens <= 0:
+                raise ValueError(f"llm.roles.{role}.max_tokens must be > 0.")
+        if self.llm_endpoints and not self.llm_base_url and "main" not in self.llm_roles:
+            raise ValueError("llm.roles.main is required when only named endpoints are configured.")
+        if self.chat_temperature < 0 or self.autonomous_temperature < 0:
+            raise ValueError("engine.chat_temperature/autonomous_temperature must be >= 0.")
+        if self.judge_max_tokens <= 0 or self.appraisal_max_tokens <= 0:
+            raise ValueError("engine.judge_max_tokens/appraisal_max_tokens must be > 0.")
         if self.motivation.stale_block_days <= self.motivation.stale_flag_days:
             raise ValueError(
                 f"motivation.stale_block_days ({self.motivation.stale_block_days}) must be > "
@@ -175,6 +246,45 @@ def _as_str_list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value]
     return [str(value)]
+
+
+def _parse_llm_endpoints(raw_llm: dict[str, Any]) -> dict[str, LLMEndpointConfig]:
+    endpoints: dict[str, LLMEndpointConfig] = {}
+    for name, table in (raw_llm.get("endpoints") or {}).items():
+        if not isinstance(table, dict):
+            continue
+        key = str(name).strip().lower().replace("-", "_")
+        endpoints[key] = LLMEndpointConfig(
+            name=key,
+            base_url=str(table.get("base_url") or ""),
+            api_key=str(table.get("api_key") or ""),
+            timeout=float(table.get("timeout", 120.0)),
+            max_retries=int(table.get("max_retries", 2)),
+            response_format=str(table.get("response_format", "auto")),
+            tool_choice=bool(table.get("tool_choice", True)),
+        )
+    return endpoints
+
+
+def _parse_llm_roles(raw_llm: dict[str, Any]) -> dict[str, LLMRoleConfig]:
+    roles: dict[str, LLMRoleConfig] = {}
+    for role, table in (raw_llm.get("roles") or {}).items():
+        if not isinstance(table, dict):
+            continue
+        key = str(role).strip().lower()
+        fallback: list[tuple[str, str]] = []
+        for item in table.get("fallback") or []:
+            if isinstance(item, dict) and item.get("endpoint") and item.get("model"):
+                fallback.append((str(item["endpoint"]), str(item["model"])))
+        max_tokens_raw = table.get("max_tokens")
+        roles[key] = LLMRoleConfig(
+            role=key,
+            endpoint=str(table.get("endpoint") or ""),
+            model=str(table.get("model") or ""),
+            max_tokens=int(max_tokens_raw) if max_tokens_raw is not None else None,
+            fallback=tuple(fallback),
+        )
+    return roles
 
 
 def _normalize_profile(value: Any) -> str:
@@ -254,6 +364,10 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         ),
         llm_timeout=float(llm.get("timeout", 120.0)),
         llm_max_retries=int(llm.get("max_retries", 2)),
+        llm_retry_backoff=float(llm.get("retry_backoff", 0.5)),
+        llm_embedding_model=str(llm.get("embedding_model") or "bge-m3"),
+        llm_endpoints=_parse_llm_endpoints(llm),
+        llm_roles=_parse_llm_roles(llm),
         context_recent_episodes=int(context.get("recent_episodes", 3)),
         context_retrieved_memories=int(context.get("retrieved_memories", 5)),
         context_workspace_entries=int(context.get("workspace_entries", 12)),
@@ -295,6 +409,10 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         max_reflections=int(engine.get("max_reflections", 2)),
         attention_broadcast_limit=int(engine.get("attention_broadcast_limit", 6)),
         attention_char_budget=int(engine.get("attention_char_budget", 4000)),
+        chat_temperature=float(engine.get("chat_temperature", 0.4)),
+        autonomous_temperature=float(engine.get("autonomous_temperature", 0.3)),
+        judge_max_tokens=int(engine.get("judge_max_tokens", 200)),
+        appraisal_max_tokens=int(engine.get("appraisal_max_tokens", 400)),
     )
     return cfg
 
@@ -339,6 +457,24 @@ api_key = ""
 model = "deepseek-v4-flash"
 timeout = 120
 max_retries = 2
+retry_backoff = 0.5
+embedding_model = "bge-m3"
+
+# Named endpoints + per-role models (optional). Roles: main, fast, embeddings, subagent.
+# [llm.endpoints.local]
+# base_url = "http://127.0.0.1:8080/v1"
+# api_key = ""
+# response_format = "auto"   # auto | none | json_object | json_schema
+#
+# [llm.roles.main]
+# endpoint = "local"
+# model = "deepseek-v4-flash"
+# max_tokens = 2400
+# fallback = [{{ endpoint = "local", model = "qwen3.6-27b" }}]
+#
+# [llm.roles.fast]
+# endpoint = "local"
+# model = "qwen3.6-27b"
 
 [context]
 recent_episodes = 3
@@ -362,6 +498,10 @@ tool_rounds_per_tick = 4
 max_reflections = 2
 attention_broadcast_limit = 6
 attention_char_budget = 4000
+chat_temperature = 0.4
+autonomous_temperature = 0.3
+judge_max_tokens = 200
+appraisal_max_tokens = 400
 
 [motivation]
 w_priority = 0.35

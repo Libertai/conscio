@@ -76,6 +76,8 @@ class LLMClient:
         temperature: float = 0.7,
         max_tokens: int | None = 4096,
         tools: list[dict] | None = None,
+        response_format: dict | None = None,
+        tool_choice: Any | None = None,
         **kwargs: Any,
     ) -> dict:
         kwargs.setdefault("temperature", temperature)
@@ -83,6 +85,10 @@ class LLMClient:
             kwargs.setdefault("max_tokens", max_tokens)
         if tools:
             kwargs["tools"] = tools
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
         response = self.sync.chat.completions.create(
             model=model or self.model,
             messages=messages,  # type: ignore[arg-type]
@@ -113,6 +119,8 @@ class LLMClient:
         temperature: float = 0.7,
         max_tokens: int | None = 4096,
         tools: list[dict] | None = None,
+        response_format: dict | None = None,
+        tool_choice: Any | None = None,
         **kwargs: Any,
     ) -> dict:
         kwargs.setdefault("temperature", temperature)
@@ -120,6 +128,10 @@ class LLMClient:
             kwargs.setdefault("max_tokens", max_tokens)
         if tools:
             kwargs["tools"] = tools
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
         response = await self.async_.chat.completions.create(
             model=model or self.model,
             messages=messages,  # type: ignore[arg-type]
@@ -178,6 +190,8 @@ class LLMClient:
         temperature: float = 0.7,
         max_tokens: int | None = 4096,
         tools: list[dict] | None = None,
+        response_format: dict | None = None,
+        tool_choice: Any | None = None,
         **kwargs: Any,
     ):
         kwargs.setdefault("temperature", temperature)
@@ -185,6 +199,10 @@ class LLMClient:
             kwargs.setdefault("max_tokens", max_tokens)
         if tools:
             kwargs["tools"] = tools
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
         stream = await self.async_.chat.completions.create(
             model=model or self.model,
             messages=messages,  # type: ignore[arg-type]
@@ -224,6 +242,7 @@ class LLMClient:
         tool_calls = list(tool_call_deltas.values()) if tool_call_deltas else None
         yield {
             "type": "done",
+            "role": "assistant",
             "content": full_content,
             "tool_calls": tool_calls,
         }
