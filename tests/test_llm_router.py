@@ -269,6 +269,28 @@ class RouterFallbackTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(openai.BadRequestError):
             await router.for_role("main").chat_async([{"role": "user", "content": "hi"}])
 
+    async def test_stream_failure_skips_backoff_on_final_target(self) -> None:
+        # A pre-stream transport failure on the LAST target must surface
+        # immediately — no pointless backoff sleep before raising.
+        class _FailingStreamStub:
+            model = "a-model"
+
+            async def chat_stream(self, messages, **kwargs):
+                raise _conn_error()
+                yield  # makes this an async generator
+
+        endpoints = {"a": EndpointSpec(name="a", base_url="http://a/v1")}
+        roles = {"main": RoleSpec(name="main", targets=(RoleTarget("a", "a-model"),))}
+        router = LLMRouter(endpoints, roles, client_factory=lambda spec: _FailingStreamStub())
+
+        with patch("conscio.llm.router.asyncio.sleep") as sleep_mock:
+            with self.assertRaises(openai.APIConnectionError):
+                async for _ in router.for_role("main").chat_stream(
+                    [{"role": "user", "content": "hi"}]
+                ):
+                    pass
+        sleep_mock.assert_not_called()
+
     async def test_embed_batch_falls_through_on_none(self) -> None:
         stub_a = _EmbedStub(None, model="a-model")
         stub_b = _EmbedStub([[0.1, 0.2]], model="b-model")

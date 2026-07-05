@@ -211,7 +211,8 @@ class RoleClient:
                         return await client.chat_async(messages, **retry_kwargs)
                     except _FALLBACK_ERRORS as retry_exc:
                         last_exc = retry_exc
-                        await self._backoff(attempt)
+                        if attempt + 1 < len(targets):
+                            await self._backoff(attempt)
                         continue
                 raise
             except _FALLBACK_ERRORS as exc:
@@ -245,7 +246,8 @@ class RoleClient:
                 if yielded:
                     raise  # mid-stream failure: the caller owns recovery
                 last_exc = exc
-                await self._backoff(attempt)
+                if attempt + 1 < len(self.spec.targets):
+                    await self._backoff(attempt)
                 continue
         assert last_exc is not None
         raise last_exc
