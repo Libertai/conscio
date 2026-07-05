@@ -95,6 +95,7 @@ class EpisodeResult:
     # v2 additive fields:
     tick_trace: list[dict[str, Any]] = field(default_factory=list)
     constraint_report: list[dict[str, Any]] = field(default_factory=list)
+    outcome_reason: str = ""  # TickDecision.reason for the episode-ending decision
 
 
 class PerceptionModule:
@@ -387,7 +388,12 @@ class CognitiveRuntime:
         await self.memory.end_session(self.session_id)
         await self.memory.close()
 
-    async def run_episode(self, event: InputEvent | str) -> EpisodeResult:
+    async def run_episode(
+        self,
+        event: InputEvent | str,
+        *,
+        should_yield: Callable[[], bool] | None = None,
+    ) -> EpisodeResult:
         if isinstance(event, str):
             event = InputEvent(content=event)
         episode_id = uuid.uuid4().hex  # canonical episode id (memory provenance)
@@ -423,6 +429,12 @@ class CognitiveRuntime:
         prev_state = self.self_state.to_dict()
 
         for tick in range(1, self.max_ticks + 1):
+            # Cooperative preemption: an interactive event is waiting and this
+            # (autonomous) episode already made at least one full tick of progress.
+            if should_yield is not None and tick > 1 and should_yield():
+                outcome = TickDecision(ActionKind.WAIT, "preempted by interactive event")
+                self.trace.record("episode_preempted", "runtime", tick=tick)
+                break
             metrics.ticks += 1
             self.workspace._current_tick = tick  # designed seam: runtime stamps the tick
 
@@ -464,6 +476,7 @@ class CognitiveRuntime:
                     workspace=self.workspace,
                     broadcast_new=broadcast_new,
                     state=self.self_state,
+                    should_stop=should_yield,
                 )
                 if step.kind == "final":
                     pending_answer = step.text
@@ -614,6 +627,7 @@ class CognitiveRuntime:
             episode_id=episode_id,
             tick_trace=tick_trace,
             constraint_report=final_report.to_dicts() if final_report is not None else [],
+            outcome_reason=outcome.reason,
         )
         result.memory_ids = await self.consolidator.consolidate(
             self.memory, self.session_id, event, result

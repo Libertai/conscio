@@ -8,6 +8,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Interactive messages now take queue priority over autonomous heartbeats, and a
+  running autonomous episode yields to waiting user input at safe tick/round
+  boundaries (`wait:preempted`).
 - Structured output (response_format/json_schema) for the constraint judge, appraisal, and goal review, with tolerant hand-parse fallback.
 - LLM router: named endpoints ([llm.endpoints.*]), per-role models ([llm.roles.*]) for main/fast/embeddings/subagent, and fallback chains with jittered backoff.
 - `conscio --version`, and the package version in `/health` and the OpenAPI schema.

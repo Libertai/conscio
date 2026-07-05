@@ -240,7 +240,13 @@ class ToolLoopSession:
         """Append-only context update: cache-safe, never rebuilds the list."""
         self.messages.append({"role": role, "content": content})
 
-    async def step(self, workspace: Workspace, *, max_rounds: int = 1) -> StepResult:
+    async def step(
+        self,
+        workspace: Workspace,
+        *,
+        max_rounds: int = 1,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> StepResult:
         if self.llm is None or self._closed:
             return StepResult(kind="exhausted" if self._closed else "empty", limit_reached=self._closed)
         rounds_this_step = 0
@@ -311,6 +317,10 @@ class ToolLoopSession:
                     "content": truncate_spotlighted(str(result.get("output", "")), 8000),
                 })
             _, last_request, last_result = outcomes[-1]
+            # Round boundary: assistant echo + matching tool replies are already
+            # appended, so stopping here keeps the message protocol consistent.
+            if should_stop is not None and should_stop():
+                break
         return StepResult(
             kind="tool",
             tool_request=last_request,

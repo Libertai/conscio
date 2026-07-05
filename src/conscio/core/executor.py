@@ -332,6 +332,7 @@ class EpisodeExecutor:
         workspace: Workspace,
         broadcast_new: list[WorkspaceEntry] | None,
         state: SelfState,
+        should_stop: Callable[[], bool] | None = None,
     ) -> StepResult:
         self._tick += 1
         self._hook_workspace = workspace
@@ -368,7 +369,9 @@ class EpisodeExecutor:
         elif broadcast:
             self._session.inject(self.chat.assembler.format_workspace_update(broadcast))
         try:
-            step = await self._session.step(workspace, max_rounds=self.rounds_per_tick)
+            step = await self._session.step(
+                workspace, max_rounds=self.rounds_per_tick, should_stop=should_stop
+            )
         except Exception as exc:
             state.last_error = f"{type(exc).__name__}: {exc}"
             raise

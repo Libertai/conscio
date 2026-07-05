@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import os
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -228,7 +230,11 @@ class ConscioService:
         self._tick_count = 0
         self._goal_review_interval = 10
         self.lock = ServiceLock(self.config.lock_path)
-        self.queue: asyncio.Queue[QueuedEvent] = asyncio.Queue()
+        # Interactive events (user/API) outrank autonomous heartbeats; seq keeps
+        # FIFO order within a priority class (QueuedEvent itself is not comparable).
+        self.queue: asyncio.PriorityQueue[tuple[int, int, QueuedEvent]] = asyncio.PriorityQueue()
+        self._event_seq = itertools.count()
+        self._pending_interactive = 0
         self.running = False
         self.paused = False
         self.started_at = 0.0
@@ -664,14 +670,21 @@ class ConscioService:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[EpisodeResult | None] = loop.create_future()
         if self._event_task is not None:
-            await self.queue.put(QueuedEvent(event=event, future=future, autonomous=autonomous))
+            if not autonomous:
+                self._pending_interactive += 1
+            priority = 1 if autonomous else 0
+            await self.queue.put(
+                (priority, next(self._event_seq), QueuedEvent(event=event, future=future, autonomous=autonomous))
+            )
             return await future
         return await self._process_event(event, autonomous=autonomous)
 
     async def _event_worker(self) -> None:
         while self.running:
-            item = await self.queue.get()
+            _, _, item = await self.queue.get()
             self._current_queue_item = item
+            if not item.autonomous and self._pending_interactive > 0:
+                self._pending_interactive -= 1
             try:
                 result = await self._process_event(item.event, autonomous=item.autonomous)
                 if not item.future.done():
@@ -694,12 +707,13 @@ class ConscioService:
             self._current_queue_item = None
         while True:
             try:
-                item = self.queue.get_nowait()
+                _, _, item = self.queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
             if not item.future.done():
                 item.future.set_exception(exc)
             self.queue.task_done()
+        self._pending_interactive = 0
 
     async def _process_event(self, event: InputEvent, *, autonomous: bool = False) -> EpisodeResult | None:
         async with self._event_lock:
@@ -708,15 +722,19 @@ class ConscioService:
             self._current_project_id = None
             try:
                 if autonomous:
-                    return await self._plan_and_act(event)
+                    return await self._plan_and_act(
+                        event, should_yield=lambda: self._pending_interactive > 0
+                    )
                 return await self._run_episode(event)
             finally:
                 self.current_event = ""
 
-    async def _run_episode(self, event: InputEvent) -> EpisodeResult:
+    async def _run_episode(
+        self, event: InputEvent, *, should_yield: Callable[[], bool] | None = None
+    ) -> EpisodeResult:
         self.episode_taint.reset()
         try:
-            result = await self.runtime.run_episode(event)
+            result = await self.runtime.run_episode(event, should_yield=should_yield)
             self.latest_model_context = result.model_context
             await self._store_episode(event, result)
             return result
@@ -726,12 +744,14 @@ class ConscioService:
                 self.pause()
             raise
 
-    async def _plan_and_act(self, event: InputEvent) -> EpisodeResult:
+    async def _plan_and_act(
+        self, event: InputEvent, *, should_yield: Callable[[], bool] | None = None
+    ) -> EpisodeResult:
         await self._maybe_consolidate()  # periodic budgeted memory consolidation
         await self.goals.scheduler.decay_tick()  # drive homeostasis, once per tick
         goal = await self.goals.review()
         if goal is None:
-            return await self._run_episode(event)
+            return await self._run_episode(event, should_yield=should_yield)
         self.runtime.self_state.active_goal = goal.description
         project = await self.autonomy.get_or_create_project(goal.id, goal.description)
         if project is None:
@@ -744,17 +764,20 @@ class ConscioService:
                     ),
                     source="autonomous",
                     event_type="project_paused",
-                )
+                ),
+                should_yield=should_yield,
             )
         # No filler task: "no pending task" is visible context state
         # (tasks.status NO_PENDING_TASK sentinel) the model must resolve.
         self._current_goal_id = goal.id
         self._current_project_id = project.id
-        result = await self._run_episode(event)
+        result = await self._run_episode(event, should_yield=should_yield)
         # This episode serviced the goal: bump its drive's satiation.
         await self.goals.scheduler.record_serviced(goal.id)
         requests = self.runtime.autonomous_strategy.last_tool_requests
-        if requests:
+        if result.outcome_reason == "preempted by interactive event":
+            self.last_autonomous_action = "wait:preempted"
+        elif requests:
             self.last_autonomous_action = f"tool:{requests[-1].name}"
         else:
             self.last_autonomous_action = "wait:no_action"
