@@ -203,6 +203,7 @@ class ToolLoopSession:
         control_tool_names: frozenset[str] = frozenset({"ask_user", "refuse"}),
         on_tool_observation: ToolObservationCallback | None = None,
         pre_tool_hook: PreToolHook | None = None,
+        on_stream_event: Callable[[dict[str, Any]], None] | None = None,
         limit_message: str = DEFAULT_LIMIT_MESSAGE,
     ) -> None:
         self.llm = llm
@@ -215,11 +216,13 @@ class ToolLoopSession:
         self.control_tool_names = control_tool_names
         self.on_tool_observation = on_tool_observation
         self.pre_tool_hook = pre_tool_hook
+        self.on_stream_event = on_stream_event
         self.limit_message = limit_message
         self.tool_requests: list[ToolRequest] = []
         self._known_names = _schema_tool_names(self.tool_schemas)
         self._rounds = 0
         self._closed = False
+        self._streamed_this_round = 0
 
     @property
     def rounds_used(self) -> int:
@@ -240,6 +243,47 @@ class ToolLoopSession:
         """Append-only context update: cache-safe, never rebuilds the list."""
         self.messages.append({"role": role, "content": content})
 
+    async def _completion(self, *, tools: list[dict[str, Any]] | None, round_no: int) -> dict[str, Any]:
+        """One LLM completion for the current message list. Streams when a
+        token hook is set and the client supports it; otherwise identical to
+        a plain ``chat_async`` call. The returned dict always has the
+        non-streaming shape, so every downstream path (tool-call parsing,
+        DSML recovery, message echo) is unchanged."""
+        kwargs: dict[str, Any] = {"temperature": self.temperature, "max_tokens": self.max_tokens}
+        if tools:
+            kwargs["tools"] = tools
+        self._streamed_this_round = 0
+        stream_fn = getattr(self.llm, "chat_stream", None) if self.on_stream_event is not None else None
+        if stream_fn is None:
+            return await self.llm.chat_async(self.messages, **kwargs)
+        gate = _StreamGate()
+        done: dict[str, Any] = {}
+        async for chunk in stream_fn(self.messages, **kwargs):
+            kind = chunk.get("type")
+            if kind == "content":
+                self._emit_token(gate.feed(str(chunk.get("text") or "")), round_no)
+            elif kind == "done":
+                done = chunk
+        self._emit_token(gate.finish(), round_no)
+        response: dict[str, Any] = {"role": "assistant", "content": str(done.get("content") or "")}
+        if done.get("tool_calls"):
+            response["tool_calls"] = done["tool_calls"]
+        return response
+
+    def _emit_token(self, text: str, round_no: int) -> None:
+        if not text or self.on_stream_event is None:
+            return
+        self._streamed_this_round += len(text)
+        self.on_stream_event({"event": "token", "text": text, "round": round_no})
+
+    def _emit_round_outcome(self, event: str) -> None:
+        """`final` when streamed tokens were the answer; `discard` when the
+        round turned out to be a tool call/control turn (clients drop the
+        provisional text — the authoritative result follows out-of-band)."""
+        if self.on_stream_event is not None and self._streamed_this_round:
+            self.on_stream_event({"event": event, "round": self._rounds})
+            self._streamed_this_round = 0
+
     async def step(
         self,
         workspace: Workspace,
@@ -257,31 +301,20 @@ class ToolLoopSession:
                 return await self._forced_final(workspace, rounds_this_step)
             self._rounds += 1
             rounds_this_step += 1
-            if self.tool_schemas:
-                response = await self.llm.chat_async(
-                    self.messages,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                    tools=self.tool_schemas,
-                )
-                requests = ToolLoop._tool_requests(response, self._known_names)
-            else:
-                response = await self.llm.chat_async(
-                    self.messages,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                )
-                requests = []
+            response = await self._completion(tools=self.tool_schemas, round_no=self._rounds)
+            requests = ToolLoop._tool_requests(response, self._known_names) if self.tool_schemas else []
             if not requests:
                 content = str(response.get("content") or "").strip()
                 if not content:
                     return StepResult(kind="empty", rounds_used=rounds_this_step)
                 self.messages.append({"role": "assistant", "content": content})
+                self._emit_round_outcome("final")
                 return StepResult(kind="final", text=content, rounds_used=rounds_this_step)
             control = next(
                 (req for _, req in requests if req.name in self.control_tool_names), None
             )
             if control is not None:
+                self._emit_round_outcome("discard")
                 text = self._control_text(control, response)
                 self.messages.append({"role": "assistant", "content": text})
                 return StepResult(
@@ -295,6 +328,7 @@ class ToolLoopSession:
             # carries exactly the executed calls, each followed by a matching
             # role:tool response — N tool_calls with fewer responses is a
             # protocol violation OpenAI-compatible backends reject with a 400.
+            self._emit_round_outcome("discard")
             outcomes: list[tuple[str, ToolRequest, dict[str, Any]]] = []
             for call_id, request in requests:
                 self.tool_requests.append(request)
@@ -331,11 +365,7 @@ class ToolLoopSession:
     async def _forced_final(self, workspace: Workspace, rounds_this_step: int) -> StepResult:
         """Total budget hit — append the limit message and force one final answer."""
         self.messages.append({"role": "user", "content": self.limit_message})
-        response = await self.llm.chat_async(
-            self.messages,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-        )
+        response = await self._completion(tools=None, round_no=self._rounds + 1)
         self._rounds += 1
         rounds_this_step += 1
         self._closed = True
@@ -350,6 +380,7 @@ class ToolLoopSession:
             # highest-priority most-recent tool observation.
             content = observations[0] if observations else "Tool-use limit reached before a final answer."
         self.messages.append({"role": "assistant", "content": content})
+        self._emit_round_outcome("final")
         return StepResult(kind="final", text=content, rounds_used=rounds_this_step, limit_reached=True)
 
     @staticmethod
@@ -481,6 +512,78 @@ _DSML_CALLS_END = re.compile(r"<\s*[｜|]\s*tool[_ ]?calls[_ ]?end\s*[｜|]\s*>"
 _DSML_HINT = re.compile(r"<\s*[｜|]\s*(?:dsml\s*[｜|]?\s*)?tool[_ ]?calls?", re.IGNORECASE)
 _DSML_MARKER = re.compile(r"<\s*[｜|][^<>]*>")
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
+
+# Streamed content may open a DSML marker mid-round ("<｜" / "<|"); everything
+# from the first opener onward is withheld from the token stream.
+_DSML_STREAM_OPENER = re.compile(r"<\s*[｜|]")
+_DSML_TRAILING_OPEN = re.compile(r"<\s*$")
+
+
+class _StreamGate:
+    """Per-round token gate for streamed completions.
+
+    Buffers the first ``SNIFF_CHARS`` characters to sniff leaked DSML
+    tool-call markers (`_DSML_HINT`): a leaked call must never be streamed
+    to clients — the recovery parser handles the assembled content after
+    the round. Past the sniff window, content flows through except that
+    anything from a marker opener onward is withheld, and a trailing
+    ``<``(+spaces) run is carried so an opener split across chunks cannot
+    slip through.
+    """
+
+    SNIFF_CHARS = 64
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._decided = False
+        self._stopped = False
+        self.emitted_chars = 0
+
+    def feed(self, text: str) -> str:
+        if self._stopped or not text:
+            return ""
+        self._buffer += text
+        if not self._decided:
+            if len(self._buffer) < self.SNIFF_CHARS:
+                return ""
+            self._decide()
+            if self._stopped:
+                return ""
+        return self._drain(final=False)
+
+    def finish(self) -> str:
+        """Flush at end of stream (also decides short (<64 char) responses)."""
+        if self._stopped:
+            return ""
+        if not self._decided:
+            self._decide()
+            if self._stopped:
+                return ""
+        return self._drain(final=True)
+
+    def _decide(self) -> None:
+        self._decided = True
+        if _DSML_HINT.search(self._buffer):
+            self._stopped = True
+            self._buffer = ""
+
+    def _drain(self, *, final: bool) -> str:
+        match = _DSML_STREAM_OPENER.search(self._buffer)
+        if match:
+            out = self._buffer[: match.start()]
+            self._buffer = ""
+            self._stopped = True
+        elif final:
+            out, self._buffer = self._buffer, ""
+        else:
+            keep = 0
+            tail = _DSML_TRAILING_OPEN.search(self._buffer)
+            if tail:
+                keep = len(self._buffer) - tail.start()
+            cut = len(self._buffer) - keep
+            out, self._buffer = self._buffer[:cut], self._buffer[cut:]
+        self.emitted_chars += len(out)
+        return out
 
 
 def _schema_tool_names(tool_schemas: list[dict[str, Any]] | None) -> set[str] | None:

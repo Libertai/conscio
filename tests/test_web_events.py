@@ -156,3 +156,35 @@ def test_encode_sse_round_trip() -> None:
     body_line = next(line for line in out.split("\n") if line.startswith("data:"))
     body = json.loads(body_line[len("data: "):])
     assert body == {"type": "x", "n": 3}
+
+
+def test_chat_token_not_in_backlog() -> None:
+    # chat.token is high-frequency and ephemeral: it must fan out live but
+    # never displace real history in the reconnect backlog.
+    async def scenario() -> None:
+        ws = Workspace()
+        broker = WorkspaceEventBroker(ws, backlog=20)
+        broker.attach()
+        try:
+            # Register a live client BEFORE the emits so it receives both.
+            live = broker.register()
+            broker.emit("chat.token", {"text": "tok", "ref": "r1"})
+            broker.emit("chat.message", {"text": "hello"})
+            live_token = live.queue.get_nowait()
+            live_msg = live.queue.get_nowait()
+            assert live_token["type"] == "chat.token"
+            assert live_msg["type"] == "chat.message"
+
+            # A client that registers AFTER the emits replays the backlog:
+            # chat.message is present, chat.token is not.
+            late = broker.register()
+            replayed: list[dict[str, Any]] = []
+            while not late.queue.empty():
+                replayed.append(late.queue.get_nowait())
+            types = [p["type"] for p in replayed]
+            assert "chat.message" in types
+            assert "chat.token" not in types
+        finally:
+            broker.detach()
+
+    _run(scenario())

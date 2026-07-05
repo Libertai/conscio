@@ -275,6 +275,7 @@ class EpisodeExecutor:
         rounds_per_tick: int = 4,
         max_tokens: int = 2400,
         prediction: PredictionEngine,
+        on_stream_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.tools = tools
         self.memory = memory
@@ -285,6 +286,7 @@ class EpisodeExecutor:
         self.rounds_per_tick = max(1, int(rounds_per_tick))
         self.max_tokens = max_tokens
         self.prediction = prediction
+        self.on_stream_event = on_stream_event
         self.last_model_context = ""
         self.tool_requests: list[ToolRequest] = []
         self.tool_results: list[dict[str, Any]] = []
@@ -365,6 +367,7 @@ class EpisodeExecutor:
                 max_tokens=self.max_tokens,
                 on_tool_observation=self._on_tool_observation,
                 pre_tool_hook=self._pre_tool_hook,
+                on_stream_event=self.on_stream_event,
             )
         elif broadcast:
             self._session.inject(self.chat.assembler.format_workspace_update(broadcast))

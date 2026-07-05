@@ -117,6 +117,7 @@ class QueuedEvent:
     event: InputEvent
     future: asyncio.Future[EpisodeResult | None]
     autonomous: bool = False
+    ref: str = ""
 
 
 class ServiceLock:
@@ -223,6 +224,7 @@ class ConscioService:
         self.runtime.autonomous_strategy.context_provider = self._autonomous_context_state
         self.runtime.autonomous_strategy.on_tool_observation = self._on_autonomous_tool_observation
         self.runtime.chat_strategy.on_tool_observation = self._on_chat_tool_observation
+        self.runtime.executor.on_stream_event = self._on_stream_event
         self.episode_taint = EpisodeTaint()
         # Periodic budgeted consolidation (design §4.3): one persistent engine
         # so _last_cycle_ts carries the summarization window across cycles.
@@ -244,6 +246,7 @@ class ConscioService:
         self.started_at = 0.0
         self.last_error = ""
         self.current_event = ""
+        self._current_ref = ""
         self.last_autonomous_action = ""
         self.latest_model_context = ""
         self._loop_task: asyncio.Task | None = None
@@ -644,8 +647,28 @@ class ConscioService:
         self._event_broker.emit("episode.cancelled", {"event": cancelled_event})
         return {"cancelled": True, "current_event": cancelled_event}
 
-    async def submit_message(self, content: str, *, source: str = "user") -> EpisodeResult:
-        result = await self._submit_event(InputEvent(content=content, source=source, event_type="message"))
+    def _on_stream_event(self, data: dict[str, Any]) -> None:
+        """ToolLoopSession token hook → SSE broker. Sync and loop-affine (the
+        session runs on the service loop), so emit() dispatches directly."""
+        name = {"token": "chat.token", "discard": "chat.discard", "final": "chat.final"}.get(
+            str(data.get("event") or "")
+        )
+        if name is None:
+            return
+        payload: dict[str, Any] = {
+            "episode_id": self.runtime.workspace.current_episode,
+            "source": self.current_event,
+            "ref": self._current_ref,
+            "round": data.get("round", 0),
+        }
+        if name == "chat.token":
+            payload["text"] = str(data.get("text") or "")
+        self._event_broker.emit(name, payload)
+
+    async def submit_message(self, content: str, *, source: str = "user", ref: str = "") -> EpisodeResult:
+        result = await self._submit_event(
+            InputEvent(content=content, source=source, event_type="message"), ref=ref
+        )
         assert result is not None
         return result
 
@@ -682,7 +705,9 @@ class ConscioService:
             autonomous=True,
         )
 
-    async def _submit_event(self, event: InputEvent, *, autonomous: bool = False) -> EpisodeResult | None:
+    async def _submit_event(
+        self, event: InputEvent, *, autonomous: bool = False, ref: str = ""
+    ) -> EpisodeResult | None:
         if not self.running:
             await self.start(background=False)
         loop = asyncio.get_running_loop()
@@ -692,10 +717,14 @@ class ConscioService:
                 self._pending_interactive += 1
             priority = 1 if autonomous else 0
             await self.queue.put(
-                (priority, next(self._event_seq), QueuedEvent(event=event, future=future, autonomous=autonomous))
+                (
+                    priority,
+                    next(self._event_seq),
+                    QueuedEvent(event=event, future=future, autonomous=autonomous, ref=ref),
+                )
             )
             return await future
-        return await self._process_event(event, autonomous=autonomous)
+        return await self._process_event(event, autonomous=autonomous, ref=ref)
 
     async def _event_worker(self) -> None:
         while self.running:
@@ -703,7 +732,7 @@ class ConscioService:
             self._current_queue_item = item
             if not item.autonomous and self._pending_interactive > 0:
                 self._pending_interactive -= 1
-            task = asyncio.create_task(self._process_event(item.event, autonomous=item.autonomous))
+            task = asyncio.create_task(self._process_event(item.event, autonomous=item.autonomous, ref=item.ref))
             self._current_episode_task = task
             try:
                 result = await task
@@ -750,9 +779,12 @@ class ConscioService:
             self.queue.task_done()
         self._pending_interactive = 0
 
-    async def _process_event(self, event: InputEvent, *, autonomous: bool = False) -> EpisodeResult | None:
+    async def _process_event(
+        self, event: InputEvent, *, autonomous: bool = False, ref: str = ""
+    ) -> EpisodeResult | None:
         async with self._event_lock:
             self.current_event = f"{event.source}:{event.event_type}"
+            self._current_ref = ref
             self._current_goal_id = None
             self._current_project_id = None
             try:
@@ -764,6 +796,7 @@ class ConscioService:
                     return await self._run_episode(event)
             finally:
                 self.current_event = ""
+                self._current_ref = ""
 
     async def _run_episode(
         self, event: InputEvent, *, should_yield: Callable[[], bool] | None = None

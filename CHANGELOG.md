@@ -22,6 +22,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Operators can cancel the running episode (`conscio cancel`, `POST /control/cancel`,
   web status strip); episodes respect `service.episode_timeout` and `/message` callers
   get a `service.message_timeout` deadline (504 while the episode continues).
+- Token streaming from the tool loop: `ToolLoopSession` can emit per-round token events
+  (DSML-leak-gated) that the service republishes as `chat.token` / `chat.discard` /
+  `chat.final` SSE events.
 
 ### Fixed
 - `bash` and `execute_code` terminate their child process on timeout or cancellation

@@ -31,6 +31,9 @@ CLIENT_QUEUE_SIZE = 256
 HEARTBEAT_SECONDS = 15.0
 STATUS_TICK_SECONDS = 2.0
 BACKLOG_SIZE = 80
+# High-frequency ephemeral events that must not displace real history in the
+# reconnect backlog. They still fan out live to connected clients.
+NO_BACKLOG_TYPES = frozenset({"chat.token"})
 
 
 @dataclass
@@ -123,6 +126,8 @@ class WorkspaceEventBroker:
             self._dispatch(payload)
 
     def _record(self, payload: dict[str, Any]) -> None:
+        if payload.get("type") in NO_BACKLOG_TYPES:
+            return
         if self._backlog.maxlen:
             self._backlog.append(payload)
 
