@@ -108,6 +108,10 @@ class StoredEpisode:
     metrics: dict[str, Any] = field(default_factory=dict)
 
 
+class EpisodeCancelled(RuntimeError):
+    """Raised into waiters when the running episode is cancelled or times out."""
+
+
 @dataclass
 class QueuedEvent:
     event: InputEvent
@@ -245,6 +249,7 @@ class ConscioService:
         self._loop_task: asyncio.Task | None = None
         self._event_task: asyncio.Task | None = None
         self._current_queue_item: QueuedEvent | None = None
+        self._current_episode_task: asyncio.Task | None = None
         self._episodes: list[StoredEpisode] = []
         self._autonomous_action_times: list[float] = []
         self._event_lock = asyncio.Lock()
@@ -594,6 +599,8 @@ class ConscioService:
 
     async def stop(self) -> None:
         self.running = False
+        if self._current_episode_task is not None and not self._current_episode_task.done():
+            self._current_episode_task.cancel()
         if self._loop_task is not None:
             self._loop_task.cancel()
             try:
@@ -625,6 +632,17 @@ class ConscioService:
     def resume(self) -> None:
         self.paused = False
         self._event_broker.emit("control.paused", {"paused": False})
+
+    def cancel_current(self) -> dict[str, Any]:
+        """Cancel the episode currently being processed, if any. The worker
+        survives; the waiting caller receives EpisodeCancelled."""
+        task = self._current_episode_task
+        if task is None or task.done():
+            return {"cancelled": False, "current_event": self.current_event}
+        cancelled_event = self.current_event
+        task.cancel()
+        self._event_broker.emit("episode.cancelled", {"event": cancelled_event})
+        return {"cancelled": True, "current_event": cancelled_event}
 
     async def submit_message(self, content: str, *, source: str = "user") -> EpisodeResult:
         result = await self._submit_event(InputEvent(content=content, source=source, event_type="message"))
@@ -685,18 +703,35 @@ class ConscioService:
             self._current_queue_item = item
             if not item.autonomous and self._pending_interactive > 0:
                 self._pending_interactive -= 1
+            task = asyncio.create_task(self._process_event(item.event, autonomous=item.autonomous))
+            self._current_episode_task = task
             try:
-                result = await self._process_event(item.event, autonomous=item.autonomous)
+                result = await task
                 if not item.future.done():
                     item.future.set_result(result)
-            except asyncio.CancelledError as exc:
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    # The worker itself is being stopped (service shutdown).
+                    if not item.future.done():
+                        item.future.set_exception(RuntimeError("Conscio service stopped."))
+                    task.cancel()
+                    raise
+                # Operator cancelled the episode task; the worker survives.
                 if not item.future.done():
-                    item.future.set_exception(RuntimeError("Conscio service stopped."))
-                raise exc
+                    item.future.set_exception(EpisodeCancelled("episode cancelled by operator"))
+                self.last_error = "episode_cancelled"
+            except TimeoutError:
+                if not item.future.done():
+                    item.future.set_exception(
+                        EpisodeCancelled(f"episode exceeded {self.config.episode_timeout:.0f}s")
+                    )
+                self.last_error = "episode_timeout"
             except Exception as exc:
                 if not item.future.done():
                     item.future.set_exception(exc)
             finally:
+                self._current_episode_task = None
                 if self._current_queue_item is item:
                     self._current_queue_item = None
                 self.queue.task_done()
@@ -721,11 +756,12 @@ class ConscioService:
             self._current_goal_id = None
             self._current_project_id = None
             try:
-                if autonomous:
-                    return await self._plan_and_act(
-                        event, should_yield=lambda: self._pending_interactive > 0
-                    )
-                return await self._run_episode(event)
+                async with asyncio.timeout(self.config.episode_timeout or None):
+                    if autonomous:
+                        return await self._plan_and_act(
+                            event, should_yield=lambda: self._pending_interactive > 0
+                        )
+                    return await self._run_episode(event)
             finally:
                 self.current_event = ""
 

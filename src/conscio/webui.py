@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -7,7 +8,7 @@ from fastapi import APIRouter, Cookie, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 
-from conscio.service import ConscioService
+from conscio.service import ConscioService, EpisodeCancelled
 
 # Re-export for backwards compatibility with existing tests + callers.
 from conscio.web.auth import (  # noqa: F401
@@ -56,6 +57,21 @@ class GoalUpdateRequest(BaseModel):
 # Auth helpers now live in conscio.web.auth. The leading-underscore alias
 # below preserves the original private API used by the route handlers.
 _require_web_auth = require_web_auth
+
+
+async def _submit_with_deadline(service: ConscioService, content: str):
+    """Shared /message deadline semantics: 504 leaves the episode running."""
+    try:
+        return await asyncio.wait_for(
+            service.submit_message(content), service.config.message_timeout or None
+        )
+    except TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail="episode still running; use the cancel control or check episodes",
+        ) from None
+    except EpisodeCancelled as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 def create_web_router(service: ConscioService) -> APIRouter:
@@ -124,7 +140,7 @@ def create_web_router(service: ConscioService) -> APIRouter:
     @router.post("/ui/api/message", include_in_schema=False)
     async def ui_message(req: TextRequest, conscio_web_session: str | None = Cookie(default=None)) -> dict[str, Any]:
         _require_web_auth(service, sessions, conscio_web_session)
-        result = await service.submit_message(req.content)
+        result = await _submit_with_deadline(service, req.content)
         return {"output": result.output, "selected_action": result.selected_action}
 
     @router.post("/ui/api/influence/goal", include_in_schema=False)
@@ -146,6 +162,8 @@ def create_web_router(service: ConscioService) -> APIRouter:
         if action == "resume":
             service.resume()
             return {"paused": False}
+        if action == "cancel":
+            return service.cancel_current()
         raise HTTPException(status_code=404, detail="unknown control action")
 
     @router.post("/ui/api/tick", include_in_schema=False)
@@ -211,7 +229,9 @@ def create_web_router(service: ConscioService) -> APIRouter:
             raise HTTPException(status_code=404, detail="unknown chat session")
         await chat_store.append_message(session_id, "user", req.content)
         try:
-            result = await service.submit_message(req.content)
+            result = await _submit_with_deadline(service, req.content)
+        except HTTPException:
+            raise
         except Exception as exc:  # noqa: BLE001 — surface as HTTP, keep the user message
             raise HTTPException(
                 status_code=502,

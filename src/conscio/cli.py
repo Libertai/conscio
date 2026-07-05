@@ -783,6 +783,7 @@ def main() -> None:
     influence_constraint_p.add_argument("content", nargs="+")
     sub.add_parser("pause", help="Pause autonomous action")
     sub.add_parser("resume", help="Resume autonomous action")
+    sub.add_parser("cancel", help="Cancel the episode the service is currently running")
     sub.add_parser("goals", help="Show service goals")
     sub.add_parser("influences", help="Show service influences")
     projects_p = sub.add_parser("projects", help="Show service projects")
@@ -861,6 +862,8 @@ def main() -> None:
         asyncio.run(_client_control("pause"))
     elif args.command == "resume":
         asyncio.run(_client_control("resume"))
+    elif args.command == "cancel":
+        asyncio.run(_client_control("cancel"))
     elif args.command == "goals":
         asyncio.run(_client_goals())
     elif args.command == "influences":

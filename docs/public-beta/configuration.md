@@ -21,6 +21,8 @@ consolidation_interval = 20
 enable_contradiction_check = false
 unsafe_autonomy = false
 pause_on_error = true
+episode_timeout = 600
+message_timeout = 300
 ```
 
 Operational notes:
@@ -33,6 +35,8 @@ Operational notes:
 - `unsafe_autonomy` gates the `bash` and `execute_code` tools.
 - `pause_on_error` pauses autonomous action after service-level processing
   errors.
+- `episode_timeout` hard wall-clock cap per episode in seconds (0 disables).
+- `message_timeout` how long HTTP callers wait for `/message` before a 504 (0 disables).
 
 ## Model Backend
 

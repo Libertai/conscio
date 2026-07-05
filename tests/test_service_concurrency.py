@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from conscio.config import load_config
-from conscio.service import ConscioService
+from conscio.service import ConscioService, EpisodeCancelled
 
 
 def _tool_call_response(name: str, arguments: str, call_id: str = "call-1") -> dict:
@@ -35,6 +35,22 @@ class _GatedLLM:
         if self.responses:
             return self.responses.pop(0)
         return {"content": f"{self.label} done"}
+
+
+class _HangingLLM:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def chat_async(self, messages: list[dict], **kwargs: object) -> dict:
+        self.started.set()
+        await asyncio.Event().wait()
+        return {"content": ""}
+
+
+def _preset_event() -> asyncio.Event:
+    ev = asyncio.Event()
+    ev.set()
+    return ev
 
 
 def _write_config(tmp: str) -> Path:
@@ -145,6 +161,100 @@ class PreemptionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(auto_result.outcome_reason, "preempted by interactive event")
         self.assertEqual(service.last_autonomous_action, "wait:preempted")
         self.assertEqual(chat_result.output, "hi there")
+
+
+class CancellationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancel_current_fails_future_and_worker_survives(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = ConscioService(load_config(_write_config(tmp)))
+            hang = _HangingLLM()
+            service.runtime.chat_strategy.llm = hang
+            await service.start(acquire_lock=False, background=True)
+            try:
+                t = asyncio.create_task(service.submit_message("will hang"))
+                await hang.started.wait()
+                info = service.cancel_current()
+                self.assertTrue(info["cancelled"])
+                with self.assertRaises(EpisodeCancelled):
+                    await t
+                self.assertFalse(service.paused)
+                self.assertEqual(service.last_error, "episode_cancelled")
+                # Worker survives: a fresh message still processes.
+                service.runtime.chat_strategy.llm = _GatedLLM(
+                    "chat", [], _preset_event(), [{"content": "still alive"}]
+                )
+                result = await asyncio.wait_for(service.submit_message("ping"), 10)
+                self.assertEqual(result.output, "still alive")
+            finally:
+                await service.stop()
+
+    async def test_episode_timeout_cancels_episode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(
+                "[service]\n"
+                f'home = "{tmp}"\n'
+                'api_key = "k"\nweb_password = "p"\n'
+                "autonomous = false\nepisode_timeout = 0.2\n",
+                encoding="utf-8",
+            )
+            service = ConscioService(load_config(path))
+            service.runtime.chat_strategy.llm = _HangingLLM()
+            await service.start(acquire_lock=False, background=True)
+            try:
+                with self.assertRaises(EpisodeCancelled):
+                    await asyncio.wait_for(service.submit_message("slow"), 10)
+                self.assertEqual(service.last_error, "episode_timeout")
+            finally:
+                await service.stop()
+
+    async def test_stop_during_running_episode_fails_future(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = ConscioService(load_config(_write_config(tmp)))
+            hang = _HangingLLM()
+            service.runtime.chat_strategy.llm = hang
+            await service.start(acquire_lock=False, background=True)
+            t = asyncio.create_task(service.submit_message("will hang"))
+            await hang.started.wait()
+            await service.stop()
+            with self.assertRaises(RuntimeError):  # EpisodeCancelled is a RuntimeError too
+                await t
+
+    async def test_message_timeout_returns_504_and_episode_completes(self) -> None:
+        import httpx
+
+        from conscio.api import create_app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(
+                "[service]\n"
+                f'home = "{tmp}"\n'
+                'api_key = "k"\nweb_password = "p"\n'
+                "autonomous = false\nmessage_timeout = 0.1\n",
+                encoding="utf-8",
+            )
+            service = ConscioService(load_config(path))
+            gate = asyncio.Event()
+            slow = _GatedLLM("chat", [], gate, [{"content": "late answer"}])
+            service.runtime.chat_strategy.llm = slow
+            await service.start(acquire_lock=False, background=True)
+            try:
+                app = create_app(service=service)
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                    headers = {"Authorization": "Bearer k"}
+                    resp = await client.post("/message", json={"content": "hi"}, headers=headers)
+                    self.assertEqual(resp.status_code, 504)
+                    gate.set()
+                    await asyncio.sleep(0.2)  # let the episode finish
+                    episodes = await client.get("/episodes", headers=headers)
+                    self.assertEqual(episodes.status_code, 200)
+                    self.assertTrue(
+                        any("hi" in (e.get("input") or "") for e in episodes.json())
+                    )
+            finally:
+                await service.stop()
 
 
 if __name__ == "__main__":

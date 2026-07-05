@@ -74,3 +74,12 @@ For portable logical state moves, use:
 conscio db export --out /tmp/conscio-export.json
 conscio db import /tmp/conscio-export.json --replace
 ```
+
+## Cancelling a running episode
+
+`conscio cancel` (or `POST /control/cancel`, or the **cancel** button in the web
+status strip) aborts the episode the service is currently processing. The service
+itself keeps running; the caller that was waiting receives an error, memory writes
+already committed are kept, and the next episode starts clean. Episodes also
+self-terminate after `service.episode_timeout` seconds.
+

@@ -78,7 +78,7 @@ has docs/launch/public-beta-launch.md "scripts/check-launch-readiness.sh"
 [ -x scripts/check-launch-readiness.sh ] || fail "scripts/check-launch-readiness.sh must be executable"
 
 # CLI examples in docs must correspond to real argparse command registrations.
-for command in ask run history search daemon eval service db tools chat influence pause resume goals influences projects tick trace; do
+for command in ask run history search daemon eval service db tools chat influence pause resume cancel goals influences projects tick trace; do
   has_regex src/conscio/cli.py "add_parser\\(\"$command\""
 done
 
@@ -103,6 +103,7 @@ for key in \
   home host port client_url api_key web_password web_secure_cookies \
   allow_insecure_public_bind autonomous tick_interval consolidation_interval \
   enable_contradiction_check unsafe_autonomy pause_on_error base_url model \
+  episode_timeout message_timeout \
   profile premises external_side_effects \
   recent_episodes retrieved_memories workspace_entries max_dynamic_chars \
   compaction_interval enable_semantic_compaction allowed denied \
@@ -121,7 +122,7 @@ done
 # Public service endpoints in docs must exist in the FastAPI app.
 for endpoint in \
   "/health" "/status" "/metrics" "/message" "/influence/goal" "/influence/constraint" \
-  "/control/pause" "/control/resume" "/control/stop" "/goals" \
+  "/control/pause" "/control/resume" "/control/cancel" "/control/stop" "/goals" \
   "/influences" "/projects" "/autonomy/tick" "/episodes" "/trace" \
   "/memory/search"; do
   has src/conscio/api.py "$endpoint"

@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from conscio import __version__
 from conscio.config import ServiceConfig
-from conscio.service import ConscioService
+from conscio.service import ConscioService, EpisodeCancelled
 from conscio.webui import create_web_router
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -78,7 +78,18 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
 
     @app.post("/message", dependencies=[Depends(require_auth)])
     async def message(req: MessageRequest) -> dict[str, Any]:
-        result = await svc.submit_message(req.content, source=_validated_source(req.source))
+        try:
+            result = await asyncio.wait_for(
+                svc.submit_message(req.content, source=_validated_source(req.source)),
+                svc.config.message_timeout or None,
+            )
+        except TimeoutError:
+            raise HTTPException(
+                status_code=504,
+                detail="episode still running; poll /episodes or POST /control/cancel",
+            ) from None
+        except EpisodeCancelled as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {
             "output": result.output,
             "selected_action": result.selected_action,
@@ -104,6 +115,10 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
     async def resume() -> dict[str, Any]:
         svc.resume()
         return {"paused": False}
+
+    @app.post("/control/cancel", dependencies=[Depends(require_auth)])
+    async def cancel() -> dict[str, Any]:
+        return svc.cancel_current()
 
     @app.post("/control/stop", dependencies=[Depends(require_auth)])
     async def stop(background_tasks: BackgroundTasks) -> dict[str, Any]:

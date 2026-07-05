@@ -25,6 +25,7 @@
     queue_depth?: number;
     actions_last_hour?: number;
     last_autonomous_action?: string;
+    current_event?: string;
     uptime?: number;
   };
 
@@ -70,6 +71,16 @@
     try {
       await api(`/ui/api/control/${next ? "pause" : "resume"}`, { method: "POST" });
       status = { ...status, paused: next };
+      await refresh();
+    } finally {
+      controlBusy = false;
+    }
+  }
+
+  async function cancelEpisode() {
+    controlBusy = true;
+    try {
+      await api(`/ui/api/control/cancel`, { method: "POST" });
       await refresh();
     } finally {
       controlBusy = false;
@@ -155,6 +166,18 @@
   >
     {controlBusy ? "..." : paused ? "resume" : "pause"}
   </button>
+
+  {#if status.current_event}
+    <button
+      type="button"
+      onclick={cancelEpisode}
+      disabled={controlBusy}
+      class="h-8 px-3 rounded-md border font-mono text-[10px] smallcaps tabular transition-opacity disabled:opacity-50"
+      style="border-color: var(--color-danger); color: var(--color-danger)"
+    >
+      cancel
+    </button>
+  {/if}
 
   <div class="hidden sm:flex items-baseline gap-5 ml-auto font-mono text-[11px] tabular"
        style="color: var(--color-fg-mute)">

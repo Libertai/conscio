@@ -130,6 +130,8 @@ class ServiceConfig:
     shell_timeout: int = 30
     working_directory: Path = field(default_factory=Path.cwd)
     pause_on_error: bool = True
+    episode_timeout: float = 600.0  # wall-clock cap per episode; 0 disables
+    message_timeout: float = 300.0  # HTTP caller deadline on /message; 0 disables
     agent: AgentConfig = field(default_factory=AgentConfig)
     ablation: AblationFlags = field(default_factory=AblationFlags)
     motivation: MotivationConfig = field(default_factory=MotivationConfig)
@@ -178,6 +180,10 @@ class ServiceConfig:
 
     def validate(self) -> None:
         """Range-check critical fields. Raises ValueError on clearly invalid values."""
+        if self.episode_timeout < 0:
+            raise ValueError(f"service.episode_timeout must be >= 0 (got {self.episode_timeout}).")
+        if self.message_timeout < 0:
+            raise ValueError(f"service.message_timeout must be >= 0 (got {self.message_timeout}).")
         if self.tick_interval <= 0:
             raise ValueError(f"service.tick_interval must be > 0 (got {self.tick_interval}).")
         if self.max_ticks <= 0:
@@ -387,6 +393,8 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         shell_timeout=int(tools.get("shell_timeout", 30)),
         working_directory=_as_path(tools.get("working_directory"), working_dir_default),
         pause_on_error=bool(service.get("pause_on_error", True)),
+        episode_timeout=float(service.get("episode_timeout", 600.0)),
+        message_timeout=float(service.get("message_timeout", 300.0)),
         agent=agent_cfg,
         ablation=AblationFlags(
             attention_gating=bool(ablation.get("attention_gating", True)),
@@ -451,6 +459,8 @@ consolidation_interval = 20
 enable_contradiction_check = false
 unsafe_autonomy = {unsafe_autonomy}
 pause_on_error = true
+episode_timeout = 600
+message_timeout = 300
 
 [agent]
 profile = "{normalized_profile}"

@@ -19,6 +19,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `state.db` instead of crash-looping under a process supervisor; `conscio service
   doctor` gains a `database_integrity` check.
 - `busy_timeout` on the main SQLite store, tolerating short cross-process lock contention.
+- Operators can cancel the running episode (`conscio cancel`, `POST /control/cancel`,
+  web status strip); episodes respect `service.episode_timeout` and `/message` callers
+  get a `service.message_timeout` deadline (504 while the episode continues).
 
 ### Fixed
 - `bash` and `execute_code` terminate their child process on timeout or cancellation

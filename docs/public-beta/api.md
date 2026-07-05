@@ -19,6 +19,7 @@ Authorization: Bearer <api_key>
 - `POST /influence/constraint`
 - `POST /control/pause`
 - `POST /control/resume`
+- `POST /control/cancel`
 - `POST /control/stop`
 - `GET /goals`
 - `GET /influences`
@@ -39,6 +40,11 @@ curl -sS -H "Authorization: Bearer $CONSCIO_API_KEY" \
   -d '{"content":"Summarize your current active goal."}' \
   http://127.0.0.1:8765/message
 ```
+
+`POST /message` waits up to `service.message_timeout` seconds (default 300). On
+expiry it returns **504** and the episode keeps running — poll `GET /episodes` for the
+result or abort it with `POST /control/cancel`. A cancelled episode returns **409**.
+Episodes are also capped by `service.episode_timeout` (default 600 seconds).
 
 ## Operator Console API
 
