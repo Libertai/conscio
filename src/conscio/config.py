@@ -213,6 +213,12 @@ class ServiceConfig:
         for role, spec in self.llm_roles.items():
             if role not in _LLM_ROLE_NAMES:
                 raise ValueError(f"llm.roles.{role} is not a known role {_LLM_ROLE_NAMES}.")
+            if not spec.endpoint and not self.llm_base_url:
+                # An empty role endpoint resolves to the implicit "default"
+                # endpoint, which only exists when [llm] base_url is set.
+                raise ValueError(
+                    f"llm.roles.{role}.endpoint is required (no [llm] base_url default endpoint)."
+                )
             targets = [(spec.endpoint, spec.model), *spec.fallback]
             for endpoint_name, _model in targets:
                 if endpoint_name and endpoint_name not in known_endpoints:

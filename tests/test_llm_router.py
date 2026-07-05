@@ -123,6 +123,24 @@ class RouterConfigTests(unittest.TestCase):
         self.assertEqual(emb.spec.targets[0].endpoint, "default")
         self.assertEqual(emb.spec.targets[0].model, "bge-m3")
 
+    def test_role_without_endpoint_and_no_default_rejected(self) -> None:
+        # An empty role endpoint resolves to the implicit "default" endpoint,
+        # which does not exist without [llm] base_url — must fail at load
+        # time, not with a KeyError on the first LLM call.
+        with patch.dict(os.environ, _hermetic_env(), clear=False):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "config.toml"
+                path.write_text(
+                    "[llm.endpoints.local]\n"
+                    'base_url = "http://a/v1"\n'
+                    "[llm.roles.main]\n"
+                    'model = "m"\n',
+                    encoding="utf-8",
+                )
+                cfg = load_config(path)
+        with self.assertRaises(ValueError):
+            cfg.validate()
+
     def test_roles_and_fallback_parsed(self) -> None:
         with patch.dict(os.environ, _hermetic_env(), clear=False):
             with tempfile.TemporaryDirectory() as tmp:
