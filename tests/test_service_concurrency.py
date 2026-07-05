@@ -79,6 +79,41 @@ class PriorityQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(order[1], "chat")
 
 
+class PreemptionSkipsGoalReviewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_goal_review_skipped_while_user_waits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = ConscioService(load_config(_write_config(tmp)))
+            service._goal_review_interval = 1  # review would fire on every tick
+            order: list[str] = []
+            gate = asyncio.Event()
+            auto_responses = [
+                _tool_call_response("note_progress", '{"note": "working"}', f"call-{i}")
+                for i in range(1, 30)
+            ]
+            auto_llm = _GatedLLM("auto", order, gate, auto_responses)
+            chat_llm = _GatedLLM("chat", order, gate, [{"content": "hi there"}])
+            service.runtime.autonomous_strategy.llm = auto_llm
+            service.runtime.chat_strategy.llm = chat_llm
+            await service.start(acquire_lock=False, background=True)
+            try:
+                t_auto = asyncio.create_task(service.run_autonomous_tick())
+                await auto_llm.started.wait()
+                t_chat = asyncio.create_task(service.submit_message("hello"))
+                await asyncio.sleep(0)  # _pending_interactive is now > 0
+                gate.set()
+                auto_result = await t_auto
+                await t_chat
+            finally:
+                await service.stop()
+        assert auto_result is not None
+        self.assertEqual(auto_result.outcome_reason, "preempted by interactive event")
+        # The goal review (an extra LLM call on the autonomous model) must not
+        # run between the preempted episode and the waiting chat: the chat is
+        # the very next LLM interaction after the single autonomous round.
+        self.assertEqual(order[1], "chat")
+        self.assertEqual(order.count("auto"), 1)
+
+
 class PreemptionTests(unittest.IsolatedAsyncioTestCase):
     async def test_autonomous_episode_yields_to_interactive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

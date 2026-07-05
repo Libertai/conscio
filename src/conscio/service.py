@@ -775,7 +775,8 @@ class ConscioService:
         # This episode serviced the goal: bump its drive's satiation.
         await self.goals.scheduler.record_serviced(goal.id)
         requests = self.runtime.autonomous_strategy.last_tool_requests
-        if result.outcome_reason == "preempted by interactive event":
+        preempted = result.outcome_reason == "preempted by interactive event"
+        if preempted:
             self.last_autonomous_action = "wait:preempted"
         elif requests:
             self.last_autonomous_action = f"tool:{requests[-1].name}"
@@ -783,8 +784,13 @@ class ConscioService:
             self.last_autonomous_action = "wait:no_action"
         self._update_task_discipline(requests)
         self._tick_count += 1
+        # Skip the periodic goal review (an extra LLM call) while a user is
+        # waiting: either this episode was preempted or an interactive event
+        # arrived after it finished. The review re-arms on a later tick.
+        user_waiting = preempted or (should_yield is not None and should_yield())
         if (
-            self.runtime.autonomous_strategy.llm is not None
+            not user_waiting
+            and self.runtime.autonomous_strategy.llm is not None
             and self._goal_review_interval > 0
             and self._tick_count % self._goal_review_interval == 0
         ):
