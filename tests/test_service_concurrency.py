@@ -247,12 +247,17 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
                     resp = await client.post("/message", json={"content": "hi"}, headers=headers)
                     self.assertEqual(resp.status_code, 504)
                     gate.set()
-                    await asyncio.sleep(0.2)  # let the episode finish
-                    episodes = await client.get("/episodes", headers=headers)
-                    self.assertEqual(episodes.status_code, 200)
-                    self.assertTrue(
-                        any("hi" in (e.get("input") or "") for e in episodes.json())
-                    )
+                    # The episode keeps running after the 504; poll until it is
+                    # stored (a fixed sleep flakes on loaded CI runners).
+                    deadline = asyncio.get_running_loop().time() + 10
+                    while True:
+                        episodes = await client.get("/episodes", headers=headers)
+                        self.assertEqual(episodes.status_code, 200)
+                        if any("hi" in (e.get("input") or "") for e in episodes.json()):
+                            break
+                        if asyncio.get_running_loop().time() > deadline:
+                            self.fail("episode was not stored after the 504")
+                        await asyncio.sleep(0.05)
             finally:
                 await service.stop()
 

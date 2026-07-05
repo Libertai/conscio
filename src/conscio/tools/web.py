@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import html
 import ipaddress
 import socket
@@ -266,7 +267,19 @@ async def _run_libertai(*args: str) -> tuple[bool, str]:
         stderr=asyncio.subprocess.PIPE,
         env=tool_env(),
     )
-    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        await proc.wait()
+        raise
+    except asyncio.CancelledError:
+        # Reap the child on cancellation too (mirrors tools/bash.py);
+        # otherwise a cancelled episode leaves the CLI process running.
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        raise
     output = stdout.decode("utf-8", errors="replace").strip()
     error = stderr.decode("utf-8", errors="replace").strip()
     if proc.returncode == 0:
