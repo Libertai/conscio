@@ -309,8 +309,11 @@ class ConstraintValidator:
         support = getattr(self.llm, "response_format_support", None)
         if callable(support):
             mode = support()
-            if mode != "none":
-                request_kwargs["response_format"] = {"type": mode}
+            if mode in ("json_object", "json_schema"):
+                # No schema at this callsite, and {"type": "json_schema"}
+                # without a json_schema payload is an invalid request body —
+                # schema-capable endpoints still get plain json_object here.
+                request_kwargs["response_format"] = {"type": "json_object"}
         try:
             response = await self.llm.chat_async(messages, **request_kwargs)
         except Exception:

@@ -201,6 +201,25 @@ class SemanticConstraintTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("response_format", llm.kwargs[0])
 
+    async def test_judge_json_schema_support_sends_valid_body(self) -> None:
+        # A json_schema-capable endpoint must never receive a bare
+        # {"type": "json_schema"} (invalid without a json_schema payload):
+        # either a full schema payload or a plain json_object downgrade.
+        llm = StructuredJudgeStubLLM(
+            '[{"constraint_id": "inf-8", "passed": true, "reason": "ok"}]', mode="json_schema"
+        )
+        validator = ConstraintValidator(llm=llm, judge_enabled=True)
+        constraints = validator.parse([{"id": "inf-8", "content": "Be polite."}])
+
+        await validator.validate("Sure!", constraints)
+
+        fmt = llm.kwargs[0].get("response_format")
+        self.assertIsNotNone(fmt)
+        if fmt.get("type") == "json_schema":
+            self.assertIn("schema", fmt.get("json_schema") or {})
+        else:
+            self.assertEqual(fmt, {"type": "json_object"})
+
     async def test_judge_garbage_output_degrades_to_none(self) -> None:
         llm = JudgeStubLLM("I cannot judge this.")
         validator = ConstraintValidator(llm=llm, judge_enabled=True)
