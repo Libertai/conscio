@@ -166,6 +166,25 @@ def create_home_backup(config: ServiceConfig) -> Path:
     return archive
 
 
+def prune_backups(config: ServiceConfig, keep: int) -> list[Path]:
+    """Delete the oldest home backups beyond ``keep``. Returns removed paths.
+
+    Backup names embed a UTC timestamp (conscio-YYYYMMDDTHHMMSSZ.tar.gz), so a
+    lexical sort is chronological. ``keep <= 0`` disables pruning entirely.
+    """
+    if keep <= 0:
+        return []
+    backup_dir = config.home / "backups"
+    if not backup_dir.is_dir():
+        return []
+    archives = sorted(backup_dir.glob("conscio-*.tar.gz"))
+    removed: list[Path] = []
+    for stale in archives[:-keep] if len(archives) > keep else []:
+        stale.unlink(missing_ok=True)
+        removed.append(stale)
+    return removed
+
+
 def restore_home_backup(config: ServiceConfig, archive: str | Path, *, force: bool = False) -> None:
     if config.lock_path.exists() and not force:
         raise RuntimeError(f"Service lock exists at {config.lock_path}; stop the service or pass --force.")

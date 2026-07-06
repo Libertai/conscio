@@ -56,6 +56,15 @@ conscio resume
 The important files are `config.toml`, `state.db`, `events/`, `logs/`,
 `sessions/`, and `approvals/`.
 
+Scheduled backups run inside the service every `backup_interval_hours` (default 24)
+and keep the newest `backup_retain` archives (default 14):
+
+```bash
+conscio db prune --keep 14
+```
+
+Copy `~/.conscio/backups/` off the VM on your own schedule; the service does not.
+
 ## Restore
 
 Stop the service, restore as the same user, then start the service and check

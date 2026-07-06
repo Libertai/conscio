@@ -11,6 +11,8 @@ This file is launch-facing and intentionally blunt.
   autonomy until an operator resumes it.
 - Existing v1/v2 state can contain active old goals and projects. Migration
   preserves them; reset intentionally if continuity is not desired.
+- Rate limits are in-process and reset on restart.
+- Scheduled backups are local to the VM; copy archives off-host for disaster recovery.
 
 ## Security
 

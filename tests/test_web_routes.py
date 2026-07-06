@@ -52,6 +52,10 @@ class _StubService:
         self.event_broker.attach()
         self.last_message: str | None = None
         self.latest_model_context = ""
+        self.rate_limited_total = 0
+
+    def try_acquire_episode(self) -> tuple[bool, float]:
+        return True, 0.0
 
     # The router calls these on the snapshot path; minimal stubs are enough.
     async def status(self) -> _StubServiceStatus:

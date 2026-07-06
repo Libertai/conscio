@@ -21,6 +21,12 @@ consolidation_interval = 20
 enable_contradiction_check = false
 unsafe_autonomy = false
 pause_on_error = true
+backup_interval_hours = 24
+backup_retain = 14
+trusted_proxies = []
+max_request_bytes = 262144
+episode_rate_per_minute = 30
+episode_rate_burst = 10
 episode_timeout = 600
 message_timeout = 300
 ```
@@ -37,6 +43,9 @@ Operational notes:
   errors.
 - `episode_timeout` hard wall-clock cap per episode in seconds (0 disables).
 - `message_timeout` how long HTTP callers wait for `/message` before a 504 (0 disables).
+- `backup_interval_hours`/`backup_retain` schedule home backups and retention; `conscio db prune` prunes manually.
+- `trusted_proxies` enables proxy-header (X-Forwarded-For) client IPs; set to `["127.0.0.1"]` behind Caddy so login throttling sees real client IPs. Env override `CONSCIO_TRUSTED_PROXIES` (comma-separated).
+- `max_request_bytes` caps HTTP bodies (413); `episode_rate_per_minute`/`episode_rate_burst` rate-limit episode-triggering endpoints (429, in-process, resets on restart).
 
 ## Model Backend
 

@@ -9,6 +9,11 @@ Authorization: Bearer <api_key>
 
 `/health` is unauthenticated and reports `{ok, running, version}`.
 
+Episode-triggering endpoints (`/message`, `/influence/*`, `/autonomy/tick`, and the
+console chat) share one global rate limit; excess requests get `429` with a
+`Retry-After` header. Request bodies over `max_request_bytes` get `413`. There is
+deliberately no CORS policy: the API is bearer-token and the console is same-origin.
+
 ## Service API
 
 - `GET /health`

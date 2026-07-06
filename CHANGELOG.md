@@ -34,6 +34,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - MCP observability: server status in `/metrics` (`mcp_servers`), SSE events
   (`mcp.server.connected/disconnected/error`), and an MCP servers table in
   `conscio tools list` with live connection status.
+- Scheduled home backups with retention (`backup_interval_hours`, `backup_retain`, `conscio db prune`).
+- Global rate limiting (429) and request body caps (413) on episode-triggering endpoints.
+- Proxy-aware client IPs via `trusted_proxies`; compose now uses secure cookies instead of the insecure-bind escape hatch.
 
 ### Fixed
 - `bash` and `execute_code` terminate their child process on timeout or cancellation

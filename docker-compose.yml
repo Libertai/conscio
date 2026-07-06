@@ -1,3 +1,6 @@
+# Expects a TLS reverse proxy (e.g. Caddy — see deploy/grit-carry-state-false/Caddyfile)
+# in front of the loopback port map below. Secure cookies are on; browsers treat
+# http://127.0.0.1 as a secure context, so local testing still works.
 services:
   conscio:
     build: .
@@ -13,7 +16,8 @@ services:
       - CONSCIO_CLIENT_URL=http://127.0.0.1:8765
       - CONSCIO_API_KEY=${CONSCIO_API_KEY:?set CONSCIO_API_KEY}
       - CONSCIO_WEB_PASSWORD=${CONSCIO_WEB_PASSWORD:?set CONSCIO_WEB_PASSWORD}
-      - CONSCIO_ALLOW_INSECURE_BIND=1
+      - CONSCIO_WEB_SECURE_COOKIES=1
+      # - CONSCIO_TRUSTED_PROXIES=127.0.0.1
 
 volumes:
   conscio_home:

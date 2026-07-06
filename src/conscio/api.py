@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import math
 import os
 import signal
 import uuid
@@ -12,7 +13,7 @@ from typing import Any
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from conscio import __version__
 from conscio.config import ServiceConfig
@@ -33,17 +34,26 @@ def _validated_source(source: str) -> str:
 
 
 class MessageRequest(BaseModel):
-    content: str
+    content: str = Field(max_length=64_000)
     source: str = "user"
 
 
 class InfluenceRequest(BaseModel):
-    content: str
+    content: str = Field(max_length=64_000)
     source: str = "user"
 
 
 def create_app(service: ConscioService | None = None, config: ServiceConfig | None = None) -> FastAPI:
     svc = service or ConscioService(config)
+
+    async def require_episode_budget() -> None:
+        allowed, retry_after = svc.try_acquire_episode()
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="episode rate limit exceeded",
+                headers={"Retry-After": str(max(1, math.ceil(retry_after)))},
+            )
 
     async def require_auth(authorization: str | None = Header(default=None)) -> None:
         expected = svc.config.api_key
@@ -64,7 +74,14 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
         finally:
             await svc.stop()
 
+    # Deliberately no CORS middleware: the API is bearer-token (CSRF-immune) and
+    # the SPA is same-origin behind cookie auth with SameSite=lax. Adding CORS
+    # would only widen the attack surface for zero current consumers.
     app = FastAPI(title="Conscio", version=__version__, lifespan=lifespan)
+
+    if svc.config.max_request_bytes > 0:
+        from conscio.web.limits import BodySizeLimitMiddleware  # noqa: PLC0415
+        app.add_middleware(BodySizeLimitMiddleware, max_bytes=svc.config.max_request_bytes)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -87,7 +104,7 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
             "attention_schema": result.attention_schema,
         }
 
-    @app.post("/message", dependencies=[Depends(require_auth)])
+    @app.post("/message", dependencies=[Depends(require_auth), Depends(require_episode_budget)])
     async def message(req: MessageRequest) -> dict[str, Any]:
         try:
             result = await asyncio.wait_for(
@@ -103,7 +120,7 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return _message_blob(result)
 
-    @app.post("/message/stream", dependencies=[Depends(require_auth)])
+    @app.post("/message/stream", dependencies=[Depends(require_auth), Depends(require_episode_budget)])
     async def message_stream(req: MessageRequest) -> StreamingResponse:
         """SSE variant of /message: chat.token / chat.discard events for this
         submission (matched by ref), terminated by message.result or
@@ -170,11 +187,11 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
             headers=headers,
         )
 
-    @app.post("/influence/goal", dependencies=[Depends(require_auth)])
+    @app.post("/influence/goal", dependencies=[Depends(require_auth), Depends(require_episode_budget)])
     async def influence_goal(req: InfluenceRequest) -> dict[str, Any]:
         return await svc.submit_influence(req.content, kind="goal", source=_validated_source(req.source))
 
-    @app.post("/influence/constraint", dependencies=[Depends(require_auth)])
+    @app.post("/influence/constraint", dependencies=[Depends(require_auth), Depends(require_episode_budget)])
     async def influence_constraint(req: InfluenceRequest) -> dict[str, Any]:
         return await svc.submit_influence(req.content, kind="constraint", source=_validated_source(req.source))
 
@@ -233,7 +250,7 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
             raise HTTPException(status_code=404, detail="project not found") from None
         return {"status": "active"}
 
-    @app.post("/autonomy/tick", dependencies=[Depends(require_auth)])
+    @app.post("/autonomy/tick", dependencies=[Depends(require_auth), Depends(require_episode_budget)])
     async def autonomy_tick() -> dict[str, Any]:
         result = await svc.run_autonomous_tick()
         if result is None:

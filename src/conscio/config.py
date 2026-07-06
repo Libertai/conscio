@@ -154,6 +154,12 @@ class ServiceConfig:
     shell_timeout: int = 30
     working_directory: Path = field(default_factory=Path.cwd)
     pause_on_error: bool = True
+    backup_interval_hours: float = 24.0  # 0 disables scheduled backups
+    backup_retain: int = 14  # pruned after each scheduled backup; 0 disables pruning
+    trusted_proxies: list[str] = field(default_factory=list)
+    max_request_bytes: int = 262144  # 0 disables the HTTP body-size cap
+    episode_rate_per_minute: int = 30  # 0 disables episode rate limiting
+    episode_rate_burst: int = 10
     episode_timeout: float = 600.0  # wall-clock cap per episode; 0 disables
     message_timeout: float = 300.0  # HTTP caller deadline on /message; 0 disables
     agent: AgentConfig = field(default_factory=AgentConfig)
@@ -227,6 +233,16 @@ class ServiceConfig:
             raise ValueError(f"engine.attention_broadcast_limit must be > 0 (got {self.attention_broadcast_limit}).")
         if self.max_actions_per_hour < 0:
             raise ValueError(f"tools.max_actions_per_hour must be >= 0 (got {self.max_actions_per_hour}).")
+        if self.backup_interval_hours < 0:
+            raise ValueError(f"service.backup_interval_hours must be >= 0 (got {self.backup_interval_hours}).")
+        if self.backup_retain < 0:
+            raise ValueError(f"service.backup_retain must be >= 0 (got {self.backup_retain}).")
+        if self.max_request_bytes < 0:
+            raise ValueError(f"service.max_request_bytes must be >= 0 (got {self.max_request_bytes}).")
+        if self.episode_rate_per_minute < 0:
+            raise ValueError(f"service.episode_rate_per_minute must be >= 0 (got {self.episode_rate_per_minute}).")
+        if self.episode_rate_burst < 1:
+            raise ValueError(f"service.episode_rate_burst must be >= 1 (got {self.episode_rate_burst}).")
         if self.shell_timeout <= 0:
             raise ValueError(f"tools.shell_timeout must be > 0 (got {self.shell_timeout}).")
         if self.subagent_max_rounds <= 0:
@@ -474,6 +490,16 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         shell_timeout=int(tools.get("shell_timeout", 30)),
         working_directory=_as_path(tools.get("working_directory"), working_dir_default),
         pause_on_error=bool(service.get("pause_on_error", True)),
+        backup_interval_hours=float(service.get("backup_interval_hours", 24.0)),
+        backup_retain=int(service.get("backup_retain", 14)),
+        trusted_proxies=(
+            [item.strip() for item in os.environ["CONSCIO_TRUSTED_PROXIES"].split(",") if item.strip()]
+            if os.environ.get("CONSCIO_TRUSTED_PROXIES") is not None
+            else _as_str_list(service.get("trusted_proxies"))
+        ),
+        max_request_bytes=int(service.get("max_request_bytes", 262144)),
+        episode_rate_per_minute=int(service.get("episode_rate_per_minute", 30)),
+        episode_rate_burst=int(service.get("episode_rate_burst", 10)),
         episode_timeout=float(service.get("episode_timeout", 600.0)),
         message_timeout=float(service.get("message_timeout", 300.0)),
         agent=agent_cfg,
@@ -549,6 +575,12 @@ consolidation_interval = 20
 enable_contradiction_check = false
 unsafe_autonomy = {unsafe_autonomy}
 pause_on_error = true
+backup_interval_hours = 24
+backup_retain = 14
+trusted_proxies = []
+max_request_bytes = 262144
+episode_rate_per_minute = 30
+episode_rate_burst = 10
 episode_timeout = 600
 message_timeout = 300
 

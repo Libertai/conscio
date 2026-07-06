@@ -23,6 +23,7 @@ from conscio.goals import GoalStore
 from conscio.llm.router import LLMRouter
 from conscio.memory.consolidation import ConsolidationEngine
 from conscio.memory.embeddings import LibertAIEmbedder
+from conscio.memory.lifecycle import create_home_backup, prune_backups
 from conscio.memory.store import MemoryStore
 from conscio.tools import PolicyToolRegistry, ScopedToolRegistry
 
@@ -256,6 +257,20 @@ class ConscioService:
         self._current_queue_item: QueuedEvent | None = None
         self._current_episode_task: asyncio.Task | None = None
         self._episodes: list[StoredEpisode] = []
+        self._backup_task: asyncio.Task | None = None
+        self.last_backup_at: float = 0.0
+        self.last_backup_error: str = ""
+        self.rate_limited_total = 0
+        # Lazily imported like the broker: conscio.web must not import at module load.
+        from conscio.web.ratelimit import TokenBucket  # noqa: PLC0415
+        self.episode_bucket: TokenBucket | None = (
+            TokenBucket(
+                capacity=float(self.config.episode_rate_burst),
+                refill_per_second=self.config.episode_rate_per_minute / 60.0,
+            )
+            if self.config.episode_rate_per_minute > 0
+            else None
+        )
         self._autonomous_action_times: list[float] = []
         self._event_lock = asyncio.Lock()
         # SSE broker — attached on start(), detached on stop(). Imported lazily
@@ -680,6 +695,8 @@ class ConscioService:
                 self._event_task = asyncio.create_task(self._event_worker())
             if background and self.config.autonomous:
                 self._loop_task = asyncio.create_task(self._autonomous_loop())
+            if background and self.config.backup_interval_hours > 0:
+                self._backup_task = asyncio.create_task(self._backup_loop())
         except Exception:
             self.lock.release()
             raise
@@ -695,6 +712,13 @@ class ConscioService:
             except asyncio.CancelledError:
                 pass
             self._loop_task = None
+        if self._backup_task is not None:
+            self._backup_task.cancel()
+            try:
+                await self._backup_task
+            except asyncio.CancelledError:
+                pass
+            self._backup_task = None
         if self._event_task is not None:
             self._event_task.cancel()
             try:
@@ -749,6 +773,16 @@ class ConscioService:
         if name == "chat.token":
             payload["text"] = str(data.get("text") or "")
         self._event_broker.emit(name, payload)
+
+    def try_acquire_episode(self) -> tuple[bool, float]:
+        """Global inbound rate check for episode-triggering endpoints."""
+        if self.episode_bucket is None:
+            return True, 0.0
+        allowed, retry_after = self.episode_bucket.try_acquire()
+        if not allowed:
+            self.rate_limited_total += 1
+            logger.warning("episode request rate-limited (retry in %.1fs)", retry_after)
+        return allowed, retry_after
 
     async def submit_message(self, content: str, *, source: str = "user", ref: str = "") -> EpisodeResult:
         result = await self._submit_event(
@@ -1272,6 +1306,9 @@ class ConscioService:
             "working_directory": str(self.config.working_directory),
             "mcp_servers": self.mcp.status(),
             "last_error": self.last_error,
+            "last_backup_at": self.last_backup_at,
+            "last_backup_error": self.last_backup_error,
+            "rate_limited_total": self.rate_limited_total,
         }
 
     async def list_procedures(self) -> list[dict[str, Any]]:
@@ -1298,6 +1335,24 @@ class ConscioService:
 
     async def list_influences(self) -> list[dict[str, Any]]:
         return await self.goals.list_influences()
+
+    async def _backup_loop(self) -> None:
+        """Periodic home backup + retention pruning. First run happens one full
+        interval after start (a restart loop must not double backup I/O)."""
+        interval = self.config.backup_interval_hours * 3600.0
+        while self.running:
+            await asyncio.sleep(interval)
+            try:
+                archive = await asyncio.to_thread(create_home_backup, self.config)
+                await asyncio.to_thread(prune_backups, self.config, self.config.backup_retain)
+                self.last_backup_at = time.time()
+                self.last_backup_error = ""
+                logger.info("scheduled backup written: %s", archive)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.last_backup_error = str(exc)
+                logger.exception("scheduled backup failed")
 
     async def _autonomous_loop(self) -> None:
         backoff = 0.0

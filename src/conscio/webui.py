@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from typing import Any
 
 from fastapi import APIRouter, Cookie, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from conscio.service import ConscioService, EpisodeCancelled
 
@@ -30,11 +31,11 @@ from conscio.web.events import stream_events
 
 
 class LoginRequest(BaseModel):
-    password: str
+    password: str = Field(max_length=1_024)
 
 
 class TextRequest(BaseModel):
-    content: str
+    content: str = Field(max_length=64_000)
 
 
 class ChatSessionCreateRequest(BaseModel):
@@ -42,16 +43,16 @@ class ChatSessionCreateRequest(BaseModel):
 
 
 class GoalCreateRequest(BaseModel):
-    description: str
+    description: str = Field(max_length=8_000)
     priority: float = 0.5
     source: str = "user"
 
 
 class GoalUpdateRequest(BaseModel):
-    description: str | None = None
+    description: str | None = Field(default=None, max_length=8_000)
     status: str | None = None
     priority: float | None = None
-    review_notes: str | None = None
+    review_notes: str | None = Field(default=None, max_length=8_000)
 
 
 # Auth helpers now live in conscio.web.auth. The leading-underscore alias
@@ -72,6 +73,16 @@ async def _submit_with_deadline(service: ConscioService, content: str):
         ) from None
     except EpisodeCancelled as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _require_episode_budget(service: ConscioService) -> None:
+    allowed, retry_after = service.try_acquire_episode()
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="episode rate limit exceeded",
+            headers={"Retry-After": str(max(1, math.ceil(retry_after)))},
+        )
 
 
 def create_web_router(service: ConscioService) -> APIRouter:
@@ -140,17 +151,20 @@ def create_web_router(service: ConscioService) -> APIRouter:
     @router.post("/ui/api/message", include_in_schema=False)
     async def ui_message(req: TextRequest, conscio_web_session: str | None = Cookie(default=None)) -> dict[str, Any]:
         _require_web_auth(service, sessions, conscio_web_session)
+        _require_episode_budget(service)
         result = await _submit_with_deadline(service, req.content)
         return {"output": result.output, "selected_action": result.selected_action}
 
     @router.post("/ui/api/influence/goal", include_in_schema=False)
     async def ui_goal(req: TextRequest, conscio_web_session: str | None = Cookie(default=None)) -> dict[str, Any]:
         _require_web_auth(service, sessions, conscio_web_session)
+        _require_episode_budget(service)
         return await service.submit_influence(req.content, kind="goal")
 
     @router.post("/ui/api/influence/constraint", include_in_schema=False)
     async def ui_constraint(req: TextRequest, conscio_web_session: str | None = Cookie(default=None)) -> dict[str, Any]:
         _require_web_auth(service, sessions, conscio_web_session)
+        _require_episode_budget(service)
         return await service.submit_influence(req.content, kind="constraint")
 
     @router.post("/ui/api/control/{action}", include_in_schema=False)
@@ -169,6 +183,7 @@ def create_web_router(service: ConscioService) -> APIRouter:
     @router.post("/ui/api/tick", include_in_schema=False)
     async def ui_tick(conscio_web_session: str | None = Cookie(default=None)) -> dict[str, Any]:
         _require_web_auth(service, sessions, conscio_web_session)
+        _require_episode_budget(service)
         result = await service.run_autonomous_tick()
         if result is None:
             return {"output": "", "selected_action": "wait"}
@@ -222,6 +237,7 @@ def create_web_router(service: ConscioService) -> APIRouter:
         conscio_web_session: str | None = Cookie(default=None),
     ) -> dict[str, Any]:
         _require_web_auth(service, sessions, conscio_web_session)
+        _require_episode_budget(service)
         await chat_store.ensure_default_session()
         if await chat_store.get_session(session_id) is None:
             # Without this check append_message's upsert silently resurrects

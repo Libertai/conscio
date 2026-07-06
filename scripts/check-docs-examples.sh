@@ -86,7 +86,7 @@ for command in init start status doctor stop; do
   has_regex src/conscio/cli.py "add_parser\\(\"$command\""
 done
 
-for command in schema migrate backup restore export import; do
+for command in schema migrate backup prune restore export import; do
   has_regex src/conscio/cli.py "add_parser\\(\"$command\""
 done
 
@@ -113,11 +113,12 @@ for key in \
   retry_backoff embedding_model endpoint fallback response_format tool_choice \
   chat_temperature autonomous_temperature judge_max_tokens appraisal_max_tokens \
   enabled max_rounds max_seconds deny_capabilities \
-  transport trusted call_timeout connect_timeout servers enabled; do
+  transport trusted call_timeout connect_timeout servers enabled \
+  backup_interval_hours backup_retain trusted_proxies max_request_bytes episode_rate_per_minute episode_rate_burst; do
   has src/conscio/config.py "$key"
 done
 
-for key in CONSCIO_CONFIG CONSCIO_HOST CONSCIO_PORT CONSCIO_CLIENT_URL CONSCIO_API_KEY CONSCIO_WEB_PASSWORD CONSCIO_ALLOW_INSECURE_BIND LIBERTAI_BASE_URL LIBERTAI_API_KEY LIBERTAI_MODEL OPENAI_BASE_URL OPENAI_API_KEY; do
+for key in CONSCIO_CONFIG CONSCIO_HOST CONSCIO_PORT CONSCIO_CLIENT_URL CONSCIO_API_KEY CONSCIO_WEB_PASSWORD CONSCIO_ALLOW_INSECURE_BIND CONSCIO_TRUSTED_PROXIES CONSCIO_WEB_SECURE_COOKIES LIBERTAI_BASE_URL LIBERTAI_API_KEY LIBERTAI_MODEL OPENAI_BASE_URL OPENAI_API_KEY; do
   has src/conscio/config.py "$key"
 done
 

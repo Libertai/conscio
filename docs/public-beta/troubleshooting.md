@@ -19,6 +19,9 @@ Use the runbooks for step-by-step recovery. This page is the quick map.
 
 - Login failure or cookie issue: [Web UI Auth](../runbooks/web-ui-auth.md)
 - Live updates disconnected: [SSE Disconnected](../runbooks/sse-disconnected.md)
+- `413 request body exceeds ... bytes`: raise `service.max_request_bytes` or trim the input.
+- `429 episode rate limit exceeded`: wait for `Retry-After` seconds or raise
+  `service.episode_rate_per_minute` / `episode_rate_burst`.
 
 ## Safety
 

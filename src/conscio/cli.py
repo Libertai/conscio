@@ -31,6 +31,7 @@ from conscio.memory.lifecycle import (
     import_database,
     migrate,
     preflight_database,
+    prune_backups,
     restore_home_backup,
     schema_status,
 )
@@ -542,7 +543,13 @@ def _service_start() -> None:
         # in the systemd units stops the crash loop.
         raise SystemExit(3) from exc
     app = create_app(config=cfg)
-    uvicorn.run(app, host=cfg.host, port=cfg.port)
+    uvicorn.run(
+        app,
+        host=cfg.host,
+        port=cfg.port,
+        proxy_headers=bool(cfg.trusted_proxies),
+        forwarded_allow_ips=",".join(cfg.trusted_proxies) if cfg.trusted_proxies else None,
+    )
 
 
 def _service_doctor() -> None:
@@ -634,6 +641,16 @@ def _db_backup(args: argparse.Namespace) -> None:
     cfg = load_config()
     archive = create_home_backup(cfg)
     console.print(f"[green]Backup written:[/] {archive}")
+
+
+def _db_prune(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    keep = args.keep if args.keep is not None else cfg.backup_retain
+    removed = prune_backups(cfg, keep)
+    if removed:
+        console.print(f"[green]Pruned {len(removed)} backup(s):[/] {', '.join(p.name for p in removed)}")
+    else:
+        console.print(f"[dim]Nothing to prune (keep={keep}).[/]")
 
 
 def _db_restore(args: argparse.Namespace) -> None:
@@ -837,6 +854,8 @@ def main() -> None:
     db_migrate_p = db_sub.add_parser("migrate", help="Create/update additive schema metadata")
     db_migrate_p.add_argument("--db", default="", help="Override database path")
     db_sub.add_parser("backup", help="Create a timestamped home backup archive")
+    db_prune_p = db_sub.add_parser("prune", help="Delete old home backups beyond the retention count")
+    db_prune_p.add_argument("--keep", type=int, default=None, help="Backups to keep (default: service.backup_retain)")
     db_restore_p = db_sub.add_parser("restore", help="Restore a home backup archive")
     db_restore_p.add_argument("archive")
     db_restore_p.add_argument("--force", action="store_true", help="Restore even if the service lock exists")
@@ -915,6 +934,8 @@ def main() -> None:
             asyncio.run(_db_migrate(args))
         elif args.db_command == "backup":
             _db_backup(args)
+        elif args.db_command == "prune":
+            _db_prune(args)
         elif args.db_command == "restore":
             _db_restore(args)
         elif args.db_command == "export":
