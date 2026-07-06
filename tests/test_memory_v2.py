@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import math
 import os
+import sqlite3
 import tempfile
 import time
 import unittest
+from pathlib import Path
 
 from conscio.memory.consolidation import ConsolidationEngine
 from conscio.memory.embeddings import EMBED_DIM, StubEmbedder
-from conscio.memory.store import MemoryStore
+from conscio.memory.store import SCHEMA_VERSION, MemoryStore
 
 
 def _unit(axis: int, dim: int = 8) -> list[float]:
@@ -510,6 +512,45 @@ class MemoryV2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(a1, a2)
         self.assertEqual(len(a1), EMBED_DIM)
         self.assertAlmostEqual(sum(v * v for v in a1), 1.0, places=4)
+
+
+class SchemaV4MigrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_v3_episodes_table_gains_parent_episode_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "state.db"
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "CREATE TABLE episodes (id TEXT PRIMARY KEY, source TEXT NOT NULL, "
+                "event_type TEXT NOT NULL, goal_id TEXT, project_id TEXT, "
+                "input TEXT NOT NULL, output TEXT NOT NULL, "
+                "selected_action TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', "
+                "tainted INTEGER NOT NULL DEFAULT 0, web_origins TEXT NOT NULL DEFAULT '[]', "
+                "metrics TEXT NOT NULL DEFAULT '{}', trace TEXT NOT NULL DEFAULT '', "
+                "created_at REAL NOT NULL)"
+            )
+            conn.execute(
+                "INSERT INTO episodes (id, source, event_type, input, output, created_at) "
+                "VALUES ('e1', 'user', 'chat', 'q', 'a', 1.0)"
+            )
+            conn.commit()
+            conn.close()
+            store = MemoryStore(db_path=str(db))
+            await store.initialize()
+            try:
+                cols = {
+                    r["name"]
+                    for r in store.fetchall("PRAGMA table_info(episodes)")
+                }
+                self.assertIn("parent_episode_id", cols)
+                self.assertEqual(store.schema_version(), SCHEMA_VERSION)
+                await store.record_episode(
+                    episode_id="e2", source="subagent", event_type="subagent_task",
+                    input="t", output="o", parent_episode_id="e1",
+                )
+                row = store.fetchone("SELECT parent_episode_id FROM episodes WHERE id='e2'")
+                self.assertEqual(row["parent_episode_id"], "e1")
+            finally:
+                await store.close()
 
 
 if __name__ == "__main__":

@@ -34,7 +34,7 @@ _TRUST_BY_ORIGIN = {
     "quarantined": 0,
 }
 _CONF_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Schema v2 (fresh-start DB, no migration from v1):
 # - unified `episodes` keyed by the runtime's per-episode uuid (canonical id),
@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS episodes (
     event_type    TEXT NOT NULL,
     goal_id       TEXT,
     project_id    TEXT,
+    parent_episode_id TEXT,
     input         TEXT NOT NULL,
     output        TEXT NOT NULL,
     selected_action TEXT NOT NULL DEFAULT '',
@@ -215,6 +216,13 @@ def _repair_legacy_schema(conn: sqlite3.Connection) -> None:
             "CREATE VIRTUAL TABLE memory_fts USING fts5(content, memory_type, ref_id UNINDEXED)"
         )
         _rebuild_memory_fts(conn)
+    episode_columns = _table_columns(conn, "episodes")
+    if episode_columns and "parent_episode_id" not in episode_columns:
+        conn.execute("ALTER TABLE episodes ADD COLUMN parent_episode_id TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_episodes_parent "
+        "ON episodes (parent_episode_id, created_at DESC)"
+    )
 
 
 def _rebuild_memory_fts(conn: sqlite3.Connection) -> None:
@@ -408,6 +416,7 @@ class MemoryStore:
         trace: str = "",
         goal_id: str | None = None,
         project_id: str | None = None,
+        parent_episode_id: str | None = None,
     ) -> None:
         """Upsert one unified episode row keyed by the runtime's per-episode uuid.
 
@@ -419,14 +428,15 @@ class MemoryStore:
         with self._lock:
             conn = self._conn()
             conn.execute(
-                "INSERT INTO episodes (id, source, event_type, goal_id, project_id, input, output, "
+                "INSERT INTO episodes (id, source, event_type, goal_id, project_id, parent_episode_id, input, output, "
                 "selected_action, summary, tainted, web_origins, metrics, trace, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(id) DO UPDATE SET "
                 "source = excluded.source, "
                 "event_type = excluded.event_type, "
                 "goal_id = COALESCE(excluded.goal_id, episodes.goal_id), "
                 "project_id = COALESCE(excluded.project_id, episodes.project_id), "
+                "parent_episode_id = COALESCE(excluded.parent_episode_id, episodes.parent_episode_id), "
                 "input = excluded.input, "
                 "output = excluded.output, "
                 "selected_action = CASE WHEN excluded.selected_action != '' "
@@ -443,6 +453,7 @@ class MemoryStore:
                     event_type,
                     goal_id,
                     project_id,
+                    parent_episode_id,
                     input,
                     output,
                     selected_action,

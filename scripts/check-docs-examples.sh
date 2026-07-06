@@ -111,7 +111,8 @@ for key in \
   max_ticks tool_rounds_per_tick max_reflections attention_broadcast_limit \
   attention_char_budget timeout max_retries \
   retry_backoff embedding_model endpoint fallback response_format tool_choice \
-  chat_temperature autonomous_temperature judge_max_tokens appraisal_max_tokens; do
+  chat_temperature autonomous_temperature judge_max_tokens appraisal_max_tokens \
+  enabled max_rounds max_seconds deny_capabilities; do
   has src/conscio/config.py "$key"
 done
 
@@ -153,7 +154,7 @@ for tool in web_search web_fetch; do
   has docs/public-beta/tools.md "$tool"
 done
 
-for tool in set_task_status add_task note_progress propose_subgoal remember_fact remember_facts search_memory learn_procedure; do
+for tool in set_task_status add_task note_progress propose_subgoal remember_fact remember_facts search_memory learn_procedure spawn_subagent; do
   has src/conscio/service.py "$tool"
   has docs/public-beta/tools.md "$tool"
 done

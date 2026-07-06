@@ -12,6 +12,30 @@ trace, and pre-execution prediction records expectations before execution.
 - Web tools: `web_search`, `web_fetch`.
 - Unsafe VM tools: `bash`, `execute_code`.
 
+## Sub-Agents
+
+`spawn_subagent` delegates one bounded task to a focused sub-agent: a separate
+tool loop with its own private workspace, running on the `subagent` model role
+(see `[llm.roles.subagent]`). The parent agent sees only the final result.
+
+Scoping and safety:
+
+- Sub-agents cannot call `spawn_subagent` (no recursion) and are denied the
+  capabilities in `[subagents] deny_capabilities` — by default
+  `self_modification`, `memory_write`, and `self_management`, so a sub-agent
+  can read memory and use world tools but cannot write facts, learn
+  procedures, or mutate goals and tasks.
+- The parent's allow/deny lists and `unsafe_autonomy` gate still apply.
+- Taint propagates to the parent: if a sub-agent fetches web content, the
+  parent episode is quarantined exactly as if it had fetched the page itself.
+- Sub-agent runs are recorded as `subagent`-source episodes linked by
+  `parent_episode_id`, and their tool calls are audited with the sub-agent's
+  episode id.
+
+Budgets: `[subagents] max_rounds` (default 12) and `max_seconds` (default 120)
+bound each run; autonomous parents' sub-agent tool calls count against
+`max_actions_per_hour`.
+
 ## Unsafe Autonomy
 
 `bash` and `execute_code` are denied unless `[service] unsafe_autonomy = true`.

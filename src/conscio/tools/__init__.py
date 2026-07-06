@@ -1,6 +1,6 @@
-from conscio.tools.registry import UNSAFE_TOOLS, PolicyToolRegistry, ToolRegistry, tool
+from conscio.tools.registry import UNSAFE_TOOLS, PolicyToolRegistry, ScopedToolRegistry, ToolRegistry, tool
 
-__all__ = ["ToolRegistry", "PolicyToolRegistry", "UNSAFE_TOOLS", "tool"]
+__all__ = ["ToolRegistry", "PolicyToolRegistry", "ScopedToolRegistry", "UNSAFE_TOOLS", "tool"]
 
 _global_registry: ToolRegistry | None = None
 

@@ -140,6 +140,12 @@ class ServiceConfig:
     max_reflections: int = 2
     attention_broadcast_limit: int = 6
     attention_char_budget: int = 4000
+    subagents_enabled: bool = True
+    subagent_max_rounds: int = 12
+    subagent_max_seconds: float = 120.0
+    subagent_deny_capabilities: list[str] = field(
+        default_factory=lambda: ["self_modification", "memory_write", "self_management"]
+    )
     chat_temperature: float = 0.4
     autonomous_temperature: float = 0.3
     judge_max_tokens: int = 200
@@ -198,6 +204,10 @@ class ServiceConfig:
             raise ValueError(f"tools.max_actions_per_hour must be >= 0 (got {self.max_actions_per_hour}).")
         if self.shell_timeout <= 0:
             raise ValueError(f"tools.shell_timeout must be > 0 (got {self.shell_timeout}).")
+        if self.subagent_max_rounds <= 0:
+            raise ValueError(f"subagents.max_rounds must be > 0 (got {self.subagent_max_rounds}).")
+        if self.subagent_max_seconds <= 0:
+            raise ValueError(f"subagents.max_seconds must be > 0 (got {self.subagent_max_seconds}).")
         if self.llm_timeout <= 0:
             raise ValueError(f"llm.timeout must be > 0 (got {self.llm_timeout}).")
         if self.llm_max_retries < 0:
@@ -321,6 +331,7 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
     engine = raw.get("engine", {})
     ablation = raw.get("ablation", {})
     motivation = raw.get("motivation", {})
+    subagents = raw.get("subagents", {})
     agent_raw = raw.get("agent", {})
     profile = _normalize_profile(agent_raw.get("profile", "research"))
     autonomous_vm = profile == "autonomous_vm"
@@ -423,6 +434,14 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         max_reflections=int(engine.get("max_reflections", 2)),
         attention_broadcast_limit=int(engine.get("attention_broadcast_limit", 6)),
         attention_char_budget=int(engine.get("attention_char_budget", 4000)),
+        subagents_enabled=bool(subagents.get("enabled", True)),
+        subagent_max_rounds=int(subagents.get("max_rounds", 12)),
+        subagent_max_seconds=float(subagents.get("max_seconds", 120.0)),
+        subagent_deny_capabilities=(
+            _as_str_list(subagents.get("deny_capabilities"))
+            if subagents.get("deny_capabilities") is not None
+            else ["self_modification", "memory_write", "self_management"]
+        ),
         chat_temperature=float(engine.get("chat_temperature", 0.4)),
         autonomous_temperature=float(engine.get("autonomous_temperature", 0.3)),
         judge_max_tokens=int(engine.get("judge_max_tokens", 200)),
@@ -507,6 +526,12 @@ max_actions_per_hour = 60
 model_tool_rounds = 32
 shell_timeout = 30
 working_directory = "{working_directory}"
+
+[subagents]
+enabled = true
+max_rounds = 12
+max_seconds = 120.0
+deny_capabilities = ["self_modification", "memory_write", "self_management"]
 
 [engine]
 max_ticks = 8

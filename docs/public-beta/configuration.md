@@ -135,3 +135,17 @@ working_directory = "/opt/conscio/work"
 
 Use `allowed` for an allowlist and `denied` for a blocklist. `allowed = []`
 means all registered tools are eligible, subject to the unsafe-autonomy gate.
+
+## Sub-Agents
+
+```toml
+[subagents]
+enabled = true
+max_rounds = 12
+max_seconds = 120.0
+deny_capabilities = ["self_modification", "memory_write", "self_management"]
+```
+
+`enabled` registers the `spawn_subagent` tool. `deny_capabilities` lists tool
+capabilities sub-agents may never use; names and policy gates from `[tools]`
+still apply on top.

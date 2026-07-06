@@ -21,6 +21,7 @@
     episode: { abbr: "EP", color: "var(--color-ch-result)" },
     project: { abbr: "PR", color: "var(--color-ch-plan)" },
     control: { abbr: "CT", color: "var(--color-ch-system)" },
+    subagent: { abbr: "SA", color: "var(--color-ch-action)" },
   };
 
   function abbrFor(entry: ActivityEntry): { abbr: string; color: string } {
@@ -43,6 +44,9 @@
       "episode.created": "agent",
       "project.updated": "system",
       "control.paused": "system",
+      "subagent.started": "subagent",
+      "subagent.tool": "subagent",
+      "subagent.finished": "subagent",
     };
     if (entry.source && SERVICE_SOURCE[entry.source]) return SERVICE_SOURCE[entry.source];
     return entry.source ?? "";

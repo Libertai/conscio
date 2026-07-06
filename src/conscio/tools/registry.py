@@ -139,3 +139,50 @@ class PolicyToolRegistry(ToolRegistry):
             self.working_directory.mkdir(parents=True, exist_ok=True)
             call_args["cwd"] = str(self.working_directory)
         return await super().call(name, call_args)
+
+
+class ScopedToolRegistry:
+    """Filtered view over a parent registry for sub-agent sessions.
+
+    Not a ToolRegistry subclass: it owns no tools and delegates `call` to the
+    parent, so PolicyToolRegistry gating (allow/deny/unsafe/cwd/timeout) still
+    applies. The scope only narrows: denied names (no recursive spawn_subagent),
+    denied capabilities (no memory writes / self-management by default), and an
+    optional allowlist intersection."""
+
+    def __init__(
+        self,
+        parent: ToolRegistry,
+        *,
+        allowed: set[str] | None = None,
+        denied_names: frozenset[str] = frozenset({"spawn_subagent"}),
+        denied_capabilities: frozenset[str] = frozenset(),
+    ) -> None:
+        self.parent = parent
+        self.allowed = set(allowed) if allowed is not None else None
+        self.denied_names = frozenset(denied_names)
+        self.denied_capabilities = frozenset(denied_capabilities)
+
+    def _permitted(self, name: str) -> bool:
+        if name in self.denied_names:
+            return False
+        if self.allowed is not None and name not in self.allowed:
+            return False
+        if self.denied_capabilities & self.parent.tool_capabilities(name):
+            return False
+        return True
+
+    def list_tools(self) -> dict[str, str]:
+        return {name: desc for name, desc in self.parent.list_tools().items() if self._permitted(name)}
+
+    def tool_schemas(self) -> dict[str, dict[str, Any]]:
+        permitted = self.list_tools()
+        return {name: schema for name, schema in self.parent.tool_schemas().items() if name in permitted}
+
+    def tool_capabilities(self, name: str) -> frozenset[str]:
+        return self.parent.tool_capabilities(name)
+
+    async def call(self, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
+        if not self._permitted(name):
+            return {"output": f"Tool '{name}' is not available to sub-agents.", "error": True}
+        return await self.parent.call(name, args)

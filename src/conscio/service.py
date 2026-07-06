@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -16,13 +17,14 @@ from conscio.config import ServiceConfig, load_config
 from conscio.core.cognition import InputEvent
 from conscio.core.context import ContextSettings, provenance_marker
 from conscio.core.runtime import CognitiveRuntime, EpisodeResult
+from conscio.core.subagent import SubagentRunner, SubagentSpec
 from conscio.core.tool_loop import external_taint_origin
 from conscio.goals import GoalStore
 from conscio.llm.router import LLMRouter
 from conscio.memory.consolidation import ConsolidationEngine
 from conscio.memory.embeddings import LibertAIEmbedder
 from conscio.memory.store import MemoryStore
-from conscio.tools import PolicyToolRegistry
+from conscio.tools import PolicyToolRegistry, ScopedToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -577,6 +579,78 @@ class ConscioService:
             },
         )
 
+        async def spawn_subagent(
+            task: str,
+            context: str = "",
+            tools_allowed: list[str] | None = None,
+            max_rounds: int | None = None,
+        ) -> dict[str, Any]:
+            text = (task or "").strip()
+            if not text:
+                return {"output": "No task provided.", "error": True}
+            parent_id = self.runtime.workspace.current_episode or ""
+            sub_id = uuid.uuid4().hex
+            scoped = ScopedToolRegistry(
+                self.runtime.tools,
+                allowed=set(tools_allowed) if tools_allowed else None,
+                denied_capabilities=frozenset(self.config.subagent_deny_capabilities),
+            )
+            spec = SubagentSpec(task=text, context=context or "", tools=tools_allowed, max_rounds=max_rounds)
+            runner = SubagentRunner(
+                llm=self._subagent_llm(),
+                tools=scoped,
+                on_tool_observation=self._subagent_observer(sub_id),
+                emit=self._event_broker.emit,
+                max_rounds=self.config.subagent_max_rounds,
+                max_seconds=self.config.subagent_max_seconds,
+            )
+            outcome = await runner.run(spec, parent_episode_id=parent_id, subagent_id=sub_id)
+            await self.memory.record_episode(
+                episode_id=outcome.id,
+                source="subagent",
+                event_type="subagent_task",
+                input=text,
+                output=outcome.output or outcome.error,
+                selected_action="answer" if not outcome.error else "error",
+                tainted=self.episode_taint.web,
+                metrics={
+                    "rounds": outcome.rounds,
+                    "tool_calls": len(outcome.tool_requests),
+                    "limit_reached": outcome.limit_reached,
+                },
+                parent_episode_id=parent_id or None,
+            )
+            if outcome.error and not outcome.output:
+                return {"output": outcome.error, "error": True, "subagent_id": outcome.id, "rounds": outcome.rounds}
+            return {"output": outcome.output, "error": False, "subagent_id": outcome.id, "rounds": outcome.rounds}
+
+        if self.config.subagents_enabled:
+            tools.register(
+                "spawn_subagent",
+                spawn_subagent,
+                "Delegate a bounded task to a focused sub-agent with its own tool "
+                "loop and model. Returns the sub-agent's final result.",
+                capabilities={"delegation"},
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "task": {"type": "string", "description": "Self-contained task for the sub-agent."},
+                        "context": {
+                            "type": "string",
+                            "description": "Optional extra context pasted into the sub-agent prompt.",
+                        },
+                        "tools_allowed": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional allowlist restricting the sub-agent's tools further.",
+                        },
+                        "max_rounds": {"type": "integer", "minimum": 1, "maximum": 32},
+                    },
+                    "required": ["task"],
+                    "additionalProperties": False,
+                },
+            )
+
     async def start(self, *, acquire_lock: bool = True, background: bool = True) -> None:
         if self.running:
             return
@@ -974,7 +1048,14 @@ class ConscioService:
             return [self._redact_tool_args(item) for item in value]
         return value
 
-    def _record_tool_event(self, source: str, request: Any, result: dict[str, Any]) -> None:
+    def _record_tool_event(
+        self,
+        source: str,
+        request: Any,
+        result: dict[str, Any],
+        *,
+        episode_id: str | None = None,
+    ) -> None:
         name = getattr(request, "name", "")
         capabilities = self._tool_capabilities(name)
         taint_origin = external_taint_origin(
@@ -983,8 +1064,8 @@ class ConscioService:
         summary = " ".join(str(result.get("output") or result.get("error") or "").split())[:500]
         try:
             self.memory.record_tool_event(
-                episode_id=self.runtime.workspace.current_episode,
-                tick=int(getattr(self.runtime.workspace, "_current_tick", -1)),
+                episode_id=episode_id if episode_id is not None else self.runtime.workspace.current_episode,
+                tick=-1 if episode_id is not None else int(getattr(self.runtime.workspace, "_current_tick", -1)),
                 source=source,
                 tool=name,
                 capabilities=capabilities,
@@ -1074,6 +1155,32 @@ class ConscioService:
         if name in _SELF_MANAGEMENT_TOOLS:
             return
         await self.autonomy.record_action("tool")
+
+    def _subagent_llm(self) -> Any | None:
+        """Model for sub-agent tool loops: the 'subagent' role when a router is
+        configured (M2), else the same client the chat strategy uses."""
+        if self.router is not None:
+            try:
+                return self.router.for_role("subagent")
+            except Exception:  # noqa: BLE001 — fall back to the main client
+                pass
+        return self.runtime.chat_strategy.llm
+
+    def _subagent_observer(self, subagent_id: str) -> Any:
+        """Per-spawn observation hook. Taint notes go to the PARENT episode
+        tracker on purpose: sub-agent output flows back into the parent
+        context, so a sub-agent web fetch must quarantine the parent episode
+        (otherwise delegation would bypass the injection defenses). Audit rows
+        carry the SUB-episode id."""
+
+        async def observe(request: Any, result: dict[str, Any]) -> None:
+            self._record_tool_event("subagent", request, result, episode_id=subagent_id)
+            self._note_web_taint(request, result)
+            name = getattr(request, "name", "")
+            if self.current_event.startswith("autonomous") and name not in _SELF_MANAGEMENT_TOOLS:
+                await self.autonomy.record_action("tool")
+
+        return observe
 
     async def status(self) -> ServiceStatus:
         goal = await self.goals.active_goal()

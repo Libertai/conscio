@@ -52,7 +52,7 @@ async def main():
         raise SystemExit("health failed")
     if not status.get("running"):
         raise SystemExit("service is not running")
-    if metrics.get("schema_version") != 3:
+    if metrics.get("schema_version") != 4:
         raise SystemExit("unexpected schema version")
     print({"paused": status.get("paused"), "last_error": status.get("last_error") or metrics.get("last_error")})
 
