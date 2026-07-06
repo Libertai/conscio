@@ -105,7 +105,9 @@ def external_taint_origin(
     name = request.name
     caps = capabilities or frozenset()
     if name in WEB_CONTENT_TOOLS or EXTERNAL_CONTENT_CAPABILITY in caps:
-        return web_request_url(request)
+        # MCP and other non-URL external tools have no url/query arg; fall back
+        # to the tool name so the fact origin is still informative ("web:mcp__x__y").
+        return web_request_url(request) or request.name
     if name in NETWORK_CAPABLE_TOOLS or NETWORK_READ_CAPABILITY in caps:
         args_blob = json.dumps(request.args or {}, ensure_ascii=False)
         output = str((result or {}).get("output", ""))
@@ -150,7 +152,7 @@ def _spotlight_web_output(request: ToolRequest, result: dict[str, Any]) -> dict[
     influence reasoning within an episode; the taint/trust pipeline bounds the
     blast radius rather than eliminating it."""
     output = neutralize_untrusted_delimiters(str(result.get("output", "")))
-    begin = UNTRUSTED_WEB_BEGIN.format(url=web_request_url(request))
+    begin = UNTRUSTED_WEB_BEGIN.format(url=web_request_url(request) or request.name)
     return {**result, "output": f"{begin}\n{output}\n{UNTRUSTED_WEB_END}"}
 
 

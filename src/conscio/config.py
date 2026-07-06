@@ -93,6 +93,30 @@ class AgentConfig:
     external_side_effects: str = "policy"
 
 
+@dataclass(frozen=True)
+class McpServerConfig:
+    """One external MCP tool server from [mcp.servers.<name>].
+
+    Untrusted by default: tool outputs are spotlighted and taint the episode
+    exactly like web content. `trusted = true` disables that quarantine —
+    only for servers that are part of the operator's own premises.
+    """
+
+    name: str
+    transport: str = "stdio"  # "stdio" | "http"
+    command: str = ""
+    args: tuple[str, ...] = ()
+    env: dict[str, str] = field(default_factory=dict)
+    url: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
+    enabled: bool = True
+    trusted: bool = False
+    allowed: tuple[str, ...] = ()
+    denied: tuple[str, ...] = ()
+    call_timeout: float = 60.0
+    connect_timeout: float = 15.0
+
+
 @dataclass
 class ServiceConfig:
     home: Path = DEFAULT_HOME
@@ -135,6 +159,7 @@ class ServiceConfig:
     agent: AgentConfig = field(default_factory=AgentConfig)
     ablation: AblationFlags = field(default_factory=AblationFlags)
     motivation: MotivationConfig = field(default_factory=MotivationConfig)
+    mcp_servers: list[McpServerConfig] = field(default_factory=list)
     max_ticks: int = 8
     tool_rounds_per_tick: int = 4
     max_reflections: int = 2
@@ -254,6 +279,22 @@ class ServiceConfig:
                 f"motivation.stale_block_days ({self.motivation.stale_block_days}) must be > "
                 f"stale_flag_days ({self.motivation.stale_flag_days})."
             )
+        seen_mcp: set[str] = set()
+        for server in self.mcp_servers:
+            label = f"mcp.servers.{server.name or '?'}"
+            if not server.name:
+                raise ValueError("mcp server tables require a non-empty name.")
+            if server.name in seen_mcp:
+                raise ValueError(f"Duplicate MCP server name '{server.name}'.")
+            seen_mcp.add(server.name)
+            if server.transport not in {"stdio", "http"}:
+                raise ValueError(f"{label}.transport must be 'stdio' or 'http' (got {server.transport!r}).")
+            if server.transport == "stdio" and not server.command:
+                raise ValueError(f"{label} uses stdio transport and requires a command.")
+            if server.transport == "http" and not server.url.startswith(("http://", "https://")):
+                raise ValueError(f"{label} uses http transport and requires an http(s) url.")
+            if server.call_timeout <= 0 or server.connect_timeout <= 0:
+                raise ValueError(f"{label} timeouts must be > 0.")
 
 
 def _as_path(value: Any, default: Path) -> Path:
@@ -268,6 +309,34 @@ def _as_str_list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value]
     return [str(value)]
+
+
+def _as_mcp_servers(raw: Any) -> list[McpServerConfig]:
+    servers: list[McpServerConfig] = []
+    if not isinstance(raw, dict):
+        return servers
+    for key, table in raw.items():
+        if not isinstance(table, dict):
+            continue
+        name = str(key).strip().lower().replace("-", "_")
+        servers.append(
+            McpServerConfig(
+                name=name,
+                transport=str(table.get("transport", "stdio")).strip().lower(),
+                command=str(table.get("command") or ""),
+                args=tuple(str(a) for a in table.get("args") or ()),
+                env={str(k): str(v) for k, v in (table.get("env") or {}).items()},
+                url=str(table.get("url") or ""),
+                headers={str(k): str(v) for k, v in (table.get("headers") or {}).items()},
+                enabled=bool(table.get("enabled", True)),
+                trusted=bool(table.get("trusted", False)),
+                allowed=tuple(_as_str_list(table.get("allowed"))),
+                denied=tuple(_as_str_list(table.get("denied"))),
+                call_timeout=float(table.get("call_timeout", 60.0)),
+                connect_timeout=float(table.get("connect_timeout", 15.0)),
+            )
+        )
+    return servers
 
 
 def _parse_llm_endpoints(raw_llm: dict[str, Any]) -> dict[str, LLMEndpointConfig]:
@@ -331,6 +400,7 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
     engine = raw.get("engine", {})
     ablation = raw.get("ablation", {})
     motivation = raw.get("motivation", {})
+    mcp_raw = raw.get("mcp", {}).get("servers", {})
     subagents = raw.get("subagents", {})
     agent_raw = raw.get("agent", {})
     profile = _normalize_profile(agent_raw.get("profile", "research"))
@@ -429,6 +499,7 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
             stale_flag_days=float(motivation.get("stale_flag_days", 2.0)),
             stale_block_days=float(motivation.get("stale_block_days", 5.0)),
         ),
+        mcp_servers=_as_mcp_servers(mcp_raw),
         max_ticks=int(engine.get("max_ticks", 8)),
         tool_rounds_per_tick=int(engine.get("tool_rounds_per_tick", 4)),
         max_reflections=int(engine.get("max_reflections", 2)),
@@ -555,6 +626,21 @@ satiation_decay = 0.98
 goal_dup_threshold = 0.88
 stale_flag_days = 2.0
 stale_block_days = 5.0
+
+[mcp]
+# External MCP tool servers. Tools appear to the agent as mcp__<server>__<tool>
+# and are quarantined like web content unless the server sets trusted = true.
+# [mcp.servers.example]
+# transport = "stdio"            # "stdio" | "http"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-everything"]
+# env = {{}}
+# enabled = true
+# trusted = false
+# allowed = []                   # per-server tool allowlist (empty = all)
+# denied = []
+# call_timeout = 60.0
+# connect_timeout = 15.0
 
 [ablation]
 attention_gating = true

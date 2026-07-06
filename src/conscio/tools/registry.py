@@ -57,6 +57,10 @@ class ToolRegistry:
             frozenset(capabilities) if capabilities is not None else inherited_caps,
         )
 
+    def unregister(self, name: str) -> None:
+        """Remove a dynamically registered tool (e.g. a disconnected MCP server's)."""
+        self._tools.pop(name, None)
+
     async def call(self, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
         if name not in self._tools:
             return {"output": f"Unknown tool: {name}", "error": True}

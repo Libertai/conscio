@@ -262,6 +262,15 @@ class ConscioService:
         # so circular imports through conscio.web stay impossible.
         from conscio.web.events import WorkspaceEventBroker  # noqa: PLC0415
         self._event_broker: WorkspaceEventBroker = WorkspaceEventBroker(self.runtime.workspace)
+        # MCP servers register their tools on the policy registry so allow/deny
+        # and the action budget apply to them unchanged. Imported lazily to keep
+        # the mcp dependency off the hot import path for CLI one-shots.
+        from conscio.mcp_client import McpManager  # noqa: PLC0415
+        self.mcp = McpManager(
+            self.config.mcp_servers,
+            self.runtime.tools,
+            on_event=self._event_broker.emit,
+        )
 
     def _register_self_tools(self, tools: PolicyToolRegistry) -> None:
         async def remember_fact(
@@ -663,6 +672,7 @@ class ConscioService:
             self.running = True
             self.started_at = time.time()
             self._event_broker.attach()
+            await self.mcp.start()
             goal = await self.goals.active_goal()
             if goal:
                 self.runtime.self_state.active_goal = goal.description
@@ -693,6 +703,7 @@ class ConscioService:
                 pass
             self._event_task = None
         self._fail_pending_events(RuntimeError("Conscio service stopped."))
+        await self.mcp.stop()
         self._event_broker.detach()
         await self.runtime.close()
         self.lock.release()

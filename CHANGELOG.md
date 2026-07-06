@@ -28,6 +28,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `POST /message/stream` and bearer-authed `GET /events` SSE endpoints; `conscio chat
   --stream`; live token rendering in the CLI (`run`/`ask`) and the web chat panel.
 - spawn_subagent tool: bounded sub-agent tool loops on the subagent model role, with parent taint propagation and per-episode lineage (parent_episode_id).
+- MCP client support: connect external MCP tool servers via `[mcp.servers.<name>]`
+  (stdio or streamable HTTP); their tools register as `mcp__<server>__<tool>` and are
+  quarantined like web content unless the server is marked `trusted`.
 
 ### Fixed
 - `bash` and `execute_code` terminate their child process on timeout or cancellation
