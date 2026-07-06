@@ -35,13 +35,22 @@ def _num(value: Any) -> float | None:
     return None
 
 
+def _fmt(value: float) -> str:
+    # Exact integers for counts (Prometheus counters must not lose precision) and
+    # a round-trippable repr otherwise. %g would truncate large counters / unix
+    # timestamps to 6 significant figures (e.g. 1234567 -> 1.23457e+06).
+    if value.is_integer():
+        return str(int(value))
+    return repr(value)
+
+
 def render_prometheus(metrics: dict[str, Any], extra: dict[str, Any]) -> str:
     lines: list[str] = []
 
     def emit(name: str, kind: str, help_text: str, value: float) -> None:
         lines.append(f"# HELP {name} {help_text}")
         lines.append(f"# TYPE {name} {kind}")
-        lines.append(f"{name} {value:g}")
+        lines.append(f"{name} {_fmt(value)}")
 
     for name, key, help_text in _GAUGES:
         value = _num(metrics.get(key))
