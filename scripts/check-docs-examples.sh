@@ -32,6 +32,7 @@ docs/launch/public-beta-launch.md
 docs/launch/announcement.md
 docs/launch/release-notes-public-beta.md
 docs/launch/known-limits.md
+docs/launch/release-process.md
 docs/research/theory-and-references.md
 docs/tutorials/install-and-run-local.md
 docs/tutorials/model-backend.md
@@ -76,6 +77,9 @@ has docs/index.md "launch/public-beta-launch.md"
 has docs/index.md "research/theory-and-references.md"
 has docs/launch/public-beta-launch.md "scripts/check-launch-readiness.sh"
 [ -x scripts/check-launch-readiness.sh ] || fail "scripts/check-launch-readiness.sh must be executable"
+[ -f CHANGELOG.md ] || fail "expected CHANGELOG.md"
+[ -f .github/workflows/release.yml ] || fail "expected release workflow"
+has README.md "pip install conscio-agent"
 
 # CLI examples in docs must correspond to real argparse command registrations.
 for command in ask run history search daemon eval service db tools chat influence pause resume cancel goals influences projects tick trace; do

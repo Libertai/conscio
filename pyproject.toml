@@ -1,5 +1,5 @@
 [project]
-name = "conscio"
+name = "conscio-agent"
 version = "0.1.0"
 description = "A consciousness harness for AI agents — Global Workspace Theory + structured self-reflection + stream-of-consciousness inner monologue"
 requires-python = ">=3.11"

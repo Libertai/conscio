@@ -40,6 +40,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Structured logging (`log_level`, `log_format`, `log_file`, `http_access_log`), with uvicorn unified into one sink.
 - `GET /ready` readiness probe, `GET /metrics/prometheus` text exposition, container healthchecks, SSE client cap.
 - systemd hardening directives on both service units.
+- Release pipeline: tagged releases publish `conscio-agent` to PyPI (trusted
+  publishing) and the Docker image to `ghcr.io/libertai/conscio`.
+
+### Changed
+- The PyPI distribution is named `conscio-agent` (the name `conscio` is taken);
+  the import package and CLI remain `conscio`.
 
 ### Fixed
 - `bash` and `execute_code` terminate their child process on timeout or cancellation

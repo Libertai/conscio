@@ -238,6 +238,20 @@ Public-beta operator documentation starts at [docs/index.md](docs/index.md).
 Launch materials are under [docs/launch/](docs/launch/), including the
 public-beta checklist, announcement draft, release notes, and known limits.
 
+### Install
+
+Released builds (the import package and CLI are both `conscio`):
+
+```bash
+pip install conscio-agent            # or: uv tool install conscio-agent
+docker pull ghcr.io/libertai/conscio:latest
+```
+
+`docker-compose.yml` in this repo runs the same image with a persistent volume.
+The release checklist lives in [docs/launch/release-process.md](docs/launch/release-process.md).
+
+### From source
+
 ```bash
 uv sync --frozen
 source .venv/bin/activate
