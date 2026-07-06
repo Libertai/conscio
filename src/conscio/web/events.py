@@ -28,6 +28,7 @@ from typing import Any
 from conscio.core.workspace import Workspace, WorkspaceEntry
 
 CLIENT_QUEUE_SIZE = 256
+MAX_SSE_CLIENTS = 32
 HEARTBEAT_SECONDS = 15.0
 STATUS_TICK_SECONDS = 2.0
 BACKLOG_SIZE = 80
@@ -40,6 +41,10 @@ NO_BACKLOG_TYPES = frozenset({"chat.token"})
 class _Client:
     queue: asyncio.Queue[dict[str, Any]] = field(default_factory=lambda: asyncio.Queue(maxsize=CLIENT_QUEUE_SIZE))
     dropped: int = 0
+
+
+class SSEClientLimitError(RuntimeError):
+    """Raised by register() when MAX_SSE_CLIENTS streams are already connected."""
 
 
 class WorkspaceEventBroker:
@@ -80,6 +85,8 @@ class WorkspaceEventBroker:
     # ── client registration ──────────────────────────────────────
 
     def register(self) -> _Client:
+        if len(self._clients) >= MAX_SSE_CLIENTS:
+            raise SSEClientLimitError(f"too many event stream clients (max {MAX_SSE_CLIENTS})")
         client = _Client()
         # Pre-fill the queue with backlog so the client sees recent history
         # immediately on connect. Tag each replayed event so the UI can style
@@ -202,6 +209,7 @@ def encode_sse(payload: dict[str, Any], *, event: str | None = None, retry_ms: i
 async def stream_events(
     broker: WorkspaceEventBroker,
     *,
+    client: _Client | None = None,
     is_disconnected: Callable[[], bool | Awaitable[bool]] | None = None,
 ) -> AsyncGenerator[bytes, None]:
     """Async generator yielding SSE-encoded bytes for a single client.
@@ -209,7 +217,8 @@ async def stream_events(
     ``is_disconnected`` is an optional async callable (Starlette's
     ``request.is_disconnected``) used to break the loop early.
     """
-    client = broker.register()
+    if client is None:
+        client = broker.register()
     try:
         yield encode_sse({"type": "stream.open", "ts": time.time()}, retry_ms=3000).encode("utf-8")
         while True:

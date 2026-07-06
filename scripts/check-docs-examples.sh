@@ -114,11 +114,12 @@ for key in \
   chat_temperature autonomous_temperature judge_max_tokens appraisal_max_tokens \
   enabled max_rounds max_seconds deny_capabilities \
   transport trusted call_timeout connect_timeout servers enabled \
-  backup_interval_hours backup_retain trusted_proxies max_request_bytes episode_rate_per_minute episode_rate_burst; do
+  backup_interval_hours backup_retain trusted_proxies max_request_bytes episode_rate_per_minute episode_rate_burst \
+  log_level log_format log_file http_access_log; do
   has src/conscio/config.py "$key"
 done
 
-for key in CONSCIO_CONFIG CONSCIO_HOST CONSCIO_PORT CONSCIO_CLIENT_URL CONSCIO_API_KEY CONSCIO_WEB_PASSWORD CONSCIO_ALLOW_INSECURE_BIND CONSCIO_TRUSTED_PROXIES CONSCIO_WEB_SECURE_COOKIES LIBERTAI_BASE_URL LIBERTAI_API_KEY LIBERTAI_MODEL OPENAI_BASE_URL OPENAI_API_KEY; do
+for key in CONSCIO_CONFIG CONSCIO_HOST CONSCIO_PORT CONSCIO_CLIENT_URL CONSCIO_API_KEY CONSCIO_WEB_PASSWORD CONSCIO_ALLOW_INSECURE_BIND CONSCIO_TRUSTED_PROXIES CONSCIO_WEB_SECURE_COOKIES CONSCIO_LOG_LEVEL LIBERTAI_BASE_URL LIBERTAI_API_KEY LIBERTAI_MODEL OPENAI_BASE_URL OPENAI_API_KEY; do
   has src/conscio/config.py "$key"
 done
 
@@ -128,7 +129,7 @@ for endpoint in \
   "/influence/goal" "/influence/constraint" \
   "/control/pause" "/control/resume" "/control/cancel" "/control/stop" "/goals" \
   "/influences" "/projects" "/autonomy/tick" "/episodes" "/trace" \
-  "/memory/search"; do
+  "/memory/search" "/ready" "/metrics/prometheus"; do
   has src/conscio/api.py "$endpoint"
   has docs/public-beta/api.md "$endpoint"
 done

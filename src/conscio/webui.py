@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import time
 from typing import Any
@@ -27,7 +28,9 @@ from conscio.web.auth import (  # noqa: F401
     sweep_sessions,
 )
 from conscio.web.chat import DEFAULT_SESSION_ID, ChatStore  # noqa: F401
-from conscio.web.events import stream_events
+from conscio.web.events import SSEClientLimitError, stream_events
+
+logger = logging.getLogger(__name__)
 
 
 class LoginRequest(BaseModel):
@@ -104,9 +107,11 @@ def create_web_router(service: ConscioService) -> APIRouter:
         sweep_sessions(sessions, now)
         client = request.client.host if request.client else "unknown"
         if login_failure_count(login_failures, client, now) >= LOGIN_FAILURE_LIMIT:
+            logger.warning("web login locked out", extra={"client": client})
             raise HTTPException(status_code=429, detail="too many login attempts")
         if not check_password(service, req.password):
             record_login_failure(login_failures, client, now)
+            logger.warning("web login failed", extra={"client": client})
             raise HTTPException(status_code=401, detail="invalid password")
         login_failures.pop(client, None)
         token = session_token()
@@ -457,6 +462,10 @@ def create_web_router(service: ConscioService) -> APIRouter:
     ) -> StreamingResponse:
         _require_web_auth(service, sessions, conscio_web_session)
         broker = service.event_broker
+        try:
+            client = broker.register()
+        except SSEClientLimitError as exc:
+            raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "10"}) from exc
         # Identity encoding defeats Caddy's gzip buffering without needing a
         # Caddyfile change. X-Accel-Buffering disables nginx buffering too.
         headers = {
@@ -465,7 +474,7 @@ def create_web_router(service: ConscioService) -> APIRouter:
             "Content-Encoding": "identity",
         }
         return StreamingResponse(
-            stream_events(broker, is_disconnected=request.is_disconnected),
+            stream_events(broker, client=client, is_disconnected=request.is_disconnected),
             media_type="text/event-stream",
             headers=headers,
         )

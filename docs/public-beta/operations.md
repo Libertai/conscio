@@ -43,6 +43,10 @@ Stop the service:
 conscio service stop
 ```
 
+Note: `POST /control/stop` terminates the process; under systemd (`Restart=always`)
+or compose (`restart: unless-stopped`) that is a restart, not a stop. To actually
+stop, use `systemctl stop conscio` or `docker compose down`.
+
 ## Backup
 
 Back up the whole home directory, not just the database:
@@ -91,4 +95,17 @@ status strip) aborts the episode the service is currently processing. The servic
 itself keeps running; the caller that was waiting receives an error, memory writes
 already committed are kept, and the next episode starts clean. Episodes also
 self-terminate after `service.episode_timeout` seconds.
+
+## Logs
+
+Under systemd: `journalctl -u conscio -f`. Under compose: `docker compose logs -f`.
+Set `log_format = "json"` for log shippers, `log_file` for a rotating local file,
+and `CONSCIO_LOG_LEVEL=DEBUG` when diagnosing.
+
+## Monitoring
+
+Poll `/ready` for readiness and scrape `/metrics/prometheus` (bearer-authed) for
+gauges and counters. After deploying a hardened systemd unit, run
+`systemd-analyze security conscio` and exercise the `bash` and `execute_code`
+tools once to confirm the sandbox directives did not break them.
 

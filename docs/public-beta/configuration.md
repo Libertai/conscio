@@ -27,6 +27,10 @@ trusted_proxies = []
 max_request_bytes = 262144
 episode_rate_per_minute = 30
 episode_rate_burst = 10
+log_level = "INFO"
+log_format = "text"
+log_file = ""
+http_access_log = false
 episode_timeout = 600
 message_timeout = 300
 ```
@@ -46,6 +50,7 @@ Operational notes:
 - `backup_interval_hours`/`backup_retain` schedule home backups and retention; `conscio db prune` prunes manually.
 - `trusted_proxies` enables proxy-header (X-Forwarded-For) client IPs; set to `["127.0.0.1"]` behind Caddy so login throttling sees real client IPs. Env override `CONSCIO_TRUSTED_PROXIES` (comma-separated).
 - `max_request_bytes` caps HTTP bodies (413); `episode_rate_per_minute`/`episode_rate_burst` rate-limit episode-triggering endpoints (429, in-process, resets on restart).
+- `log_format = "json"` emits one JSON object per line for log shipping; `log_file` adds a rotating file sink; `http_access_log` enables uvicorn access logs (off by default — the reverse proxy is the edge log). Env override `CONSCIO_LOG_LEVEL`.
 
 ## Model Backend
 

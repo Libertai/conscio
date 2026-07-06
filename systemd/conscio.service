@@ -10,6 +10,20 @@ Environment=CONSCIO_CONFIG=/home/conscio/.conscio/config.toml
 ExecStart=/opt/conscio/.venv/bin/conscio service start
 Restart=always
 RestartSec=5
+# Hardening — chosen to not break the agent's bash/execute_code tools.
+# Excluded on purpose: ProtectSystem/ProtectHome (the agent legitimately writes
+# its working directory and ~/.conscio), MemoryDenyWriteExecute (numpy/cffi).
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+LimitNOFILE=65536
 # Exit code 3 = corrupt state database (see docs/runbooks/db-locked-or-corrupted.md);
 # restarting cannot help and would crash-loop.
 RestartPreventExitStatus=3

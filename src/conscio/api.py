@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import logging
 import math
 import os
 import signal
@@ -11,15 +12,17 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from conscio import __version__
 from conscio.config import ServiceConfig
 from conscio.service import ConscioService, EpisodeCancelled
-from conscio.web.events import encode_sse, stream_events
+from conscio.web.events import SSEClientLimitError, encode_sse, stream_events
 from conscio.webui import create_web_router
+
+logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -64,6 +67,7 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
         provided = (authorization or "").encode("utf-8", "replace")
         wanted = f"Bearer {expected}".encode("utf-8", "replace")
         if not hmac.compare_digest(provided, wanted):
+            logger.warning("API auth failed")
             raise HTTPException(status_code=401, detail="invalid API key")
 
     @asynccontextmanager
@@ -94,6 +98,29 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
     @app.get("/metrics", dependencies=[Depends(require_auth)])
     async def metrics() -> dict[str, Any]:
         return await svc.metrics()
+
+    @app.get("/metrics/prometheus", dependencies=[Depends(require_auth)])
+    async def metrics_prometheus() -> Response:
+        from conscio.web.prometheus import render_prometheus  # noqa: PLC0415
+
+        body = render_prometheus(
+            await svc.metrics(),
+            {"sse_clients": svc.event_broker.client_count, "version": __version__},
+        )
+        return Response(content=body, media_type="text/plain; version=0.0.4")
+
+    @app.get("/ready")
+    async def ready() -> JSONResponse:
+        """Readiness (vs /health liveness): running + database reachable.
+        Unauthenticated: it leaks only a boolean, and proxies/orchestrators
+        need to poll it without credentials."""
+        if not svc.running:
+            return JSONResponse({"ready": False, "reason": "service not running"}, status_code=503)
+        try:
+            svc.memory.fetchone("SELECT 1")
+        except Exception as exc:  # noqa: BLE001 — any DB failure means not ready
+            return JSONResponse({"ready": False, "reason": f"db probe failed: {exc}"}, status_code=503)
+        return JSONResponse({"ready": True})
 
     def _message_blob(result: Any) -> dict[str, Any]:
         return {
@@ -128,7 +155,10 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
         progress and can cancel instead."""
         ref = uuid.uuid4().hex
         broker = svc.event_broker
-        client = broker.register()  # before enqueue: no token can be missed
+        try:
+            client = broker.register()  # before enqueue: no token can be missed
+        except SSEClientLimitError as exc:
+            raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "10"}) from exc
         task = asyncio.create_task(
             svc.submit_message(req.content, source=_validated_source(req.source), ref=ref)
         )
@@ -176,13 +206,17 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
     @app.get("/events", dependencies=[Depends(require_auth)])
     async def events(request: Request) -> StreamingResponse:
         """Bearer-authed mirror of the operator console SSE stream."""
+        try:
+            client = svc.event_broker.register()
+        except SSEClientLimitError as exc:
+            raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "10"}) from exc
         headers = {
             "Cache-Control": "no-cache, no-transform",
             "X-Accel-Buffering": "no",
             "Content-Encoding": "identity",
         }
         return StreamingResponse(
-            stream_events(svc.event_broker, is_disconnected=request.is_disconnected),
+            stream_events(svc.event_broker, client=client, is_disconnected=request.is_disconnected),
             media_type="text/event-stream",
             headers=headers,
         )

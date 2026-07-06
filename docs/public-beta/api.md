@@ -19,6 +19,8 @@ deliberately no CORS policy: the API is bearer-token and the console is same-ori
 - `GET /health`
 - `GET /status`
 - `GET /metrics` — The payload includes "mcp_servers": one status row per configured MCP server (status, tools, reconnects, last_error).
+- `GET /metrics/prometheus`
+- `GET /ready`
 - `POST /message`
 - `POST /influence/goal`
 - `POST /influence/constraint`
@@ -36,6 +38,20 @@ deliberately no CORS policy: the API is bearer-token and the console is same-ori
 - `GET /episodes`
 - `GET /trace`
 - `GET /memory/search`
+
+`/ready` is unauthenticated readiness (running + database probe; 503 otherwise) —
+use it for proxy health checks and container healthchecks. `/metrics/prometheus`
+serves text exposition format; scrape it with a bearer credential:
+
+```yaml
+scrape_configs:
+  - job_name: conscio
+    metrics_path: /metrics/prometheus
+    authorization:
+      credentials_file: /etc/prometheus/conscio-token
+    static_configs:
+      - targets: ["127.0.0.1:8765"]
+```
 
 Example:
 

@@ -160,6 +160,10 @@ class ServiceConfig:
     max_request_bytes: int = 262144  # 0 disables the HTTP body-size cap
     episode_rate_per_minute: int = 30  # 0 disables episode rate limiting
     episode_rate_burst: int = 10
+    log_level: str = "INFO"
+    log_format: str = "text"  # "text" | "json"
+    log_file: str = ""  # optional rotating file sink
+    http_access_log: bool = False
     episode_timeout: float = 600.0  # wall-clock cap per episode; 0 disables
     message_timeout: float = 300.0  # HTTP caller deadline on /message; 0 disables
     agent: AgentConfig = field(default_factory=AgentConfig)
@@ -189,10 +193,6 @@ class ServiceConfig:
     @property
     def lock_path(self) -> Path:
         return self.home / "service.lock"
-
-    @property
-    def log_path(self) -> Path:
-        return self.home / "logs" / "service.log"
 
     @property
     def base_url(self) -> str:
@@ -243,6 +243,10 @@ class ServiceConfig:
             raise ValueError(f"service.episode_rate_per_minute must be >= 0 (got {self.episode_rate_per_minute}).")
         if self.episode_rate_burst < 1:
             raise ValueError(f"service.episode_rate_burst must be >= 1 (got {self.episode_rate_burst}).")
+        if self.log_format not in {"text", "json"}:
+            raise ValueError(f"service.log_format must be 'text' or 'json' (got {self.log_format!r}).")
+        if self.log_level.upper() not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ValueError(f"service.log_level is not a valid level (got {self.log_level!r}).")
         if self.shell_timeout <= 0:
             raise ValueError(f"tools.shell_timeout must be > 0 (got {self.shell_timeout}).")
         if self.subagent_max_rounds <= 0:
@@ -500,6 +504,10 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         max_request_bytes=int(service.get("max_request_bytes", 262144)),
         episode_rate_per_minute=int(service.get("episode_rate_per_minute", 30)),
         episode_rate_burst=int(service.get("episode_rate_burst", 10)),
+        log_level=str(os.environ.get("CONSCIO_LOG_LEVEL") or service.get("log_level", "INFO")),
+        log_format=str(service.get("log_format", "text")),
+        log_file=str(service.get("log_file") or ""),
+        http_access_log=bool(service.get("http_access_log", False)),
         episode_timeout=float(service.get("episode_timeout", 600.0)),
         message_timeout=float(service.get("message_timeout", 300.0)),
         agent=agent_cfg,
@@ -581,6 +589,10 @@ trusted_proxies = []
 max_request_bytes = 262144
 episode_rate_per_minute = 30
 episode_rate_burst = 10
+log_level = "INFO"
+log_format = "text"
+log_file = ""
+http_access_log = false
 episode_timeout = 600
 message_timeout = 300
 

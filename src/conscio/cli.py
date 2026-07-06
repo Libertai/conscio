@@ -531,6 +531,9 @@ def _service_start() -> None:
     from conscio.api import create_app
 
     cfg = load_config()
+    from conscio.logging_setup import setup_logging
+
+    setup_logging(cfg)
     try:
         cfg.validate_public_bind()
     except ValueError as exc:
@@ -549,6 +552,8 @@ def _service_start() -> None:
         port=cfg.port,
         proxy_headers=bool(cfg.trusted_proxies),
         forwarded_allow_ips=",".join(cfg.trusted_proxies) if cfg.trusted_proxies else None,
+        log_config=None,
+        access_log=cfg.http_access_log,
     )
 
 

@@ -37,6 +37,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Scheduled home backups with retention (`backup_interval_hours`, `backup_retain`, `conscio db prune`).
 - Global rate limiting (429) and request body caps (413) on episode-triggering endpoints.
 - Proxy-aware client IPs via `trusted_proxies`; compose now uses secure cookies instead of the insecure-bind escape hatch.
+- Structured logging (`log_level`, `log_format`, `log_file`, `http_access_log`), with uvicorn unified into one sink.
+- `GET /ready` readiness probe, `GET /metrics/prometheus` text exposition, container healthchecks, SSE client cap.
+- systemd hardening directives on both service units.
 
 ### Fixed
 - `bash` and `execute_code` terminate their child process on timeout or cancellation

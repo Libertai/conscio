@@ -23,6 +23,7 @@ if [ -n "${CONSCIO_LAUNCH_URL:-}" ]; then
   base=${CONSCIO_LAUNCH_URL%/}
   printf '== public endpoint smoke: %s ==\n' "$base"
   curl -fsS "$base/health" >/dev/null
+  curl -fsS "$base/ready" >/dev/null
   curl -fsS "$base/ui" >/dev/null
 fi
 
@@ -46,10 +47,13 @@ async def main():
     headers = {"Authorization": "Bearer " + cfg.api_key}
     async with httpx.AsyncClient(base_url="http://127.0.0.1:8765", timeout=20) as client:
         health = (await client.get("/health")).json()
+        ready = (await client.get("/ready")).json()
         status = (await client.get("/status", headers=headers)).json()
         metrics = (await client.get("/metrics", headers=headers)).json()
     if not health.get("ok"):
         raise SystemExit("health failed")
+    if not ready.get("ready"):
+        raise SystemExit("readiness failed")
     if not status.get("running"):
         raise SystemExit("service is not running")
     if metrics.get("schema_version") != 4:
