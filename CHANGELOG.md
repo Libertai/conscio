@@ -7,6 +7,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-06
+
+The "full-featured harness" release: multi-endpoint model routing with
+fallback, token streaming, structured output, sub-agents, MCP client support,
+episode cancellation and preemption, and production hardening (rate limits,
+scheduled backups, structured logging, Prometheus metrics, release pipeline).
+
 ### Added
 - Interactive messages now take queue priority over autonomous heartbeats, and a
   running autonomous episode yields to waiting user input at safe tick/round

@@ -22,6 +22,11 @@ path.
 - README points to public-beta docs.
 - Known limits are published, not hidden.
 - Rollback command is known before announcing.
+- A scheduled backup has fired on the reference VM and `conscio db prune`
+  retention is verified.
+- `GET /ready` returns 200 on the reference VM.
+- The release workflow has been exercised at least once (a `v0.x` tag built
+  and published artifacts).
 
 ## Launch Sequence
 

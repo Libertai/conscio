@@ -13,6 +13,9 @@ This file is launch-facing and intentionally blunt.
   preserves them; reset intentionally if continuity is not desired.
 - Rate limits are in-process and reset on restart.
 - Scheduled backups are local to the VM; copy archives off-host for disaster recovery.
+- Web UI sessions are in-memory: every service restart logs operators out.
+- Sub-agents run sequentially inside the parent episode, and `/control/stop`
+  under systemd/compose is a restart, not a stop.
 
 ## Security
 
@@ -22,6 +25,9 @@ This file is launch-facing and intentionally blunt.
 - Do not put production secrets, SSH keys, wallets, or irreplaceable data in
   the agent's reachable filesystem unless the agent is explicitly meant to use
   them.
+- MCP servers marked `trusted = true` bypass the taint/quarantine pipeline;
+  their output can become trusted memory. Keep the default `trusted = false`
+  unless you operate the server yourself.
 
 ## Product
 

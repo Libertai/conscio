@@ -555,21 +555,24 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
     return cfg
 
 
-def write_default_config(path: str | Path | None = None, *, profile: str = "research") -> Path:
-    config_path = Path(path).expanduser() if path else DEFAULT_HOME / "config.toml"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    if config_path.exists():
-        return config_path
-    api_key = secrets.token_urlsafe(32)
-    web_password = secrets.token_urlsafe(24)
+def default_config_text(
+    *,
+    profile: str = "research",
+    home: str | Path = DEFAULT_HOME,
+    api_key: str,
+    web_password: str,
+    working_directory: str | Path | None = None,
+) -> str:
+    """Render the default config.toml body. Pure: no filesystem access, no secrets."""
     normalized_profile = _normalize_profile(profile)
     autonomous_vm = normalized_profile == "autonomous_vm"
     premises = "dedicated_vm" if autonomous_vm else ""
     side_effects = "mostly_free" if autonomous_vm else "policy"
     unsafe_autonomy = "true" if autonomous_vm else "false"
-    working_directory = "/opt/conscio/work" if autonomous_vm else str(Path.cwd())
+    if working_directory is None:
+        working_directory = "/opt/conscio/work" if autonomous_vm else str(Path.cwd())
     text = f"""[service]
-home = "{config_path.parent}"
+home = "{home}"
 host = "127.0.0.1"
 port = 8765
 client_url = ""
@@ -696,5 +699,21 @@ appraisal = true
 constraint_judge = false
 llm_appraisal = false
 """
-    config_path.write_text(text, encoding="utf-8")
+    return text
+
+
+def write_default_config(path: str | Path | None = None, *, profile: str = "research") -> Path:
+    config_path = Path(path).expanduser() if path else DEFAULT_HOME / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    if config_path.exists():
+        return config_path
+    config_path.write_text(
+        default_config_text(
+            profile=profile,
+            home=config_path.parent,
+            api_key=secrets.token_urlsafe(32),
+            web_password=secrets.token_urlsafe(24),
+        ),
+        encoding="utf-8",
+    )
     return config_path

@@ -119,7 +119,11 @@ for key in \
   enabled max_rounds max_seconds deny_capabilities \
   transport trusted call_timeout connect_timeout servers enabled \
   backup_interval_hours backup_retain trusted_proxies max_request_bytes episode_rate_per_minute episode_rate_burst \
-  log_level log_format log_file http_access_log; do
+  log_level log_format log_file http_access_log \
+  w_priority w_appetite w_aging w_novelty aging_tau_seconds satiate_step \
+  satiation_decay goal_dup_threshold stale_flag_days stale_block_days \
+  attention_gating memory_retrieval prediction reflection self_state_coupling \
+  appraisal constraint_judge llm_appraisal; do
   has src/conscio/config.py "$key"
 done
 

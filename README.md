@@ -183,10 +183,10 @@ the trace.
 ```mermaid
 flowchart LR
     B0["B0<br/>bare model"]
-    B1["B1<br/>tool loop"]
-    B2["B2<br/>memory"]
-    B3["B3<br/>workspace + constraints"]
-    B4["B4<br/>full runtime"]
+    B1["B1<br/>reflection prompt"]
+    B2["B2<br/>workspace runtime"]
+    B3["B3<br/>full runtime + self-model"]
+    B4["B4<br/>full service"]
     Ablations["single-mechanism<br/>ablations"]
     Trace["trace-grounded<br/>self-report checks"]
 

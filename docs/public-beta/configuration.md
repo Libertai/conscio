@@ -52,6 +52,29 @@ Operational notes:
 - `max_request_bytes` caps HTTP bodies (413); `episode_rate_per_minute`/`episode_rate_burst` rate-limit episode-triggering endpoints (429, in-process, resets on restart).
 - `log_format = "json"` emits one JSON object per line for log shipping; `log_file` adds a rotating file sink; `http_access_log` enables uvicorn access logs (off by default — the reverse proxy is the edge log). Env override `CONSCIO_LOG_LEVEL`.
 
+## Agent Profile
+
+```toml
+[agent]
+profile = "research"
+premises = ""
+external_side_effects = "policy"
+```
+
+The `[agent]` table sets the operating posture for a deployment.
+
+- `profile` selects a named posture: `research` (the historic conservative
+  defaults) or `autonomous_vm` (a dedicated premises VM where broad local
+  agency is normal). Choosing `autonomous_vm` derives several defaults —
+  `premises = "dedicated_vm"`, `external_side_effects = "mostly_free"`,
+  `unsafe_autonomy = true`, and a `working_directory` under `/opt/conscio/work`
+  — but explicit TOML values still override every derived default.
+- `premises` is a free-text label the agent reads as part of its self-model
+  context (empty by default under `research`).
+- `external_side_effects` sets the policy stance for off-model side effects:
+  `policy` (conservative) or `mostly_free` (permissive, paired with the
+  `autonomous_vm` profile).
+
 ## Model Backend
 
 ```toml
@@ -164,6 +187,37 @@ deny_capabilities = ["self_modification", "memory_write", "self_management"]
 capabilities sub-agents may never use; names and policy gates from `[tools]`
 still apply on top.
 
+## Motivation
+
+```toml
+[motivation]
+w_priority = 0.35
+w_appetite = 0.35
+w_aging = 0.20
+w_novelty = 0.10
+aging_tau_seconds = 21600.0
+satiate_step = 0.25
+satiation_decay = 0.98
+goal_dup_threshold = 0.88
+stale_flag_days = 2.0
+stale_block_days = 5.0
+```
+
+The `[motivation]` table tunes the DriveScheduler that ranks and selects goals.
+
+- `w_priority`, `w_appetite`, `w_aging`, `w_novelty` weight the four drive
+  components (stated priority, appetite/unsatisfied demand, aging since last
+  activity, novelty) into the per-goal score; they need not sum to 1.
+- `aging_tau_seconds` is the exponential-decay timescale for the aging
+  component (larger → goals stay "fresh" longer).
+- `satiate_step` is the satiation bump a goal takes when serviced, and
+  `satiation_decay` is the per-tick decay back toward appetite.
+- `goal_dup_threshold` is the cosine similarity above which a proposed goal
+  is treated as a duplicate of an existing one.
+- `stale_flag_days` is how long a goal stays untouched before it is flagged
+  stale; `stale_block_days` is how long before it is blocked outright and
+  must be > `stale_flag_days`.
+
 ## MCP Servers
 
 Conscio can attach external MCP tool servers. Each `[mcp.servers.<name>]` table defines
@@ -194,3 +248,28 @@ the episode, and any facts derived from it are stored at trust tier 1. Setting
 `trusted = true` disables that quarantine — the server's output can then reach normal
 agent-tier memory. Only mark a server trusted if you operate it yourself and consider it
 part of the agent's premises.
+
+## Ablation
+
+```toml
+[ablation]
+attention_gating = true
+memory_retrieval = true
+prediction = true
+reflection = true
+self_state_coupling = true
+appraisal = true
+constraint_judge = false
+llm_appraisal = false
+```
+
+The `[ablation]` table flips engine subsystems on and off, mainly to support the
+eval ladder. The first six flags are the shared contract with the eval harness
+(`attention_gating`, `memory_retrieval`, `prediction`, `reflection`,
+`self_state_coupling`, `appraisal`) — their names must match the harness exactly.
+The last two are core-only knobs the eval harness never toggles:
+
+- `constraint_judge` enables the LLM judge that scores semantic constraints
+  (off by default; the default constraint path is rule-based).
+- `llm_appraisal` enables a batched LLM appraisal pass (off by default).
+
