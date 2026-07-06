@@ -80,7 +80,7 @@ def _attach_stream_printer(agent: ConsciousAgent) -> None:
     def _on_stream_event(data: dict[str, Any]) -> None:
         event = data.get("event")
         if event == "token":
-            console.print(data.get("text", ""), end="", soft_wrap=True, style="dim")
+            console.print(data.get("text", ""), end="", soft_wrap=True, style="dim", markup=False)
         elif event in ("discard", "final"):
             console.print()
 
@@ -418,7 +418,7 @@ async def _client_chat_stream(message: str) -> None:
                 payload = json.loads(line[len("data: "):])
                 if event_name == "chat.token":
                     streamed = True
-                    console.print(payload.get("text", ""), end="", soft_wrap=True)
+                    console.print(payload.get("text", ""), end="", soft_wrap=True, markup=False)
                 elif event_name == "chat.discard":
                     console.print("\n[dim]… running tools …[/]")
                 elif event_name == "message.result":
