@@ -82,3 +82,13 @@ positive allowlist for high-control deployments.
 hosts, rejects private/link-local/reserved IPs, resolves hostnames before
 fetching, and revalidates redirects. Web-derived content is wrapped as
 untrusted content before it can influence memory.
+
+## MCP Tools
+
+Servers configured under `[mcp.servers.<name>]` register their tools as
+`mcp__<name>__<tool>` (for example `mcp__github__search_issues`). They never require
+`unsafe_autonomy`; deny individual tools with `conscio tools deny mcp__github__create_issue`
+or restrict discovery with the per-server `allowed`/`denied` lists. Untrusted server
+output is wrapped in `UNTRUSTED_WEB_CONTENT` delimiters and follows the web-safety rules
+above; `conscio tools list` shows configured servers, their live connection status, and
+the tools they exposed.

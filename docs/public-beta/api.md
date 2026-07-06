@@ -13,7 +13,7 @@ Authorization: Bearer <api_key>
 
 - `GET /health`
 - `GET /status`
-- `GET /metrics`
+- `GET /metrics` — The payload includes "mcp_servers": one status row per configured MCP server (status, tools, reconnects, last_error).
 - `POST /message`
 - `POST /influence/goal`
 - `POST /influence/constraint`

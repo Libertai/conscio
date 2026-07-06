@@ -31,6 +31,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - MCP client support: connect external MCP tool servers via `[mcp.servers.<name>]`
   (stdio or streamable HTTP); their tools register as `mcp__<server>__<tool>` and are
   quarantined like web content unless the server is marked `trusted`.
+- MCP observability: server status in `/metrics` (`mcp_servers`), SSE events
+  (`mcp.server.connected/disconnected/error`), and an MCP servers table in
+  `conscio tools list` with live connection status.
 
 ### Fixed
 - `bash` and `execute_code` terminate their child process on timeout or cancellation

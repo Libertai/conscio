@@ -114,7 +114,7 @@ export function startEventStream(): void {
   });
 
   // Service-level events.
-  for (const t of ["chat.message", "episode.created", "project.updated", "goal.changed", "control.paused", "subagent.started", "subagent.tool", "subagent.finished"]) {
+  for (const t of ["chat.message", "episode.created", "project.updated", "goal.changed", "control.paused", "subagent.started", "subagent.tool", "subagent.finished", "mcp.server.connected", "mcp.server.disconnected", "mcp.server.error"]) {
     _stream.on(t, (e: any) => {
       push(`${t}:${e.ts}`, {
         id: `${t}-${e.ts}-${seq++}`,

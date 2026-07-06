@@ -1270,6 +1270,7 @@ class ConscioService:
             "schema_version": self.memory.schema_version(),
             "db_path": str(self.config.db_path),
             "working_directory": str(self.config.working_directory),
+            "mcp_servers": self.mcp.status(),
             "last_error": self.last_error,
         }
 

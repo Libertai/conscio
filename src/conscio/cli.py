@@ -714,6 +714,32 @@ def _tools_list() -> None:
     table.add_row("working_directory", str(cfg.working_directory))
     console.print(table)
 
+    if cfg.mcp_servers:
+        mcp_table = Table(title="MCP Servers")
+        mcp_table.add_column("Name", style="cyan")
+        mcp_table.add_column("Transport")
+        mcp_table.add_column("Enabled")
+        mcp_table.add_column("Trusted")
+        mcp_table.add_column("Status")
+        mcp_table.add_column("Tools", overflow="fold")
+        live: dict[str, dict[str, Any]] = {}
+        try:
+            metrics = asyncio.run(_client_request("GET", "/metrics"))
+            live = {row["name"]: row for row in metrics.get("mcp_servers", [])}
+        except (Exception, SystemExit):
+            pass  # service not running / unreachable — show config only
+        for server in cfg.mcp_servers:
+            state = live.get(server.name, {})
+            mcp_table.add_row(
+                server.name,
+                server.transport,
+                str(server.enabled),
+                str(server.trusted),
+                str(state.get("status", "offline")),
+                ", ".join(state.get("tools", [])) or "(none discovered)",
+            )
+        console.print(mcp_table)
+
 
 def _tools_deny(args: argparse.Namespace) -> None:
     cfg = load_config(_config_file_path())

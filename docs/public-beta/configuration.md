@@ -149,3 +149,34 @@ deny_capabilities = ["self_modification", "memory_write", "self_management"]
 `enabled` registers the `spawn_subagent` tool. `deny_capabilities` lists tool
 capabilities sub-agents may never use; names and policy gates from `[tools]`
 still apply on top.
+
+## MCP Servers
+
+Conscio can attach external MCP tool servers. Each `[mcp.servers.<name>]` table defines
+one server; its tools appear to the agent as `mcp__<name>__<tool>` and obey the same
+`[tools]` allow/deny policy and hourly action budget as built-in tools.
+
+```toml
+[mcp.servers.github]
+transport = "stdio"        # "stdio" | "http"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_TOKEN = "..." }
+enabled = true
+trusted = false
+allowed = []               # per-server tool allowlist (empty = all)
+denied = []
+call_timeout = 60.0
+connect_timeout = 15.0
+
+[mcp.servers.search]
+transport = "http"
+url = "https://mcp.example.com/mcp"
+headers = { Authorization = "Bearer ..." }
+```
+
+By default MCP output is untrusted: it is spotlighted like fetched web content, taints
+the episode, and any facts derived from it are stored at trust tier 1. Setting
+`trusted = true` disables that quarantine — the server's output can then reach normal
+agent-tier memory. Only mark a server trusted if you operate it yourself and consider it
+part of the agent's premises.

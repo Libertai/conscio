@@ -196,6 +196,20 @@ class McpLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("external_content", trusted_registry.tool_capabilities("mcp__srv__echo"))
         await trusted.stop()
 
+    async def test_broker_events_emitted_on_connect_and_stop(self) -> None:
+        registry = ToolRegistry()
+        events: list[tuple[str, dict]] = []
+        manager = _MemoryMcpManager(
+            [_server_cfg()], registry, on_event=lambda t, d: events.append((t, d))
+        )
+        await manager.start()
+        await _wait_for(lambda: any(t == "mcp.server.connected" for t, _ in events))
+        connected = next(d for t, d in events if t == "mcp.server.connected")
+        self.assertEqual(connected["server"], "srv")
+        self.assertIn("mcp__srv__echo", connected["tools"])
+        await manager.stop()
+        self.assertTrue(any(t == "mcp.server.disconnected" for t, _ in events))
+
 
 def _tool_call_response(name: str, arguments: str, call_id: str = "call-1") -> dict:
     return {
@@ -290,6 +304,16 @@ class McpServiceTaintTests(unittest.IsolatedAsyncioTestCase):
             await service.stop()
         self.assertTrue(result["error"])
         self.assertIn("denied", result["output"])
+
+    async def test_metrics_reports_mcp_server_status(self) -> None:
+        service = await self._start_service_with_memory_mcp()
+        try:
+            metrics = await service.metrics()
+        finally:
+            await service.stop()
+        rows = {row["name"]: row for row in metrics["mcp_servers"]}
+        self.assertEqual(rows["srv"]["status"], "connected")
+        self.assertIn("mcp__srv__secret_page", rows["srv"]["tools"])
 
 
 if __name__ == "__main__":

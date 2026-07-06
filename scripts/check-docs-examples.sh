@@ -112,7 +112,8 @@ for key in \
   attention_char_budget timeout max_retries \
   retry_backoff embedding_model endpoint fallback response_format tool_choice \
   chat_temperature autonomous_temperature judge_max_tokens appraisal_max_tokens \
-  enabled max_rounds max_seconds deny_capabilities; do
+  enabled max_rounds max_seconds deny_capabilities \
+  transport trusted call_timeout connect_timeout servers enabled; do
   has src/conscio/config.py "$key"
 done
 
@@ -163,5 +164,12 @@ for tool in ask_user refuse; do
   has src/conscio/core/executor.py "$tool"
   has docs/public-beta/tools.md "$tool"
 done
+
+# MCP integration surfaces referenced by docs must exist in code.
+has src/conscio/mcp_client.py "mcp__"
+has docs/public-beta/tools.md "mcp__"
+has docs/public-beta/configuration.md "[mcp.servers"
+has src/conscio/service.py "mcp_servers"
+has docs/public-beta/api.md "mcp_servers"
 
 printf 'docs smoke passed\n'

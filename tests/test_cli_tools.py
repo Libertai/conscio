@@ -29,5 +29,30 @@ class ToolPolicyCliTests(unittest.TestCase):
         self.assertEqual(allowed.denied_tools, ["execute_code"])
 
 
+class ToolsListMcpTests(unittest.TestCase):
+    def test_tools_list_renders_mcp_servers_offline(self) -> None:
+        import io
+
+        from rich.console import Console
+
+        import conscio.cli as cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(
+                "[service]\napi_key = \"k\"\n"
+                "[mcp.servers.srv]\ntransport = \"stdio\"\ncommand = \"npx\"\n",
+                encoding="utf-8",
+            )
+            buffer = Console(file=io.StringIO(), width=200)
+            with patch.dict(os.environ, {"CONSCIO_CONFIG": str(path)}, clear=False):
+                with patch.object(cli, "console", buffer):
+                    cli._tools_list()
+        output = buffer.file.getvalue()
+        self.assertIn("MCP Servers", output)
+        self.assertIn("srv", output)
+        self.assertIn("offline", output)
+
+
 if __name__ == "__main__":
     unittest.main()
