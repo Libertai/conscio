@@ -98,6 +98,41 @@ class EpisodeResult:
     outcome_reason: str = ""  # TickDecision.reason for the episode-ending decision
 
 
+@dataclass
+class _TickState:
+    """Mutable per-episode state threaded through the seven phase helpers.
+
+    ``run_episode`` owns exactly one of these per episode; each ``_tick_*``
+    helper reads and writes only the fields its phase is responsible for.
+    ``selection``/``step``/``forced_decision``/``report``/``fresh_failures``
+    are per-tick scratch, reset by the phase that produces them."""
+
+    episode_id: str
+    event: InputEvent
+    constraints: Any
+    metrics: EpisodeMetrics
+    executable: bool
+    tick: int = 0
+    tick_trace: list[dict[str, Any]] = field(default_factory=list)
+    final_report: ConstraintReport | None = None
+    pending_answer: str | None = None
+    answer_expectation: Any = None
+    reflections_done: int = 0
+    empty_steps: int = 0
+    extra_llm_calls: int = 0
+    output: str = ""
+    outcome: TickDecision | None = None
+    prev_failures: int = 0
+    prev_llm_calls: int = 0
+    prev_tool_rounds: int = 0
+    prev_state: dict[str, Any] = field(default_factory=dict)
+    selection: Any = None
+    step: StepResult | None = None
+    forced_decision: TickDecision | None = None
+    report: ConstraintReport | None = None
+    fresh_failures: int = 0
+
+
 class PerceptionModule:
     """Surfaces unperceived input events as observation evidence.
 
@@ -406,216 +441,228 @@ class CognitiveRuntime:
         self.executor.reset()
         start = time.time()
         self.last_model_context = ""
-        metrics = EpisodeMetrics()
-        constraints = await self._fetch_constraints(event)  # once per episode
+        ts = _TickState(
+            episode_id=episode_id,
+            event=event,
+            constraints=await self._fetch_constraints(event),  # once per episode
+            metrics=EpisodeMetrics(),
+            executable=event.source not in _OBSERVATION_ONLY_SOURCES,
+            prev_state=self.self_state.to_dict(),
+        )
         self.trace.record(
             "episode_started", "runtime", event_source=event.source, carryover=len(carried)
         )
         self._ingest_event(event)
 
-        executable = event.source not in _OBSERVATION_ONLY_SOURCES
-        tick_trace: list[dict[str, Any]] = []
-        final_report: ConstraintReport | None = None
-        pending_answer: str | None = None
-        answer_expectation = None
-        reflections_done = 0
-        empty_steps = 0
-        extra_llm_calls = 0
-        output = ""
-        outcome: TickDecision | None = None
-        prev_failures = 0
-        prev_llm_calls = 0
-        prev_tool_rounds = 0
-        prev_state = self.self_state.to_dict()
-
         for tick in range(1, self.max_ticks + 1):
             # Cooperative preemption: an interactive event is waiting and this
             # (autonomous) episode already made at least one full tick of progress.
             if should_yield is not None and tick > 1 and should_yield():
-                outcome = TickDecision(ActionKind.WAIT, "preempted by interactive event")
+                ts.outcome = TickDecision(ActionKind.WAIT, "preempted by interactive event")
                 self.trace.record("episode_preempted", "runtime", tick=tick)
                 break
-            metrics.ticks += 1
+            ts.tick = tick
+            ts.metrics.ticks += 1
             self.workspace._current_tick = tick  # designed seam: runtime stamps the tick
-
-            # 1 SENSE — modules produce LOCAL evidence entries (no scores).
-            for module in self.modules:
-                module_entries = await module.tick(self.workspace, self.self_state)
-                if module_entries:
-                    self.trace.record("module_tick", module.name, produced=len(module_entries))
-
-            # 2 APPRAISE — centralized stamping of unappraised entries.
-            recent = [e for e in self.workspace.view() if e.appraised]
-            appraised = self.appraisal.appraise_entries(
-                self.workspace.unappraised(), self.self_state, recent
-            )
-            if self.ablation.llm_appraisal and appraised and self.chat_strategy.llm is not None:
-                if await self._llm_appraise(appraised):
-                    extra_llm_calls += 1
-
-            # 3 ATTEND — broadcast winners gate the model context.
-            selection = self.attention.attend(
-                self.workspace,
-                self.self_state,
-                self.trace,
-                self.attention_schema,
-                episode_id=episode_id,
-                tick=tick,
-            )
-            metrics.attention_selections += len(selection.selected)
-
-            # 4 EXECUTE — one bounded executor step after attention.
-            step: StepResult | None = None
-            forced_decision: TickDecision | None = None
-            if executable and pending_answer is None and not self.executor.exhausted:
-                broadcast_new = (
-                    list(selection.selected) if self.ablation.attention_gating else None
-                )
-                step = await self.executor.step(
-                    event=event,
-                    workspace=self.workspace,
-                    broadcast_new=broadcast_new,
-                    state=self.self_state,
-                    should_stop=should_yield,
-                )
-                if step.kind == "final":
-                    pending_answer = step.text
-                    answer_expectation = self.prediction.expect_answer(
-                        constraints=constraints, tick=tick
-                    )
-                    self._record_intention(ActionKind.ANSWER, step.text)
-                elif step.kind == "control":
-                    self._record_intention(
-                        ActionKind.ASK if step.control == "ask" else ActionKind.REFUSE,
-                        step.text,
-                    )
-                elif step.kind == "empty":
-                    if step.text:
-                        # Deterministic offline path (autonomous, no LLM):
-                        # nothing to execute — resolve to WAIT with the reason.
-                        output = step.text
-                        forced_decision = TickDecision(
-                            ActionKind.WAIT, "no LLM configured; nothing to execute"
-                        )
-                    else:
-                        # Empty LLM response: a recorded prediction failure;
-                        # retry once next tick, then fall back to WAIT.
-                        empty_steps += 1
-                        self._record_empty_failure(constraints, tick)
-                        if empty_steps >= 2:
-                            output = EMPTY_RESPONSE_FALLBACK
-                            forced_decision = TickDecision(
-                                ActionKind.WAIT, "empty LLM response after retry"
-                            )
-                        else:
-                            forced_decision = TickDecision(
-                                ActionKind.STEP, "empty LLM response; retrying once"
-                            )
-
-            # 5 VALIDATE — constraint report + answer expectation resolution.
-            report: ConstraintReport | None = None
-            if pending_answer is not None:
-                report = await self.validator.validate(pending_answer, constraints)
-                final_report = report
-                metrics.constraint_violations += len(report.violations)
-                if answer_expectation is not None:
-                    self.prediction.resolve_answer(
-                        answer_expectation, report, self.workspace, tick
-                    )
-                    answer_expectation = None
-
-            # 6 SELF-STATE — update from real signals.
-            fresh_failures = self.prediction.episode_failures - prev_failures
-            prev_failures = self.prediction.episode_failures
-            unresolved = len(self.workspace.unresolved_conflicts())
-            self.self_state.update_tick(
-                self.prediction.error_ema,
-                self.prediction.failure_rate(),
-                selection.dispersion,
-                unresolved_conflicts=unresolved,
-                fresh_failures=fresh_failures,
-            )
-            if self.executor.last_model_context:
-                self.self_state.update_load(
-                    len(self.executor.last_model_context),
-                    self.context_settings.max_dynamic_chars,
-                )
-            if fresh_failures:
-                self.trace.record(
-                    "prediction_error", "prediction_engine", error=self.self_state.prediction_error
-                )
-
-            # 7 DECIDE — per-tick arbitration.
-            decision = forced_decision or self.action_selector.decide_tick(
-                state=self.self_state,
-                last_step=step,
-                pending_answer=pending_answer,
-                report=report,
-                reflections_done=reflections_done,
-                max_reflections=self.max_reflections,
-                ablation=self.ablation,
-                fresh_failure=fresh_failures > 0,
-                session_live=executable and not self.executor.exhausted,
-            )
-            self.trace.record("tick_decision", "action_selector", kind=decision.kind.value, tick=tick)
-            state_now = self.self_state.to_dict()
-            tick_trace.append(
-                {
-                    "tick": tick,
-                    "decision": decision.kind.value,
-                    "reason": decision.reason,
-                    "broadcast": [f"{e.source}:{e.type.value}" for e in selection.selected],
-                    "llm_calls": self.executor.llm_calls - prev_llm_calls,
-                    "tool_rounds": len(self.executor.tool_requests) - prev_tool_rounds,
-                    "prediction_events": fresh_failures,
-                    "self_state_delta": _state_delta(prev_state, state_now),
-                }
-            )
-            prev_llm_calls = self.executor.llm_calls
-            prev_tool_rounds = len(self.executor.tool_requests)
-            prev_state = state_now
-
-            if decision.kind in (ActionKind.ANSWER, ActionKind.ASK, ActionKind.REFUSE):
-                outcome = decision
-                if decision.kind == ActionKind.ANSWER and pending_answer is not None:
-                    output = pending_answer
-                elif step:
-                    output = step.text
+            await self._tick_sense(ts)
+            await self._tick_appraise(ts)
+            self._tick_attend(ts)
+            await self._tick_execute(ts, should_yield)
+            await self._tick_validate(ts)
+            self._tick_self_state(ts)
+            if self._tick_decide(ts):
                 break
-            if decision.kind == ActionKind.REFLECT:
-                self.executor.inject_reflection(self._reflection_text(report))
-                for conflict in self.workspace.unresolved_conflicts():
-                    conflict.resolved = True
-                reflections_done += 1
-                metrics.reflections += 1
-                pending_answer = None  # discard the violating answer; revise next tick
-                self.trace.record("reflection_injected", "runtime", count=reflections_done)
-                continue
-            if decision.kind == ActionKind.WAIT:
-                outcome = decision
-                break
-            # STEP — keep working next tick.
 
-        if outcome is None:
-            outcome = TickDecision(ActionKind.WAIT, "tick budget exhausted")
+        return await self._finalize_episode(ts, start)
+
+    async def _tick_sense(self, ts: _TickState) -> None:
+        """1 SENSE — modules produce LOCAL evidence entries (no scores)."""
+        for module in self.modules:
+            module_entries = await module.tick(self.workspace, self.self_state)
+            if module_entries:
+                self.trace.record("module_tick", module.name, produced=len(module_entries))
+
+    async def _tick_appraise(self, ts: _TickState) -> None:
+        """2 APPRAISE — centralized stamping of unappraised entries."""
+        recent = [e for e in self.workspace.view() if e.appraised]
+        appraised = self.appraisal.appraise_entries(
+            self.workspace.unappraised(), self.self_state, recent
+        )
+        if self.ablation.llm_appraisal and appraised and self.chat_strategy.llm is not None:
+            if await self._llm_appraise(appraised):
+                ts.extra_llm_calls += 1
+
+    def _tick_attend(self, ts: _TickState) -> None:
+        """3 ATTEND — broadcast winners gate the model context."""
+        ts.selection = self.attention.attend(
+            self.workspace,
+            self.self_state,
+            self.trace,
+            self.attention_schema,
+            episode_id=ts.episode_id,
+            tick=ts.tick,
+        )
+        ts.metrics.attention_selections += len(ts.selection.selected)
+
+    async def _tick_execute(self, ts: _TickState, should_yield: Callable[[], bool] | None) -> None:
+        """4 EXECUTE — one bounded executor step after attention."""
+        ts.step = None
+        ts.forced_decision = None
+        if not (ts.executable and ts.pending_answer is None and not self.executor.exhausted):
+            return
+        broadcast_new = list(ts.selection.selected) if self.ablation.attention_gating else None
+        step = await self.executor.step(
+            event=ts.event,
+            workspace=self.workspace,
+            broadcast_new=broadcast_new,
+            state=self.self_state,
+            should_stop=should_yield,
+        )
+        ts.step = step
+        if step.kind == "final":
+            ts.pending_answer = step.text
+            ts.answer_expectation = self.prediction.expect_answer(
+                constraints=ts.constraints, tick=ts.tick
+            )
+            self._record_intention(ActionKind.ANSWER, step.text)
+        elif step.kind == "control":
+            self._record_intention(
+                ActionKind.ASK if step.control == "ask" else ActionKind.REFUSE,
+                step.text,
+            )
+        elif step.kind == "empty":
+            if step.text:
+                # Deterministic offline path (autonomous, no LLM):
+                # nothing to execute — resolve to WAIT with the reason.
+                ts.output = step.text
+                ts.forced_decision = TickDecision(
+                    ActionKind.WAIT, "no LLM configured; nothing to execute"
+                )
+            else:
+                # Empty LLM response: a recorded prediction failure;
+                # retry once next tick, then fall back to WAIT.
+                ts.empty_steps += 1
+                self._record_empty_failure(ts.constraints, ts.tick)
+                if ts.empty_steps >= 2:
+                    ts.output = EMPTY_RESPONSE_FALLBACK
+                    ts.forced_decision = TickDecision(
+                        ActionKind.WAIT, "empty LLM response after retry"
+                    )
+                else:
+                    ts.forced_decision = TickDecision(
+                        ActionKind.STEP, "empty LLM response; retrying once"
+                    )
+
+    async def _tick_validate(self, ts: _TickState) -> None:
+        """5 VALIDATE — constraint report + answer expectation resolution."""
+        ts.report = None
+        if ts.pending_answer is None:
+            return
+        report = await self.validator.validate(ts.pending_answer, ts.constraints)
+        ts.report = report
+        ts.final_report = report
+        ts.metrics.constraint_violations += len(report.violations)
+        if ts.answer_expectation is not None:
+            self.prediction.resolve_answer(
+                ts.answer_expectation, report, self.workspace, ts.tick
+            )
+            ts.answer_expectation = None
+
+    def _tick_self_state(self, ts: _TickState) -> None:
+        """6 SELF-STATE — update from real signals."""
+        ts.fresh_failures = self.prediction.episode_failures - ts.prev_failures
+        ts.prev_failures = self.prediction.episode_failures
+        unresolved = len(self.workspace.unresolved_conflicts())
+        self.self_state.update_tick(
+            self.prediction.error_ema,
+            self.prediction.failure_rate(),
+            ts.selection.dispersion,
+            unresolved_conflicts=unresolved,
+            fresh_failures=ts.fresh_failures,
+        )
+        if self.executor.last_model_context:
+            self.self_state.update_load(
+                len(self.executor.last_model_context),
+                self.context_settings.max_dynamic_chars,
+            )
+        if ts.fresh_failures:
+            self.trace.record(
+                "prediction_error", "prediction_engine", error=self.self_state.prediction_error
+            )
+
+    def _tick_decide(self, ts: _TickState) -> bool:
+        """7 DECIDE — per-tick arbitration. Returns True when the episode ends."""
+        decision = ts.forced_decision or self.action_selector.decide_tick(
+            state=self.self_state,
+            last_step=ts.step,
+            pending_answer=ts.pending_answer,
+            report=ts.report,
+            reflections_done=ts.reflections_done,
+            max_reflections=self.max_reflections,
+            ablation=self.ablation,
+            fresh_failure=ts.fresh_failures > 0,
+            session_live=ts.executable and not self.executor.exhausted,
+        )
+        self.trace.record("tick_decision", "action_selector", kind=decision.kind.value, tick=ts.tick)
+        state_now = self.self_state.to_dict()
+        ts.tick_trace.append(
+            {
+                "tick": ts.tick,
+                "decision": decision.kind.value,
+                "reason": decision.reason,
+                "broadcast": [f"{e.source}:{e.type.value}" for e in ts.selection.selected],
+                "llm_calls": self.executor.llm_calls - ts.prev_llm_calls,
+                "tool_rounds": len(self.executor.tool_requests) - ts.prev_tool_rounds,
+                "prediction_events": ts.fresh_failures,
+                "self_state_delta": _state_delta(ts.prev_state, state_now),
+            }
+        )
+        ts.prev_llm_calls = self.executor.llm_calls
+        ts.prev_tool_rounds = len(self.executor.tool_requests)
+        ts.prev_state = state_now
+
+        if decision.kind in (ActionKind.ANSWER, ActionKind.ASK, ActionKind.REFUSE):
+            ts.outcome = decision
+            if decision.kind == ActionKind.ANSWER and ts.pending_answer is not None:
+                ts.output = ts.pending_answer
+            elif ts.step:
+                ts.output = ts.step.text
+            return True
+        if decision.kind == ActionKind.REFLECT:
+            self.executor.inject_reflection(self._reflection_text(ts.report))
+            for conflict in self.workspace.unresolved_conflicts():
+                conflict.resolved = True
+            ts.reflections_done += 1
+            ts.metrics.reflections += 1
+            ts.pending_answer = None  # discard the violating answer; revise next tick
+            self.trace.record("reflection_injected", "runtime", count=ts.reflections_done)
+            return False
+        if decision.kind == ActionKind.WAIT:
+            ts.outcome = decision
+            return True
+        # STEP — keep working next tick.
+        return False
+
+    async def _finalize_episode(self, ts: _TickState, start: float) -> EpisodeResult:
+        outcome = ts.outcome or TickDecision(ActionKind.WAIT, "tick budget exhausted")
+        output = ts.output
         if outcome.kind == ActionKind.WAIT and not output:
             output = (
                 INTERNAL_OBSERVATION_MESSAGE
-                if event.source in {"autonomous", "tool", "system"}
+                if ts.event.source in {"autonomous", "tool", "system"}
                 else "No stable intention emerged."
             )
-        selected_action = outcome.kind.value
-
+        metrics = ts.metrics
         metrics.duration = time.time() - start
         metrics.global_broadcasts = len(self.workspace.global_entries)
         metrics.prediction_errors = self.prediction.episode_failures
-        metrics.llm_calls = self.executor.llm_calls + extra_llm_calls
+        metrics.llm_calls = self.executor.llm_calls + ts.extra_llm_calls
         metrics.tool_calls = len(self.executor.tool_requests)
         metrics.tool_rounds = len(self.executor.tool_requests)
         self._capture_model_context()
         result = EpisodeResult(
             output=output,
-            selected_action=selected_action,
+            selected_action=outcome.kind.value,
             session_id=self.session_id,
             workspace_trace=self.workspace.format_context(limit=30),
             cognitive_trace=self.trace.format(limit=60),
@@ -624,13 +671,13 @@ class CognitiveRuntime:
             metrics=metrics,
             tool_results=list(self.executor.tool_results),
             model_context=self.last_model_context,
-            episode_id=episode_id,
-            tick_trace=tick_trace,
-            constraint_report=final_report.to_dicts() if final_report is not None else [],
+            episode_id=ts.episode_id,
+            tick_trace=ts.tick_trace,
+            constraint_report=ts.final_report.to_dicts() if ts.final_report is not None else [],
             outcome_reason=outcome.reason,
         )
         result.memory_ids = await self.consolidator.consolidate(
-            self.memory, self.session_id, event, result
+            self.memory, self.session_id, ts.event, result
         )
         self.trace.record("episode_completed", "runtime", action=result.selected_action)
         return result

@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
 from conscio.core.workspace import EntryType, Workspace, WorkspaceEntry
 
@@ -209,36 +209,12 @@ class ActionKind(str, Enum):
     STEP = "step"
 
 
-PredicateKind = Literal[
-    "answer_delivered",
-    "tool_succeeded",
-    "tool_output_contains",
-    "task_status",
-    "goal_proposed",
-    "none",
-]
-
-
-@dataclass
-class PredictionPredicate:
-    """Typed expectation about the observation an Intention will produce.
-
-    Legacy (v1) shape kept for the interim runtime loop; the v2 engine in
-    ``core/prediction.py`` forms :class:`~conscio.core.prediction.Expectation`
-    objects *before* execution instead.
-    """
-
-    kind: PredicateKind = "none"
-    args: dict[str, Any] = field(default_factory=dict)
-
-
 @dataclass
 class Intention:
     kind: ActionKind
     content: str
     source: str
     confidence: float = 0.5
-    expected_observation: PredictionPredicate | None = None
     tool_name: str | None = None
     tool_args: dict[str, Any] = field(default_factory=dict)
     risk: float = 0.0

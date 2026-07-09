@@ -26,7 +26,7 @@ def _tool_call_response(name: str, arguments: str, call_id: str = "call-1") -> d
 
 
 class _StubAutonomousLLM:
-    """Returns predetermined chat responses; used to drive AutonomousActionModule in tests."""
+    """Returns predetermined chat responses; used to drive autonomous ticks in tests."""
 
     def __init__(self, responses: list[dict]) -> None:
         self.responses = list(responses)

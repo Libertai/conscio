@@ -1,5 +1,5 @@
 """Tests for the autonomous-action path: self-management tools, LLM-driven goal review,
-and end-to-end heartbeat through the AutonomousActionModule."""
+and end-to-end heartbeat through the autonomous executor strategy."""
 from __future__ import annotations
 
 import os

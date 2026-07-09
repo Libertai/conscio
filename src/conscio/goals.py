@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -271,6 +272,13 @@ class DriveScheduler:
 
 
 class GoalStore:
+    """Durable goals, drives, and influences.
+
+    DB access convention: single-row execute/fetch helpers stay synchronous by
+    design (sub-millisecond on the RLock-guarded store); multi-statement writes
+    are batched into one ``memory.transaction`` and run via ``asyncio.to_thread``
+    so a commit fsync burst never stalls the event loop."""
+
     def __init__(self, memory: MemoryStore, *, motivation: Any | None = None) -> None:
         self.memory = memory
         self.goal_dup_threshold = float(
@@ -791,6 +799,7 @@ class GoalStore:
             return []
         valid_ids = {g["id"] for g in goals}
         applied: list[dict[str, Any]] = []
+        statements: list[tuple[str, tuple]] = []
         now = time.time()
         for decision in decisions[:max_decisions]:
             goal_id = str(decision.get("goal_id", ""))
@@ -799,17 +808,17 @@ class GoalStore:
             if goal_id not in valid_ids:
                 continue
             if action == "keep":
-                self.memory.execute(
+                statements.append((
                     "UPDATE goals SET last_reviewed_at = ?, updated_at = ?, review_notes = ? WHERE id = ?",
                     (now, now, reason or "kept by self-review", goal_id),
-                )
+                ))
                 applied.append({"goal_id": goal_id, "action": "keep", "reason": reason})
             elif action == "retire":
-                self.memory.execute(
+                statements.append((
                     "UPDATE goals SET status = 'retired', last_reviewed_at = ?, updated_at = ?, "
                     "review_notes = ? WHERE id = ?",
                     (now, now, reason or "retired by self-review", goal_id),
-                )
+                ))
                 applied.append({"goal_id": goal_id, "action": "retire", "reason": reason})
             elif action == "reprioritize":
                 try:
@@ -817,20 +826,23 @@ class GoalStore:
                 except (TypeError, ValueError):
                     continue
                 new_priority = max(0.0, min(1.0, new_priority))
-                self.memory.execute(
+                statements.append((
                     "UPDATE goals SET priority = ?, last_reviewed_at = ?, updated_at = ?, "
                     "review_notes = ? WHERE id = ?",
                     (new_priority, now, now, reason or "reprioritized by self-review", goal_id),
-                )
+                ))
                 applied.append({
                     "goal_id": goal_id,
                     "action": "reprioritize",
                     "new_priority": new_priority,
                     "reason": reason,
                 })
-            else:
-                continue
-            self.record_action_event(f"goal_review_applied:{action}")
+        if statements:
+            # One locked commit off the event loop: the "transactionally"
+            # promise above, without a per-decision fsync stall per UPDATE.
+            await asyncio.to_thread(self.memory.transaction, statements)
+            for entry in applied:
+                self.record_action_event(f"goal_review_applied:{entry['action']}")
         if applied:
             await self.memory.add_fact(
                 f"Goal review applied {len(applied)} decision(s): "
