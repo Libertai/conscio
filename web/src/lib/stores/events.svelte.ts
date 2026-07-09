@@ -29,6 +29,13 @@ let totalReceived = $state(0);
 
 let streamingText = $state("");
 let streamingActive = $state(false);
+// Which chat session the in-flight token stream belongs to. The backend token
+// events (chat.token/discard/final) carry no session_id — only source
+// "user:message" — and episodes are processed one at a time, so the web client
+// stamps the target session via chatStream.begin() when it POSTs a message.
+// ChatPanel renders the live bubble only when this matches the active session,
+// so switching sessions mid-stream never leaks tokens into the wrong thread.
+let streamingSession = $state<string | null>(null);
 
 // The server replays its backlog on every (re)connect; remember what we've
 // already shown so reconnects don't duplicate rows. `seq` keeps entry ids
@@ -139,6 +146,9 @@ export function stopEventStream(): void {
 export const chatStream = {
   get text() { return streamingText; },
   get active() { return streamingActive; },
+  get session() { return streamingSession; },
+  /** Bind the next token stream to a chat session and clear stale text. */
+  begin(sessionId: string) { streamingSession = sessionId; streamingText = ""; streamingActive = false; },
   reset() { streamingText = ""; streamingActive = false; },
 };
 
