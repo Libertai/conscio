@@ -161,3 +161,56 @@ class MarkContradictionTieBreakTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SizeCapPassTests(unittest.IsolatedAsyncioTestCase):
+    """The size cap bounds active-fact growth that the decay pass never touches
+    (trust-2/3 and ever-accessed facts)."""
+
+    async def asyncSetUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.memory = MemoryStore(db_path=os.path.join(self.tmp.name, "cap.db"))
+        await self.memory.initialize()
+        self.engine = ConsolidationEngine(self.memory)
+
+    async def asyncTearDown(self) -> None:
+        await self.memory.close()
+        self.tmp.cleanup()
+
+    def _statuses(self) -> dict[str, str]:
+        return {
+            str(row["fact"]): str(row["status"])
+            for row in self.memory.fetchall("SELECT fact, status FROM facts")
+        }
+
+    async def test_archives_least_valuable_down_to_cap_and_spares_user_facts(self) -> None:
+        await self.memory.add_fact("User-stated fact.", origin="user")  # trust 3
+        agent = await self.memory.add_fact("Agent fact, often used.", origin="agent")  # trust 2
+        self.memory.execute(
+            "UPDATE facts SET access_count = 5 WHERE id = ?", (agent.fact_id,)
+        )
+        await self.memory.add_fact("Web fact, never used.", origin="web:https://x.test")  # trust 1
+
+        capped = self.engine._size_cap_pass(NOW, max_active=2)
+
+        self.assertEqual(capped, 1)
+        statuses = self._statuses()
+        self.assertEqual(statuses["Web fact, never used."], "archived")
+        self.assertEqual(statuses["Agent fact, often used."], "active")
+        self.assertEqual(statuses["User-stated fact."], "active")
+
+    async def test_user_facts_are_never_auto_archived_even_over_cap(self) -> None:
+        for i in range(3):
+            await self.memory.add_fact(f"User fact {i}.", origin="user")
+
+        capped = self.engine._size_cap_pass(NOW, max_active=1)
+
+        self.assertEqual(capped, 0)
+        self.assertTrue(all(status == "active" for status in self._statuses().values()))
+
+    async def test_zero_cap_disables_the_pass(self) -> None:
+        for i in range(3):
+            await self.memory.add_fact(f"Web fact {i}.", origin="web:https://x.test")
+
+        self.assertEqual(self.engine._size_cap_pass(NOW, max_active=0), 0)
+        self.assertTrue(all(status == "active" for status in self._statuses().values()))

@@ -403,7 +403,7 @@ class CognitiveRuntime:
 
     @property
     def _autonomous_module(self) -> AutonomousStrategy:
-        """Compat shim: external consumers (service.py, eval/legacy.py) poke
+        """Compat shim: external consumers (service.py, eval/ci_suites.py) poke
         ``.llm`` (settable), ``.last_tool_requests``, ``.context_provider``
         and ``.on_tool_observation`` — all live on the AutonomousStrategy."""
         return self.autonomous_strategy

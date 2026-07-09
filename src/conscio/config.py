@@ -131,6 +131,7 @@ class ServiceConfig:
     tick_interval: float = 30.0
     consolidation_interval: int = 20  # autonomous ticks between consolidate_cycle runs (0 disables)
     enable_contradiction_check: bool = False  # LLM contradiction sweep in consolidate_cycle
+    max_active_facts: int = 50000  # archive least-valuable facts past this ceiling (0 disables)
     unsafe_autonomy: bool = False
     llm_base_url: str = ""
     llm_api_key: str = ""
@@ -233,6 +234,8 @@ class ServiceConfig:
             raise ValueError(f"engine.attention_broadcast_limit must be > 0 (got {self.attention_broadcast_limit}).")
         if self.max_actions_per_hour < 0:
             raise ValueError(f"tools.max_actions_per_hour must be >= 0 (got {self.max_actions_per_hour}).")
+        if self.max_active_facts < 0:
+            raise ValueError(f"service.max_active_facts must be >= 0 (got {self.max_active_facts}).")
         if self.backup_interval_hours < 0:
             raise ValueError(f"service.backup_interval_hours must be >= 0 (got {self.backup_interval_hours}).")
         if self.backup_retain < 0:
@@ -454,6 +457,7 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         tick_interval=float(service.get("tick_interval", 30.0)),
         consolidation_interval=int(service.get("consolidation_interval", 20)),
         enable_contradiction_check=bool(service.get("enable_contradiction_check", False)),
+        max_active_facts=int(service.get("max_active_facts", 50000)),
         unsafe_autonomy=bool(service.get("unsafe_autonomy", unsafe_default)),
         llm_base_url=str(
             os.environ.get("LIBERTAI_BASE_URL")
@@ -584,6 +588,7 @@ autonomous = true
 tick_interval = 30
 consolidation_interval = 20
 enable_contradiction_check = false
+max_active_facts = 50000
 unsafe_autonomy = {unsafe_autonomy}
 pause_on_error = true
 backup_interval_hours = 24

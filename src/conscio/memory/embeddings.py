@@ -6,8 +6,10 @@ from typing import Protocol
 import numpy as np
 
 # bge-m3 produces 1024-dim vectors. Stored as float32 little-endian BLOBs and
-# reranked with brute-force cosine over FTS candidates — fine up to ~50k facts;
-# revisit vector indexing (e.g. sqlite-vec) only past that threshold.
+# reranked with brute-force cosine over FTS candidates — fine up to ~50k facts.
+# The consolidation size cap (service.max_active_facts, default 50k) archives
+# least-valuable facts to hold that line; revisit vector indexing (e.g.
+# sqlite-vec) only if the ceiling itself has to move.
 EMBED_DIM = 1024
 
 _DEFAULT_MODEL = "bge-m3"

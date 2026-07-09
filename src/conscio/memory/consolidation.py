@@ -18,6 +18,9 @@ from conscio.memory.store import (
 # capped contradiction-judge pairs. The decay pass archives (never deletes).
 DECAY_DAYS = 14
 MAX_CYCLE_FACTS = 8
+# Active-fact ceiling: matches the documented brute-force cosine rerank scale
+# limit (see memory/embeddings.py). 0 disables the size cap.
+MAX_ACTIVE_FACTS = 50_000
 MAX_CYCLE_EPISODES = 20
 MAX_CONTRADICTION_PAIRS = 4
 SWEEP_SAMPLE = 30
@@ -100,6 +103,7 @@ class ConsolidationEngine:
         max_facts: int = MAX_CYCLE_FACTS,
         contradiction_judge: Any | None = None,
         decay_days: int = DECAY_DAYS,
+        max_active_facts: int = MAX_ACTIVE_FACTS,
         now: float | None = None,
     ) -> dict[str, Any]:
         llm = llm or self.llm
@@ -107,7 +111,8 @@ class ConsolidationEngine:
         stats: dict[str, Any] = {
             "facts_written": 0,
             "archived": 0,
-            "contradicted": 0,
+            "size_capped": 0,
+        "contradicted": 0,
             "errors": [],
         }
         if llm is not None:
@@ -120,6 +125,11 @@ class ConsolidationEngine:
             stats["archived"] = self._decay_pass(now, decay_days)
         except Exception as exc:  # noqa: BLE001
             stats["errors"].append(f"decay: {exc}")
+            self._record_error()
+        try:
+            stats["size_capped"] = self._size_cap_pass(now, max_active_facts)
+        except Exception as exc:  # noqa: BLE001
+            stats["errors"].append(f"size_cap: {exc}")
             self._record_error()
         if contradiction_judge is not None:
             try:
@@ -172,6 +182,28 @@ class ConsolidationEngine:
             if result.action == "inserted":
                 written += 1
         return written
+
+    def _size_cap_pass(self, now: float, max_active: int) -> int:
+        """Bound active-fact growth: the decay pass never touches trust-2/3 or
+        ever-accessed facts, so a long-lived deployment grows without limit.
+        When the active set exceeds ``max_active``, archive the least valuable
+        facts (lowest trust, least accessed, longest untouched) down to the
+        cap. User-stated (trust 3) facts are never auto-archived."""
+        if max_active <= 0:
+            return 0
+        row = self.store.fetchone("SELECT COUNT(*) AS n FROM facts WHERE status = 'active'")
+        excess = int(row["n"] if row else 0) - max_active
+        if excess <= 0:
+            return 0
+        return self.store.transaction([
+            (
+                "UPDATE facts SET status = 'archived', updated_at = ? "
+                "WHERE id IN (SELECT id FROM facts WHERE status = 'active' AND trust < 3 "
+                "ORDER BY trust ASC, access_count ASC, "
+                "COALESCE(last_accessed, created_at) ASC LIMIT ?)",
+                (now, excess),
+            ),
+        ])
 
     def _decay_pass(self, now: float, decay_days: int) -> int:
         cutoff = now - decay_days * 86400

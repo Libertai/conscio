@@ -625,6 +625,7 @@ class ConscioService:
         try:
             stats = await self.consolidation.consolidate_cycle(
                 contradiction_judge=self._contradiction_judge(),
+                max_active_facts=self.config.max_active_facts,
             )
             if stats.get("errors"):
                 self.last_error = "consolidation: " + "; ".join(stats["errors"])

@@ -15,6 +15,7 @@ autonomous = true
 tick_interval = 30
 consolidation_interval = 20
 enable_contradiction_check = false
+max_active_facts = 50000
 unsafe_autonomy = false
 pause_on_error = true
 backup_interval_hours = 24
