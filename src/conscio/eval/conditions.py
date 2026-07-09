@@ -21,7 +21,9 @@ rather than burn money on a runaway loop). ``model_tool_rounds`` is capped at
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -31,6 +33,7 @@ from conscio.core.cognition import InputEvent
 from conscio.core.context import STABLE_SYSTEM_PROMPT
 from conscio.core.runtime import CognitiveRuntime, EpisodeResult
 from conscio.eval.types import AblationFlags, Condition, Turn
+from conscio.memory.embeddings import EMBED_DIM
 from conscio.memory.store import MemoryStore
 from conscio.tools import ToolRegistry
 
@@ -158,6 +161,60 @@ class MeteredLLM:
         return response
 
 
+# Deterministic, network-free embedder for offline eval retrieval. Real bge-m3
+# embeddings are unavailable offline (the per-run config's llm base_url is
+# empty), so without this the ladder tests BM25-only retrieval while shipping
+# code weights cosine at 0.55. This folds a small set of synonym groups onto
+# shared concept axes and ignores every other token, so cosine measures concept
+# overlap independent of surface wording — enough to exercise (and discriminate
+# on) the rerank without a network.
+_CONCEPT_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "dog": ("dog", "dogs", "puppy", "puppies", "canine", "hound", "pup", "doggo"),
+    "cat": ("cat", "cats", "kitten", "kittens", "feline", "kitty"),
+    "car": ("car", "cars", "automobile", "vehicle", "sedan"),
+    "city": ("city", "cities", "town", "metropolis"),
+}
+_TOKEN_TO_CONCEPT: dict[str, str] = {
+    token: concept for concept, tokens in _CONCEPT_SYNONYMS.items() for token in tokens
+}
+
+
+class ConceptEmbedder:
+    """Deterministic, network-free embedder for offline eval retrieval.
+
+    Folds known synonyms onto shared concept axes and ignores unknown tokens,
+    so cosine measures concept overlap rather than surface lexical overlap
+    (which BM25 already covers). Text with no known concept embeds to the zero
+    vector (cosine 0.0), leaving BM25 in charge for those rows.
+    """
+
+    model = "eval-concept"
+
+    def _concepts(self, text: str) -> set[str]:
+        concepts: set[str] = set()
+        for token in "".join(ch if ch.isalnum() else " " for ch in text.lower()).split():
+            concept = _TOKEN_TO_CONCEPT.get(token)
+            if concept:
+                concepts.add(concept)
+        return concepts
+
+    def _vector(self, text: str) -> list[float]:
+        vec = [0.0] * EMBED_DIM
+        for concept in self._concepts(text):
+            idx = int.from_bytes(hashlib.sha256(concept.encode()).digest()[:8], "little") % EMBED_DIM
+            vec[idx] += 1.0
+        norm = math.sqrt(sum(value * value for value in vec))
+        if norm > 0.0:
+            vec = [value / norm for value in vec]
+        return vec
+
+    async def embed(self, text: str) -> list[float] | None:
+        return self._vector(text)
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]] | None:
+        return [self._vector(text) for text in texts]
+
+
 @dataclass
 class BuildSettings:
     """Everything a condition builder needs for one grid cell."""
@@ -169,6 +226,11 @@ class BuildSettings:
     seed_facts: list[dict[str, Any]] = field(default_factory=list)
     seed_goal: str = ""
     model_tool_rounds: int = EVAL_MODEL_TOOL_ROUNDS
+    # Retrieval embedder for runtime/service cells. Default ON with the offline
+    # ConceptEmbedder so the cosine rerank is actually exercised; set
+    # use_embedder=False to test pure BM25, or pass an explicit embedder.
+    embedder: Any | None = None
+    use_embedder: bool = True
 
 
 @dataclass
@@ -372,6 +434,14 @@ def _fetch_count_fn(memory: MemoryStore):
     return fetch_count
 
 
+def _resolve_embedder(settings: BuildSettings) -> Any | None:
+    """The embedder to attach to a cell's store: an explicit one, else the
+    default offline ConceptEmbedder, unless embeddings are disabled."""
+    if not settings.use_embedder:
+        return None
+    return settings.embedder if settings.embedder is not None else ConceptEmbedder()
+
+
 async def _seed_facts(memory: MemoryStore, seed_facts: list[dict[str, Any]]) -> None:
     for spec in seed_facts:
         await memory.add_fact(str(spec["fact"]), str(spec.get("source", "user")))
@@ -394,6 +464,7 @@ async def build_runtime(
     )
     runtime.chat_strategy.temperature = settings.temperature
     runtime.autonomous_strategy.temperature = settings.temperature
+    runtime.memory.embedder = _resolve_embedder(settings)
     await runtime.initialize()
     await _seed_facts(runtime.memory, settings.seed_facts)
     return RuntimeHandle(condition, settings, runtime)
@@ -445,6 +516,7 @@ async def build_service(
     service.runtime.autonomous_strategy.llm = settings.llm
     service.runtime.chat_strategy.temperature = settings.temperature
     service.runtime.autonomous_strategy.temperature = settings.temperature
+    service.memory.embedder = _resolve_embedder(settings)
     await service.start(background=False)
     register_fixture_tools(service.runtime.tools, settings.fixture_tools)
     await _seed_facts(service.memory, settings.seed_facts)

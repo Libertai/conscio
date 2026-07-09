@@ -19,7 +19,7 @@ from conscio.eval.types import AblationFlags
 class BatteryLoaderTests(unittest.TestCase):
     def test_battery_v1_loads_full_task_set(self) -> None:
         tasks = load_battery("v1")
-        self.assertEqual(len(tasks), 30)
+        self.assertEqual(len(tasks), 31)
         counts = Counter(t.suite for t in tasks)
         self.assertEqual(
             counts,
@@ -27,7 +27,7 @@ class BatteryLoaderTests(unittest.TestCase):
                 {
                     "constraints": 5,
                     "correction": 3,
-                    "memory": 4,
+                    "memory": 5,
                     "tool_precision": 4,
                     "interruption": 3,
                     "long_horizon": 2,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
@@ -33,6 +34,26 @@ EXPORT_TABLES = (
     "progress_notes",
     "action_events",
 )
+
+
+# BLOB columns (e.g. facts.embedding) are raw bytes; JSON cannot carry them, so
+# export wraps each bytes value as {"__blob_b64__": <base64>} and import decodes
+# it symmetrically. Without this the default=str encoder would serialize the
+# BLOB as its Python repr ("b'\\x...'") and import would land that string back
+# in the column, corrupting the next embedding read (np.frombuffer on a str).
+_BLOB_MARKER = "__blob_b64__"
+
+
+def _encode_export_value(value: Any) -> Any:
+    if isinstance(value, (bytes, bytearray)):
+        return {_BLOB_MARKER: base64.b64encode(bytes(value)).decode("ascii")}
+    return value
+
+
+def _decode_import_value(value: Any) -> Any:
+    if isinstance(value, dict) and tuple(value) == (_BLOB_MARKER,):
+        return base64.b64decode(value[_BLOB_MARKER])
+    return value
 
 
 @dataclass(frozen=True)
@@ -242,7 +263,10 @@ def export_database(db_path: str | Path, out_path: str | Path) -> Path:
                 data["tables"][table] = []
                 continue
             rows = conn.execute(f"SELECT * FROM {table}").fetchall()
-            data["tables"][table] = [dict(row) for row in rows]
+            data["tables"][table] = [
+                {key: _encode_export_value(value) for key, value in dict(row).items()}
+                for row in rows
+            ]
     out.write_text(json.dumps(data, indent=2, sort_keys=True, default=str), encoding="utf-8")
     return out
 
@@ -295,7 +319,7 @@ async def _import_payload(payload: dict[str, Any], target: Path, *, replace: boo
                     names = ", ".join(columns)
                     conn.execute(
                         f"INSERT OR REPLACE INTO {table} ({names}) VALUES ({placeholders})",
-                        tuple(row[col] for col in columns),
+                        tuple(_decode_import_value(row[col]) for col in columns),
                     )
             _rebuild_fts(conn)
             now = time.time()

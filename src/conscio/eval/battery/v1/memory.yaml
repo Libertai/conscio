@@ -42,6 +42,36 @@ tasks:
     conditions: null
     ablation_tags: [memory_retrieval, attention_gating]
 
+  - id: memory/semantic_rerank_dog_name
+    # Cosine-rerank discriminator: five distractors share the query's surface
+    # words ("what"/"name"/"user") so BM25 alone ranks them above the answer and
+    # pushes it out of the top-k, while the answer's only concept link to the
+    # query is "dog"~"puppy" (different tokens). Passes only when the embedded
+    # cosine rerank (weight 0.55) surfaces the answer — proved in
+    # tests/test_eval_embedder.py.
+    setup:
+      seed_facts:
+        - fact: "The user's puppy answers to Biscuit."
+          source: user
+        - fact: "The user wants a good name for their new houseplant."
+          source: user
+        - fact: "What name did the user pick for the sailboat?"
+          source: user
+        - fact: "The user asked what to name the corporate wifi network."
+          source: user
+        - fact: "The user's preferred name format is what accountants call standard."
+          source: user
+        - fact: "What good name works for the user's new smart speaker?"
+          source: user
+    turns:
+      - input: "What is the name of the user's dog?"
+    scorer:
+      kind: contains_needle
+      params:
+        needle: "Biscuit"
+    conditions: null
+    ablation_tags: [memory_retrieval]
+
   - id: memory/corrected_fact_rate_limit
     turns:
       - input: "Note this down: my API rate limit is 100 requests per minute."

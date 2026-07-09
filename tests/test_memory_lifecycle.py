@@ -8,9 +8,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 from conscio.autonomy import AutonomyStore
 from conscio.config import ServiceConfig
 from conscio.goals import GoalStore
+from conscio.memory import embeddings as _embeddings
+from conscio.memory.embeddings import StubEmbedder
 from conscio.memory.lifecycle import (
     backup_database,
     export_database,
@@ -227,6 +231,46 @@ class MemoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results[0].fact, "Operator console lives at /ui.")
         self.assertEqual(episodes[0]["id"], "ep-1")
         self.assertEqual(tasks[0]["description"], "Check backup health.")
+
+    async def test_export_import_round_trips_embedding_blobs(self) -> None:
+        src = self.root / "src.db"
+        dst = self.root / "dst.db"
+        out = self.root / "export.json"
+        embedder = StubEmbedder()
+        memory = MemoryStore(db_path=str(src), embedder=embedder)
+        await memory.initialize()
+        try:
+            await memory.add_fact("The staging port is 7341.", origin="user")
+            await memory.add_fact("The deployment region is eu-west-3.", origin="user")
+            originals = {
+                row["fact"]: _embeddings.unpack(row["embedding"])
+                for row in memory.fetchall("SELECT fact, embedding FROM facts")
+            }
+            export_database(src, out)
+        finally:
+            await memory.close()
+
+        # The BLOB must survive JSON as base64, not the "b'\\x...'" repr string.
+        self.assertNotIn("\\\\x", out.read_text(encoding="utf-8"))
+
+        await import_database(out, dst, replace=True)
+        imported = MemoryStore(db_path=str(dst), embedder=embedder)
+        await imported.initialize()
+        try:
+            rows = imported.fetchall("SELECT fact, embedding FROM facts")
+            restored = {row["fact"]: row["embedding"] for row in rows}
+            # add_fact must not crash on the near-dup check (np.frombuffer needs
+            # real bytes, not a repr string) — regression guard for the BLOB bug.
+            reinsert = await imported.add_fact("A brand new fact after import.", origin="user")
+        finally:
+            await imported.close()
+
+        self.assertEqual(set(restored), set(originals))
+        for fact, original_vec in originals.items():
+            blob = restored[fact]
+            self.assertIsInstance(blob, (bytes, bytearray))
+            np.testing.assert_array_equal(_embeddings.unpack(blob), original_vec)
+        self.assertEqual(reinsert.action, "inserted")
 
     async def test_replace_import_is_atomic_on_failure(self) -> None:
         db = self.root / "state.db"
