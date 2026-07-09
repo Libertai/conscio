@@ -44,6 +44,7 @@ class _SSECapDirect(unittest.TestCase):
 class _StubConfig:
     web_password: str = "letmein"
     web_secure_cookies: bool = False
+    trusted_proxies: tuple[str, ...] = ()  # login throttle checks proxy trust
 
 
 class _StubService:

@@ -15,6 +15,7 @@ from conscio.core.autonomy_module import STABLE_AUTONOMY_PROMPT
 from conscio.core.context import STABLE_SYSTEM_PROMPT
 from conscio.core.tool_loop import (
     UNTRUSTED_WEB_END,
+    ToolLoopSession,
     ToolRequest,
     _execute_tool,
     _spotlight_web_output,
@@ -348,6 +349,31 @@ class SpotlightHardeningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(truncate_spotlighted("short", 1000), "short")
         plain = "B" * 2000
         self.assertEqual(truncate_spotlighted(plain, 1000), plain[:1000])
+
+    async def test_forced_final_never_promotes_spotlighted_content(self) -> None:
+        # Budget exhausted + empty forced-final response: the fallback answer
+        # must not hand authorship of quarantined web content to the agent.
+        class _Tools:
+            async def call(self, name: str, args: dict) -> dict:
+                return {"output": PAGE_TEXT, "error": False}
+
+        llm = _StubLLM([
+            _tool_call_response("web_fetch", json.dumps({"url": EVIL_URL})),
+            {"content": ""},  # forced final comes back empty
+        ])
+        workspace = Workspace()
+        session = ToolLoopSession(
+            llm=llm,
+            tools=_Tools(),
+            tool_schemas=[{"type": "function", "function": {"name": "web_fetch", "parameters": {}}}],
+            messages=[{"role": "user", "content": "fetch it"}],
+            max_total_rounds=1,
+        )
+        await session.step(workspace)  # spends the only round on the tool call
+        result = await session.step(workspace)  # budget hit -> forced final
+        self.assertTrue(result.limit_reached)
+        self.assertNotIn("UNTRUSTED_WEB_CONTENT", result.text)
+        self.assertNotIn(PAGE_TEXT, result.text)
 
 
 class NetworkCapableTaintTests(unittest.IsolatedAsyncioTestCase):

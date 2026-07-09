@@ -8,7 +8,8 @@ import unittest
 
 from conscio.core.cognition import InputEvent
 from conscio.core.runtime import CognitiveRuntime
-from conscio.core.workspace import EntryType
+from conscio.core.tool_loop import ToolLoopSession
+from conscio.core.workspace import EntryType, Workspace
 from conscio.memory.store import MemoryStore
 from conscio.tools import ToolRegistry
 
@@ -192,6 +193,36 @@ class ControlToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.selected_action, "refuse")
         self.assertEqual(result.output, "That violates my active constraints.")
         self.assertEqual(result.metrics.tool_calls, 0)
+
+
+class ToolFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_raising_tool_becomes_error_observation_not_episode_abort(self) -> None:
+        # Registries catch tool-fn exceptions, but wrapper layers (policy cwd
+        # mkdir, MCP proxies, duck-typed registries) can still raise. The loop
+        # must record a failed observation and keep going, not kill the episode.
+        class _ExplodingTools:
+            async def call(self, name: str, args: dict) -> dict:
+                raise RuntimeError("registry wrapper blew up")
+
+        llm = ScriptedLLM([
+            tool_call("flaky", "{}"),
+            {"content": "recovered fine"},
+        ])
+        workspace = Workspace()
+        session = ToolLoopSession(
+            llm=llm,  # type: ignore[arg-type]
+            tools=_ExplodingTools(),
+            tool_schemas=[{"type": "function", "function": {"name": "flaky", "parameters": {}}}],
+            messages=[{"role": "user", "content": "go"}],
+        )
+        first = await session.step(workspace)
+        self.assertEqual(first.kind, "tool")
+        self.assertTrue(first.tool_result and first.tool_result.get("error"))
+        entries = workspace.read(limit=10, type_filter={EntryType.OBSERVATION})
+        self.assertTrue(any("registry wrapper blew up" in e.content for e in entries))
+        second = await session.step(workspace)
+        self.assertEqual(second.kind, "final")
+        self.assertEqual(second.text, "recovered fine")
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ class _StubConfig:
     web_password: str = "letmein"
     web_secure_cookies: bool = False
     message_timeout: float = 0.0  # 0 disables the /message deadline in _submit_with_deadline
+    trusted_proxies: tuple[str, ...] = ()  # login throttle checks proxy trust
 
 
 @dataclass

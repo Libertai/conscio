@@ -197,3 +197,37 @@ def test_login_throttle_isolation(tmp_path: Path) -> None:
         assert b_response.status_code == 401, b_response.text
 
     _run(scenario())
+
+
+def test_login_warns_on_forwarded_headers_without_trusted_proxies(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        import httpx
+
+        from conscio.api import create_app
+
+        with unittest.mock.patch.dict(os.environ, _ENV, clear=False):
+            service = _make_service(str(tmp_path))
+            await service.start(background=False)
+            try:
+                app = create_app(service=service)
+                transport = httpx.ASGITransport(app=app, client=("10.0.0.9", 1))
+                async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+                    with unittest.TestCase().assertLogs("conscio.webui", level="WARNING") as logs:
+                        await c.post(
+                            "/ui/login",
+                            json={"password": "wrong"},
+                            headers={"X-Forwarded-For": "203.0.113.7"},
+                        )
+                        # Warned once, not per-request.
+                        await c.post(
+                            "/ui/login",
+                            json={"password": "wrong"},
+                            headers={"X-Forwarded-For": "203.0.113.8"},
+                        )
+            finally:
+                await service.stop()
+
+        proxy_warnings = [m for m in logs.output if "trusted_proxies" in m]
+        assert len(proxy_warnings) == 1, logs.output
+
+    _run(scenario())

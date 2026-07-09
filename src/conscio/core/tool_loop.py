@@ -159,7 +159,10 @@ def _spotlight_web_output(request: ToolRequest, result: dict[str, Any]) -> dict[
 async def _execute_tool(tools: Any, request: ToolRequest, workspace: Workspace) -> dict[str, Any]:
     if tools is None:
         return {"output": "Tool registry is unavailable.", "error": True}
-    result = await tools.call(request.name, request.args)
+    try:
+        result = await tools.call(request.name, request.args)
+    except Exception as exc:  # noqa: BLE001 — one misbehaving tool must not abort the episode
+        result = {"output": f"Tool {request.name} raised {type(exc).__name__}: {exc}", "error": True}
     capabilities = _tool_capabilities(tools, request.name)
     if request.name in WEB_CONTENT_TOOLS or EXTERNAL_CONTENT_CAPABILITY in capabilities:
         result = _spotlight_web_output(request, result)
@@ -376,7 +379,9 @@ class ToolLoopSession:
             observations = [
                 entry.content
                 for entry in workspace.read(limit=100, type_filter={EntryType.OBSERVATION})
-                if entry.source == "tool"
+                # Never promote spotlighted external content to the agent's own
+                # final answer — that would hand the quarantined text authorship.
+                if entry.source == "tool" and _UNTRUSTED_BEGIN_PREFIX not in entry.content
             ]
             # workspace.read sorts by (-priority, -timestamp), so [0] is the
             # highest-priority most-recent tool observation.

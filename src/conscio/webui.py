@@ -93,6 +93,7 @@ def create_web_router(service: ConscioService) -> APIRouter:
     sessions: dict[str, float] = {}
     login_failures: dict[str, list[float]] = {}
     chat_store = ChatStore(service.memory)
+    untrusted_proxy_warned = False
 
     @router.get("/", include_in_schema=False)
     async def root() -> RedirectResponse:
@@ -106,6 +107,25 @@ def create_web_router(service: ConscioService) -> APIRouter:
         sweep_login_failures(login_failures, now)
         sweep_sessions(sessions, now)
         client = request.client.host if request.client else "unknown"
+        # Behind a reverse proxy with service.trusted_proxies unset, every
+        # request carries the proxy's address, so the per-IP lockout collapses
+        # into one shared bucket: an attacker's failures lock out every
+        # operator. The forwarded header itself must NOT be used as the key
+        # (unvalidated, so rotating it would bypass the throttle entirely) —
+        # detect the misconfiguration and tell the operator instead.
+        nonlocal untrusted_proxy_warned
+        if (
+            not untrusted_proxy_warned
+            and not service.config.trusted_proxies
+            and ("x-forwarded-for" in request.headers or "forwarded" in request.headers)
+        ):
+            untrusted_proxy_warned = True
+            logger.warning(
+                "login request carries forwarded headers but service.trusted_proxies is "
+                "unset: the per-IP login lockout is keyed on the proxy address and one "
+                "attacker can lock out all operators. Set service.trusted_proxies.",
+                extra={"client": client},
+            )
         if login_failure_count(login_failures, client, now) >= LOGIN_FAILURE_LIMIT:
             logger.warning("web login locked out", extra={"client": client})
             raise HTTPException(status_code=429, detail="too many login attempts")

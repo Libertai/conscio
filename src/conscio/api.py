@@ -148,7 +148,7 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
         return _message_blob(result)
 
     @app.post("/message/stream", dependencies=[Depends(require_auth), Depends(require_episode_budget)])
-    async def message_stream(req: MessageRequest) -> StreamingResponse:
+    async def message_stream(req: MessageRequest, request: Request) -> StreamingResponse:
         """SSE variant of /message: chat.token / chat.discard events for this
         submission (matched by ref), terminated by message.result or
         message.error. Not subject to message_timeout — the caller sees live
@@ -190,6 +190,10 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
                     try:
                         payload = await asyncio.wait_for(client.queue.get(), timeout=0.25)
                     except TimeoutError:
+                        # Abandoned streams must release their broker slot
+                        # (MAX_SSE_CLIENTS); the episode itself keeps running.
+                        if await request.is_disconnected():
+                            return
                         continue
                     if payload.get("ref") == ref and payload.get("type") in ("chat.token", "chat.discard"):
                         yield encode_sse(payload, event=str(payload.get("type"))).encode("utf-8")
