@@ -15,21 +15,47 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
-
-      - name: Install uv
-        run: pip install uv
+          enable-cache: true
 
       - name: Install package + dev deps from lockfile
-        run: uv pip install --system -e ".[dev]"
+        run: uv sync --locked --extra dev
 
       - name: Ruff
-        run: ruff check src/ tests/
+        run: uv run ruff check src/ tests/
 
       - name: Mypy
-        run: mypy src/conscio/
+        run: uv run mypy src/conscio/
 
       - name: Pytest
-        run: python -m pytest tests/
+        run: uv run python -m pytest tests/
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install web deps
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+
+      - name: Svelte check
+        run: pnpm check
+        working-directory: web
+
+      - name: Build
+        run: pnpm build
+        working-directory: web

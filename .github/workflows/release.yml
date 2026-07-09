@@ -10,24 +10,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+          enable-cache: true
 
-      - name: Install uv
-        run: pip install uv
-
-      - name: Install package + dev deps
-        run: uv pip install --system -e ".[dev]"
+      - name: Install package + dev deps from lockfile
+        run: uv sync --locked --extra dev
 
       - name: Ruff
-        run: ruff check src/ tests/
+        run: uv run ruff check src/ tests/
 
       - name: Mypy
-        run: mypy src/conscio/
+        run: uv run mypy src/conscio/
 
       - name: Pytest
-        run: python -m pytest tests/
+        run: uv run python -m pytest tests/
 
       - name: Docs consistency
         run: sh scripts/check-docs-examples.sh
@@ -37,7 +36,7 @@ jobs:
 
       - name: Tag matches pyproject version
         run: |
-          python -c 'import tomllib, os, sys
+          uv run python -c 'import tomllib, os, sys
           v = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
           t = os.environ["GITHUB_REF_NAME"].removeprefix("v")
           sys.exit(0 if v == t else print(f"tag {t} != pyproject {v}") or 1)'
@@ -69,6 +68,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: docker/setup-qemu-action@v3
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -86,10 +87,47 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
 
-      - uses: docker/build-push-action@v6
+      - name: Build amd64 image for smoke test
+        uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64
+          load: true
+          push: false
+          tags: conscio:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test container
+        run: |
+          docker run -d --name conscio-smoke conscio:smoke
+          probe='import urllib.request, sys
+          r = urllib.request.urlopen("http://127.0.0.1:8765/ready", timeout=5)
+          sys.exit(0 if r.status == 200 else 1)'
+          ok=0
+          for i in $(seq 1 30); do
+            if docker exec conscio-smoke python -c "$probe" 2>/dev/null; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::error::container never became ready"
+            docker logs conscio-smoke
+            exit 1
+          fi
+          docker exec conscio-smoke python -c 'import urllib.request, json, sys
+          h = json.load(urllib.request.urlopen("http://127.0.0.1:8765/health", timeout=5))
+          sys.exit(0 if h.get("ok") else 1)'
+          docker rm -f conscio-smoke
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
