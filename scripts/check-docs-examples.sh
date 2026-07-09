@@ -166,7 +166,7 @@ for tool in web_search web_fetch; do
 done
 
 for tool in set_task_status add_task note_progress propose_subgoal remember_fact remember_facts search_memory learn_procedure spawn_subagent; do
-  has src/conscio/service.py "$tool"
+  has src/conscio/self_tools.py "$tool"
   has docs/public-beta/tools.md "$tool"
 done
 

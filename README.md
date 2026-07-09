@@ -384,21 +384,44 @@ See [docs/vm.md](docs/vm.md) for systemd and Docker deployment.
 ## CLI Commands
 
 ```text
+conscio --version
+
+# Local runs
 conscio ask TEXT [--model MODEL] [--quiet] [--offline]
 conscio run [--model MODEL] [--offline]
-conscio eval --suite smoke|ladder|ablations [--live] [--conditions ...] [--tasks ...]
+conscio daemon [EVENTS ...]                      # dry-run heartbeats, no unsafe autonomy
 conscio history
 conscio search QUERY
+conscio eval --suite smoke|ladder|ablations [--live] [--conditions ...] [--tasks ...]
 
-conscio service init
+# Service lifecycle
+conscio service init [--profile research|autonomous-vm]
 conscio service start
 conscio service status
+conscio service doctor                           # validate config + runtime prerequisites
 conscio service stop
-conscio chat TEXT
+
+# State database
+conscio db schema [--db PATH]
+conscio db migrate [--db PATH]
+conscio db backup                                # timestamped home backup
+conscio db prune [--keep N]
+conscio db restore ARCHIVE [--force]
+conscio db export --out PATH [--db PATH]
+conscio db import INPUT [--replace] [--db PATH]
+
+# Tool policy
+conscio tools list                               # allow/deny lists + MCP server status
+conscio tools deny NAME [NAME ...]
+conscio tools allow NAME [NAME ...]
+
+# Talk to a running service
+conscio chat TEXT [--stream]
 conscio influence goal TEXT
 conscio influence constraint TEXT
 conscio pause
 conscio resume
+conscio cancel                                   # cancel the episode in progress
 conscio goals
 conscio influences
 conscio projects [PROJECT_ID]

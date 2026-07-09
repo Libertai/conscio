@@ -1,9 +1,12 @@
 # Conscio v2 — Full Design Dossier
 
-This document captures the v2 overhaul design: a preamble summarizing each design
-agent's contribution, then the three full design plans verbatim. **This is the v2
-plan of record and the detailed source of truth for implementation.** `docs/plan.md`
-describes the v1 architecture and is superseded by this document.
+This document captures the overhaul design: a preamble summarizing each design
+agent's contribution, then the three full design plans verbatim. **It is the
+detailed design dossier — the deep source of truth for how the current
+architecture was designed and why.** `docs/plan.md` is the complementary plan of
+record: the concise, up-to-date summary of the architecture as it stands. Read
+`docs/plan.md` for where the system is now, and this dossier for the full design
+rationale behind it.
 
 > **Reconciliation notes (combiner seams fixed post-merge):** the shared
 > `AblationFlags` field is spelled `self_state_coupling` everywhere (the eval
