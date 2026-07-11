@@ -18,6 +18,9 @@ class EntryType(str, Enum):
     SYSTEM = "system"
     CONFLICT = "conflict"
     SELF_STATE = "self_state"
+    BROADCAST = "broadcast"
+    PREDICTION = "prediction"
+    AFFECT = "affect"
 
 
 class Visibility(str, Enum):

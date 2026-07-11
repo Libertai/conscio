@@ -15,7 +15,7 @@ from conscio.autonomy import AutonomyStore
 from conscio.config import ServiceConfig, load_config
 from conscio.core.cognition import InputEvent
 from conscio.core.context import ContextSettings
-from conscio.core.runtime import CognitiveRuntime, EpisodeResult
+from conscio.core.runtime import EpisodeResult
 from conscio.core.tool_loop import external_taint_origin
 from conscio.goals import GoalStore
 from conscio.llm.router import LLMRouter
@@ -25,6 +25,7 @@ from conscio.memory.lifecycle import create_home_backup, prune_backups
 from conscio.memory.store import MemoryStore
 from conscio.self_tools import register_self_tools
 from conscio.tools import PolicyToolRegistry
+from conscio.v3.runtime import V3CognitiveRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +202,7 @@ class ConscioService:
             stale_flag_days=self.config.motivation.stale_flag_days,
             stale_block_days=self.config.motivation.stale_block_days,
         )
-        self.runtime = CognitiveRuntime(
+        self.runtime = V3CognitiveRuntime(
             memory=self.memory,
             tools=tools,
             llm=llm,
@@ -213,6 +214,7 @@ class ConscioService:
             max_reflections=self.config.max_reflections,
             attention_broadcast_limit=self.config.attention_broadcast_limit,
             attention_char_budget=self.config.attention_char_budget,
+            cognitive_cycles=self.config.cognitive_cycles,
             ablation=self.config.ablation,
             constraint_provider=self.goals.active_constraints,
             llm_fast=self.llm_fast,
@@ -868,6 +870,18 @@ class ConscioService:
         if stored:
             return stored
         return [asdict(ep) for ep in self._episodes[-limit:]][::-1]
+
+    async def episode_causal_trace(self, episode_id: str) -> dict[str, Any] | None:
+        episode = await self.memory.get_episode(episode_id)
+        if episode is None:
+            return None
+        events = await self.memory.cognitive_events(episode_id)
+        checkpoint_id = next(
+            (str(event["checkpoint_id"]) for event in reversed(events) if event.get("checkpoint_id")),
+            "",
+        )
+        checkpoint = await self.memory.get_core_checkpoint(checkpoint_id) if checkpoint_id else None
+        return {"episode": episode, "events": events, "checkpoint": checkpoint}
 
     async def episodes_before(self, cursor_ts: float, limit: int = 20) -> list[dict[str, Any]]:
         return await self.memory.episodes_before(cursor_ts, limit)

@@ -89,6 +89,7 @@ tool_rounds_per_tick = 4
 max_reflections = 2
 attention_broadcast_limit = 6
 attention_char_budget = 4000
+cognitive_cycles = 3
 chat_temperature = 0.4
 autonomous_temperature = 0.3
 judge_max_tokens = 200

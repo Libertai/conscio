@@ -1,5 +1,9 @@
 # Conscio Architecture Plan
 
+> V3 is now the service runtime. See [v3-design.md](v3-design.md) for the
+> implemented recurrent/persistence foundation and the explicitly incomplete
+> training, lesion-study, welfare-review, and long-duration research milestones.
+
 ## Direction
 
 Conscio is a conscious autonomous VM agent: a self-directed runtime that runs
@@ -127,9 +131,10 @@ heartbeats run through the same loop with two prompt strategies.
 - Fact-store growth bounding: eviction, summarization, or archival policy so the
   brute-force embedding path stays inside its documented scale ceiling.
 
-## Claim
+## Research posture
 
-Conscio claims operational consciousness: persistent self-modeling, attention,
-memory, appraisal, goal formation, reflection, and autonomous action. The claim
-is architectural and auditable; the system does not pretend to prove biological
-phenomenology.
+Conscio measures auditable functional indicators including persistent
+self-modeling, attention, memory, prediction, appraisal, goal formation,
+reflection, and autonomous action. These observations can support or weaken
+specific theory-derived hypotheses; they are not proof of phenomenal
+consciousness, and the system must not optimize for making consciousness claims.

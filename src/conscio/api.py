@@ -299,6 +299,13 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
     async def episodes(limit: int = Query(default=20, ge=1, le=100)) -> list[dict[str, Any]]:
         return await svc.recent_episodes(limit)
 
+    @app.get("/episodes/{episode_id}", dependencies=[Depends(require_auth)])
+    async def episode_trace(episode_id: str) -> dict[str, Any]:
+        value = await svc.episode_causal_trace(episode_id)
+        if value is None:
+            raise HTTPException(status_code=404, detail="episode not found")
+        return value
+
     @app.get("/trace", dependencies=[Depends(require_auth)])
     async def trace() -> dict[str, str]:
         return {"trace": await svc.recent_trace()}

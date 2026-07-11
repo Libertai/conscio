@@ -34,7 +34,7 @@ _TRUST_BY_ORIGIN = {
     "quarantined": 0,
 }
 _CONF_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Schema v2 (fresh-start DB, no migration from v1):
 # - unified `episodes` keyed by the runtime's per-episode uuid (canonical id),
@@ -147,6 +147,42 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_chat_messages_session
     ON chat_messages (session_id, created_at);
+CREATE TABLE IF NOT EXISTS cognitive_events (
+    sequence      INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id      TEXT NOT NULL UNIQUE,
+    episode_id    TEXT NOT NULL,
+    event_type    TEXT NOT NULL,
+    source        TEXT NOT NULL,
+    payload       TEXT NOT NULL,
+    model_input   TEXT,
+    checkpoint_id TEXT,
+    parent_event_id TEXT,
+    schema_version INTEGER NOT NULL,
+    observed_at   REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cognitive_events_episode
+    ON cognitive_events (episode_id, sequence);
+CREATE TABLE IF NOT EXISTS core_checkpoints (
+    checkpoint_id TEXT PRIMARY KEY,
+    lineage_id    TEXT NOT NULL,
+    parent_checkpoint_id TEXT,
+    model_version TEXT NOT NULL,
+    payload       TEXT NOT NULL,
+    event_sequence INTEGER NOT NULL,
+    schema_version INTEGER NOT NULL,
+    created_at    REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_core_checkpoints_lineage
+    ON core_checkpoints (lineage_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS affect_interventions (
+    intervention_id TEXT PRIMARY KEY,
+    episode_id    TEXT NOT NULL DEFAULT '',
+    operator      TEXT NOT NULL,
+    reason        TEXT NOT NULL,
+    before_state  TEXT NOT NULL,
+    after_state   TEXT NOT NULL,
+    created_at    REAL NOT NULL
+);
 """
 
 
@@ -494,6 +530,10 @@ class MemoryStore:
         )
         return [self._episode_from_row(row) for row in rows]
 
+    async def get_episode(self, episode_id: str) -> dict[str, Any] | None:
+        row = self.fetchone("SELECT * FROM episodes WHERE id = ?", (episode_id,))
+        return self._episode_from_row(row) if row else None
+
     async def count_episodes(self) -> int:
         rows = self._fetchall("SELECT COUNT(*) AS count FROM episodes")
         return int(rows[0]["count"]) if rows else 0
@@ -504,6 +544,98 @@ class MemoryStore:
         data["web_origins"] = json.loads(data.get("web_origins") or "[]")
         data["tainted"] = bool(data.get("tainted"))
         return data
+
+    # ── V3 append-only causal history and recurrent checkpoints ─────────
+
+    async def append_cognitive_event(self, event: Any) -> int:
+        """Append one typed event.  There is intentionally no update/delete API."""
+        data = event.to_dict() if hasattr(event, "to_dict") else dict(event)
+        with self._lock:
+            conn = self._conn()
+            cursor = conn.execute(
+                "INSERT INTO cognitive_events "
+                "(event_id, episode_id, event_type, source, payload, model_input, checkpoint_id, "
+                "parent_event_id, schema_version, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    data["event_id"], data["episode_id"], data["event_type"], data["source"],
+                    json.dumps(data.get("payload") or {}, sort_keys=True),
+                    json.dumps(data["model_input"], sort_keys=True)
+                    if data.get("model_input") is not None else None,
+                    data.get("checkpoint_id"), data.get("parent_event_id"),
+                    int(data.get("schema_version", 1)), float(data.get("observed_at", time.time())),
+                ),
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    async def cognitive_events(self, episode_id: str) -> list[dict[str, Any]]:
+        rows = self._fetchall(
+            "SELECT * FROM cognitive_events WHERE episode_id = ? ORDER BY sequence", (episode_id,)
+        )
+        for row in rows:
+            row["payload"] = json.loads(row.get("payload") or "{}")
+            row["model_input"] = (
+                json.loads(row["model_input"]) if row.get("model_input") is not None else None
+            )
+        return rows
+
+    async def save_core_checkpoint(self, checkpoint: Any) -> None:
+        """Persist a versioned immutable checkpoint; duplicate ids are errors."""
+        data = checkpoint.to_dict() if hasattr(checkpoint, "to_dict") else dict(checkpoint)
+        with self._lock:
+            conn = self._conn()
+            conn.execute(
+                "INSERT INTO core_checkpoints "
+                "(checkpoint_id, lineage_id, parent_checkpoint_id, model_version, payload, "
+                "event_sequence, schema_version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    data["checkpoint_id"], data["lineage_id"], data.get("parent_checkpoint_id"),
+                    data["model_version"], json.dumps(data, sort_keys=True),
+                    int(data.get("event_sequence", 0)), int(data.get("schema_version", 1)),
+                    float(data.get("created_at", time.time())),
+                ),
+            )
+            conn.commit()
+
+    async def latest_core_checkpoint(self, lineage_id: str | None = None) -> dict[str, Any] | None:
+        if lineage_id:
+            row = self.fetchone(
+                "SELECT payload FROM core_checkpoints WHERE lineage_id = ? ORDER BY created_at DESC LIMIT 1",
+                (lineage_id,),
+            )
+        else:
+            row = self.fetchone("SELECT payload FROM core_checkpoints ORDER BY created_at DESC LIMIT 1")
+        return json.loads(row["payload"]) if row else None
+
+    async def get_core_checkpoint(self, checkpoint_id: str) -> dict[str, Any] | None:
+        row = self.fetchone(
+            "SELECT payload FROM core_checkpoints WHERE checkpoint_id = ?", (checkpoint_id,)
+        )
+        return json.loads(row["payload"]) if row else None
+
+    async def record_affect_intervention(
+        self,
+        *,
+        intervention_id: str,
+        episode_id: str,
+        operator: str,
+        reason: str,
+        before_state: dict[str, Any],
+        after_state: dict[str, Any],
+    ) -> None:
+        with self._lock:
+            conn = self._conn()
+            conn.execute(
+                "INSERT INTO affect_interventions "
+                "(intervention_id, episode_id, operator, reason, before_state, after_state, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    intervention_id, episode_id, operator, reason,
+                    json.dumps(before_state, sort_keys=True), json.dumps(after_state, sort_keys=True),
+                    time.time(),
+                ),
+            )
+            conn.commit()
 
     # ── Facts (semantic memory with provenance + embeddings) ─────────────
 

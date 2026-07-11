@@ -2,6 +2,7 @@
 autonomous-action paths."""
 from __future__ import annotations
 
+import copy
 import json
 import re
 from collections.abc import Awaitable, Callable
@@ -224,6 +225,7 @@ class ToolLoopSession:
         self.on_stream_event = on_stream_event
         self.limit_message = limit_message
         self.tool_requests: list[ToolRequest] = []
+        self.model_inputs: list[dict[str, Any]] = []
         self._known_names = _schema_tool_names(self.tool_schemas)
         self._rounds = 0
         self._closed = False
@@ -257,6 +259,7 @@ class ToolLoopSession:
         kwargs: dict[str, Any] = {"temperature": self.temperature, "max_tokens": self.max_tokens}
         if tools:
             kwargs["tools"] = tools
+        self.model_inputs.append({"messages": copy.deepcopy(self.messages), "kwargs": copy.deepcopy(kwargs)})
         self._streamed_this_round = 0
         stream_fn = getattr(self.llm, "chat_stream", None) if self.on_stream_event is not None else None
         if stream_fn is None:

@@ -52,6 +52,7 @@ from conscio.llm.structured import structured_json
 from conscio.memory.consolidation import ConsolidationEngine
 from conscio.memory.store import MemoryStore
 from conscio.tools import ToolRegistry
+from conscio.tools.registry import ScopedToolRegistry
 
 EMPTY_RESPONSE_FALLBACK = (
     "I recorded your message, but my inference backend returned an empty response. "
@@ -96,6 +97,13 @@ class EpisodeResult:
     tick_trace: list[dict[str, Any]] = field(default_factory=list)
     constraint_report: list[dict[str, Any]] = field(default_factory=list)
     outcome_reason: str = ""  # TickDecision.reason for the episode-ending decision
+    # v3 additive fields (empty on the legacy V2 runtime):
+    causal_trace: list[dict[str, Any]] = field(default_factory=list)
+    checkpoint_reference: str = ""
+    predictions: list[dict[str, Any]] = field(default_factory=list)
+    affect_trajectory: list[dict[str, Any]] = field(default_factory=list)
+    action_outcomes: list[dict[str, Any]] = field(default_factory=list)
+    exact_model_inputs: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -362,7 +370,11 @@ class CognitiveRuntime:
         self.max_reflections = max(0, int(max_reflections))
         self.constraint_provider = constraint_provider
         self.context_settings = context_settings or ContextSettings()
-        self.prompt_assembler = PromptAssembler(self.context_settings)
+        self.prompt_assembler = PromptAssembler(
+            self.context_settings,
+            memory_enabled=self.ablation.memory_retrieval,
+            self_state_enabled=self.ablation.self_state_coupling,
+        )
         self.last_model_context = ""
         self.llm_fast = llm_fast
         self._appraisal_max_tokens = appraisal_max_tokens
@@ -375,6 +387,7 @@ class CognitiveRuntime:
             assembler=self.prompt_assembler,
             context_provider=context_provider,
             llm=llm,
+            memory_enabled=self.ablation.memory_retrieval,
         )
         self.autonomous_assembler = AutonomousPromptAssembler(
             max_dynamic_chars=self.context_settings.max_dynamic_chars,
@@ -384,11 +397,19 @@ class CognitiveRuntime:
             memory=self.memory,
             context_provider=context_provider,
             llm=llm,
+            memory_enabled=self.ablation.memory_retrieval,
         )
         self.chat_strategy.temperature = chat_temperature
         self.autonomous_strategy.temperature = autonomous_temperature
+        executor_tools: Any = self.tools
+        if not self.ablation.memory_retrieval:
+            executor_tools = ScopedToolRegistry(
+                self.tools,
+                denied_names=frozenset(),
+                denied_capabilities=frozenset({"memory_read", "memory_write"}),
+            )
         self.executor = EpisodeExecutor(
-            tools=self.tools,
+            tools=executor_tools,
             memory=self.memory,
             session_id=self.session_id,
             chat=self.chat_strategy,
@@ -453,6 +474,7 @@ class CognitiveRuntime:
             "episode_started", "runtime", event_source=event.source, carryover=len(carried)
         )
         self._ingest_event(event)
+        await self._prepare_episode(ts)
 
         for tick in range(1, self.max_ticks + 1):
             # Cooperative preemption: an interactive event is waiting and this
@@ -474,6 +496,10 @@ class CognitiveRuntime:
                 break
 
         return await self._finalize_episode(ts, start)
+
+    async def _prepare_episode(self, ts: _TickState) -> None:
+        """Extension seam for V3 pre-LLM recurrent cycles."""
+        return None
 
     async def _tick_sense(self, ts: _TickState) -> None:
         """1 SENSE — modules produce LOCAL evidence entries (no scores)."""
@@ -572,6 +598,8 @@ class CognitiveRuntime:
         """6 SELF-STATE — update from real signals."""
         ts.fresh_failures = self.prediction.episode_failures - ts.prev_failures
         ts.prev_failures = self.prediction.episode_failures
+        if not self.ablation.self_state_coupling:
+            return
         unresolved = len(self.workspace.unresolved_conflicts())
         self.self_state.update_tick(
             self.prediction.error_ema,

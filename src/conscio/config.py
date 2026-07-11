@@ -176,6 +176,7 @@ class ServiceConfig:
     max_reflections: int = 2
     attention_broadcast_limit: int = 6
     attention_char_budget: int = 4000
+    cognitive_cycles: int = 3
     subagents_enabled: bool = True
     subagent_max_rounds: int = 12
     subagent_max_seconds: float = 120.0
@@ -230,6 +231,8 @@ class ServiceConfig:
             raise ValueError(f"engine.tool_rounds_per_tick must be > 0 (got {self.tool_rounds_per_tick}).")
         if self.attention_char_budget < 0:
             raise ValueError(f"engine.attention_char_budget must be >= 0 (got {self.attention_char_budget}).")
+        if self.cognitive_cycles < 2:
+            raise ValueError(f"engine.cognitive_cycles must be >= 2 (got {self.cognitive_cycles}).")
         if self.attention_broadcast_limit <= 0:
             raise ValueError(f"engine.attention_broadcast_limit must be > 0 (got {self.attention_broadcast_limit}).")
         if self.max_actions_per_hour < 0:
@@ -543,6 +546,7 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         max_reflections=int(engine.get("max_reflections", 2)),
         attention_broadcast_limit=int(engine.get("attention_broadcast_limit", 6)),
         attention_char_budget=int(engine.get("attention_char_budget", 4000)),
+        cognitive_cycles=int(engine.get("cognitive_cycles", 3)),
         subagents_enabled=bool(subagents.get("enabled", True)),
         subagent_max_rounds=int(subagents.get("max_rounds", 12)),
         subagent_max_seconds=float(subagents.get("max_seconds", 120.0)),
@@ -662,6 +666,7 @@ tool_rounds_per_tick = 4
 max_reflections = 2
 attention_broadcast_limit = 6
 attention_char_budget = 4000
+cognitive_cycles = 3
 chat_temperature = 0.4
 autonomous_temperature = 0.3
 judge_max_tokens = 200

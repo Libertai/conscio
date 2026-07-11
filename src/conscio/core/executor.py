@@ -146,11 +146,13 @@ class ChatStrategy:
         context_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None,
         llm: Any = None,
         on_tool_observation: Callable[[ToolRequest, dict[str, Any]], Awaitable[None]] | None = None,
+        memory_enabled: bool = True,
     ) -> None:
         self.assembler = assembler or PromptAssembler()
         self.context_provider = context_provider
         self.llm = llm
         self.on_tool_observation = on_tool_observation
+        self.memory_enabled = memory_enabled
         self.last_model_context = ""
 
     async def build(
@@ -164,6 +166,8 @@ class ChatStrategy:
         self_state: SelfState | None = None,
     ) -> AssembledPrompt:
         state = await self.context_provider() if self.context_provider else {}
+        if not self.memory_enabled:
+            state = {**state, "recent_episodes": [], "relevant_memory": []}
         assembled = await self.assembler.assemble(
             user_input=event.content,
             workspace=workspace,
@@ -210,12 +214,14 @@ class AutonomousStrategy:
         context_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None,
         llm: Any = None,
         on_tool_observation: Callable[[ToolRequest, dict[str, Any]], Awaitable[None]] | None = None,
+        memory_enabled: bool = True,
     ) -> None:
         self.assembler = assembler or AutonomousPromptAssembler()
         self.memory = memory
         self.context_provider = context_provider
         self.llm = llm
         self.on_tool_observation = on_tool_observation
+        self.memory_enabled = memory_enabled
         self.last_model_context = ""
         self.last_tool_requests: list[ToolRequest] = []
 
@@ -230,6 +236,8 @@ class AutonomousStrategy:
         self_state: SelfState | None = None,
     ) -> AssembledPrompt:
         state = await self.context_provider() if self.context_provider else {}
+        if not self.memory_enabled:
+            state = {**state, "recent_episodes": [], "relevant_memory": []}
         # The tick-1 broadcast selection populates the WORKSPACE section of the
         # initial prompt (design §7/§9); broadcast=None (abl_no_attention)
         # falls back to the v1-ish prompt without a WORKSPACE section.
@@ -388,6 +396,11 @@ class EpisodeExecutor:
         """Append a reflection instruction to the live session (cache-safe)."""
         if self._session is not None:
             self._session.inject(text)
+
+    @property
+    def model_inputs(self) -> list[dict[str, Any]]:
+        """Exact messages and completion kwargs captured before every LLM call."""
+        return list(self._session.model_inputs) if self._session is not None else []
 
     async def _pre_tool_hook(self, request: ToolRequest) -> None:
         """Form the tool expectation BEFORE the tool executes."""
