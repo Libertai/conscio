@@ -90,10 +90,19 @@ max_reflections = 2
 attention_broadcast_limit = 6
 attention_char_budget = 4000
 cognitive_cycles = 3
+max_action_risk = 0.35
+affect_min_valence = -0.85
+affect_max_arousal = 0.90
+affect_exposure_cycles = 8
 chat_temperature = 0.4
 autonomous_temperature = 0.3
 judge_max_tokens = 200
 appraisal_max_tokens = 400
+
+[persistence_trial]
+enabled = false
+revision = "" # required exact git revision when enabled
+max_heartbeat_gap = 300
 
 [motivation]
 w_priority = 0.35

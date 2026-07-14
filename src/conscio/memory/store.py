@@ -34,7 +34,7 @@ _TRUST_BY_ORIGIN = {
     "quarantined": 0,
 }
 _CONF_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Schema v2 (fresh-start DB, no migration from v1):
 # - unified `episodes` keyed by the runtime's per-episode uuid (canonical id),
@@ -181,6 +181,16 @@ CREATE TABLE IF NOT EXISTS affect_interventions (
     reason        TEXT NOT NULL,
     before_state  TEXT NOT NULL,
     after_state   TEXT NOT NULL,
+    created_at    REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS prediction_adapter_promotions (
+    sequence      INTEGER PRIMARY KEY AUTOINCREMENT,
+    digest        TEXT NOT NULL UNIQUE,
+    base_model_version TEXT NOT NULL,
+    revision      INTEGER NOT NULL,
+    payload       TEXT NOT NULL,
+    approved_by   TEXT NOT NULL,
+    validation_loss REAL,
     created_at    REAL NOT NULL
 );
 """
@@ -566,7 +576,9 @@ class MemoryStore:
                 ),
             )
             conn.commit()
-            return int(cursor.lastrowid)
+            if cursor.lastrowid is None:
+                raise RuntimeError("cognitive event insert did not return a sequence")
+            return cursor.lastrowid
 
     async def cognitive_events(self, episode_id: str) -> list[dict[str, Any]]:
         rows = self._fetchall(
@@ -636,6 +648,55 @@ class MemoryStore:
                 ),
             )
             conn.commit()
+
+    async def record_prediction_adapter_promotion(
+        self,
+        *,
+        digest: str,
+        base_model_version: str,
+        revision: int,
+        payload: str,
+        approved_by: str,
+        validation_loss: float | None,
+    ) -> None:
+        """Append an explicitly approved adapter promotion; history is immutable."""
+        with self._lock:
+            conn = self._conn()
+            conn.execute(
+                "INSERT INTO prediction_adapter_promotions "
+                "(digest, base_model_version, revision, payload, approved_by, validation_loss, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    digest,
+                    base_model_version,
+                    revision,
+                    payload,
+                    approved_by,
+                    validation_loss,
+                    time.time(),
+                ),
+            )
+            conn.commit()
+
+    async def latest_prediction_adapter(self) -> dict[str, Any] | None:
+        row = self.fetchone(
+            "SELECT * FROM prediction_adapter_promotions ORDER BY sequence DESC LIMIT 1"
+        )
+        if row is not None:
+            row["state"] = json.loads(row["payload"])
+        return row
+
+    async def cognitive_event_history(self, limit: int = 100_000) -> list[dict[str, Any]]:
+        rows = self._fetchall(
+            "SELECT * FROM cognitive_events ORDER BY sequence DESC LIMIT ?", (max(1, limit),)
+        )
+        rows.reverse()
+        for row in rows:
+            row["payload"] = json.loads(row.get("payload") or "{}")
+            row["model_input"] = (
+                json.loads(row["model_input"]) if row.get("model_input") is not None else None
+            )
+        return rows
 
     # ── Facts (semantic memory with provenance + embeddings) ─────────────
 

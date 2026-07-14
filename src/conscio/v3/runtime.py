@@ -5,15 +5,18 @@ from __future__ import annotations
 from typing import Any
 
 from conscio.core.runtime import CognitiveRuntime, EpisodeResult, _TickState
+from conscio.core.tool_loop import ToolRequest
 from conscio.core.workspace import EntryType
 from conscio.v3.contracts import (
     ActionOutcome,
+    ActionProposal,
     AffectiveState,
     CognitiveEvent,
     CoreCheckpoint,
 )
 from conscio.v3.environment import EnvironmentAdapter, TextEnvironmentAdapter
-from conscio.v3.recurrent_core import HybridRecurrentCore
+from conscio.v3.learning import AdapterState
+from conscio.v3.recurrent_core import MODEL_VERSION, HybridRecurrentCore
 
 
 def _checkpoint_from_dict(data: dict[str, Any]) -> CoreCheckpoint:
@@ -38,21 +41,45 @@ class V3CognitiveRuntime(CognitiveRuntime):
         environment: EnvironmentAdapter | None = None,
         cognitive_cycles: int = 3,
         core_seed: int = 17,
+        max_action_risk: float = 0.35,
+        affect_min_valence: float = -0.85,
+        affect_max_arousal: float = 0.90,
+        affect_exposure_cycles: int = 8,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.environment = environment or TextEnvironmentAdapter()
         self.recurrent_core = HybridRecurrentCore(seed=core_seed)
         self.cognitive_cycles = max(2, int(cognitive_cycles))
+        self.max_action_risk = max(0.0, min(1.0, float(max_action_risk)))
+        self.affect_min_valence = max(-1.0, min(0.0, float(affect_min_valence)))
+        self.affect_max_arousal = max(0.0, min(1.0, float(affect_max_arousal)))
+        self.affect_exposure_cycles = max(1, int(affect_exposure_cycles))
+        self._unsafe_affect_cycles = 0
         self._episode_predictions: dict[str, list[dict[str, Any]]] = {}
         self._episode_affect: dict[str, list[dict[str, Any]]] = {}
         self._episode_proposals: dict[str, list[dict[str, Any]]] = {}
+        self._episode_selected_proposal: dict[str, dict[str, Any]] = {}
+        self._episode_initial_uncertainty: dict[str, float] = {}
+        self.prediction_adapter = AdapterState(base_model_version=MODEL_VERSION)
+        self.executor.authorize_tool = self._authorize_tool_proposal
 
     async def initialize(self) -> None:
         await super().initialize()
         latest = await self.memory.latest_core_checkpoint()
         if latest is not None:
             self.recurrent_core.restore(_checkpoint_from_dict(latest))
+        adapter = await self.memory.latest_prediction_adapter()
+        if adapter is not None:
+            self.activate_prediction_adapter(AdapterState.from_dict(adapter["state"]))
+
+    def activate_prediction_adapter(self, state: AdapterState) -> None:
+        """Activate only an explicitly promoted adapter for this exact base model."""
+        if state.base_model_version != MODEL_VERSION:
+            raise ValueError(
+                f"adapter base model {state.base_model_version!r} does not match {MODEL_VERSION!r}"
+            )
+        self.prediction_adapter = state
 
     async def _prepare_episode(self, ts: _TickState) -> None:
         observation = await self.environment.observe(ts.event, episode_id=ts.episode_id)
@@ -68,6 +95,7 @@ class V3CognitiveRuntime(CognitiveRuntime):
         self._episode_predictions[ts.episode_id] = []
         self._episode_affect[ts.episode_id] = []
         self._episode_proposals[ts.episode_id] = []
+        self._episode_initial_uncertainty[ts.episode_id] = self.self_state.uncertainty
         for cycle in results:
             if self.ablation.attention_gating:
                 await self._append(
@@ -93,6 +121,9 @@ class V3CognitiveRuntime(CognitiveRuntime):
                 )
             for prediction in cycle.predictions:
                 data = prediction.to_dict()
+                data["raw_probability"] = data["probability"]
+                data["probability"] = self.prediction_adapter.calibrate(prediction.probability)
+                data["adapter_digest"] = self.prediction_adapter.digest()
                 self._episode_predictions[ts.episode_id].append(data)
                 await self._append(ts.episode_id, "prediction", "world_model", data)
                 self.workspace.write(
@@ -115,10 +146,119 @@ class V3CognitiveRuntime(CognitiveRuntime):
                 salience=cycle.affect.arousal,
                 metadata={"need_errors": cycle.affect.need_errors},
             )
+            unsafe_affect = (
+                cycle.affect.valence <= self.affect_min_valence
+                or cycle.affect.arousal >= self.affect_max_arousal
+            )
+            self._unsafe_affect_cycles = self._unsafe_affect_cycles + 1 if unsafe_affect else 0
             for proposal in cycle.proposals:
                 data = proposal.to_dict()
                 self._episode_proposals[ts.episode_id].append(data)
                 await self._append(ts.episode_id, "action_proposal", proposal.specialist, data)
+        selected = self._select_proposal(self._episode_proposals[ts.episode_id])
+        self._episode_selected_proposal[ts.episode_id] = selected
+        await self._append(ts.episode_id, "intention_selected", "action_competition", selected)
+        self.workspace.write(
+            f"Selected {selected['action']}: {selected['rationale']}",
+            source="v3.action_competition",
+            type=EntryType.INTENTION,
+            priority=7,
+            confidence=float(selected.get("confidence", 0.0)),
+            metadata={"proposal_id": selected["proposal_id"], "risk": selected["risk"]},
+        )
+        if selected["action"] == "wait":
+            ts.executable = False
+        if self._unsafe_affect_cycles >= self.affect_exposure_cycles:
+            await self.set_safe_affect_state(
+                reason="automatic recovery after sustained affect exposure limit",
+                operator="runtime_safety",
+                episode_id=ts.episode_id,
+            )
+            self._unsafe_affect_cycles = 0
+
+    def _select_proposal(self, proposals: list[dict[str, Any]]) -> dict[str, Any]:
+        eligible = [
+            proposal
+            for proposal in proposals
+            if proposal.get("constraints_satisfied", False)
+            and float(proposal.get("risk", 1.0)) <= self.max_action_risk
+        ]
+        if eligible:
+            return max(
+                eligible,
+                key=lambda proposal: (
+                    float(proposal.get("utility", 0.0))
+                    + 0.2 * float(proposal.get("confidence", 0.0))
+                    - float(proposal.get("risk", 1.0))
+                ),
+            )
+        return {
+            "proposal_id": "safety_wait",
+            "specialist": "safety",
+            "action": "wait",
+            "rationale": "No proposal satisfied the active constraints and risk bound.",
+            "expected_outcomes": [],
+            "confidence": 1.0,
+            "utility": 0.0,
+            "risk": 0.0,
+            "constraints_satisfied": True,
+        }
+
+    async def _authorize_tool_proposal(self, request: ToolRequest) -> dict[str, Any]:
+        """Treat an LLM tool call as a proposal; policy and risk arbitration execute it."""
+        episode_id = self.workspace.current_episode
+        capabilities = set(self.executor.tools.tool_capabilities(request.name))
+        capability_risk = {
+            "memory_read": 0.05,
+            "memory_write": 0.10,
+            "self_management": 0.15,
+            "external_content": 0.15,
+            "local_read": 0.10,
+            "local_write": 0.20,
+            "self_modification": 0.25,
+            "network_read": 0.20,
+            "network_write": 0.30,
+            "delegation": 0.25,
+        }
+        risk = max((capability_risk.get(item, 0.20) for item in capabilities), default=0.05)
+        selected = self._episode_selected_proposal.get(episode_id, {})
+        allowed = selected.get("action") != "wait" and risk <= self.max_action_risk
+        reason = (
+            "approved by cognitive action competition and runtime tool policy"
+            if allowed
+            else "proposal exceeds the active cognitive risk bound or the selected intention is wait"
+        )
+        typed_proposal = ActionProposal(
+            specialist="llm_specialist",
+            action=f"tool:{request.name}",
+            rationale="Language specialist requested a tool; execution requires independent authorization.",
+            expected_outcomes=(f"observable {request.name} result",),
+            confidence=max(0.0, 1.0 - risk),
+            utility=0.5,
+            risk=risk,
+            constraints_satisfied=allowed,
+        )
+        proposal = {
+            "proposal": typed_proposal.to_dict(),
+            "tool": request.name,
+            "args": request.args,
+            "capabilities": sorted(capabilities),
+            "risk": risk,
+            "allowed": allowed,
+            "reason": reason,
+            "selected_intention_id": selected.get("proposal_id", ""),
+        }
+        await self._append(episode_id, "tool_proposal", "llm_specialist", proposal)
+        await self._append(episode_id, "tool_authorization", "action_competition", proposal)
+        self.workspace.write(
+            f"Tool proposal {request.name}: {'approved' if allowed else 'rejected'} ({reason})",
+            source="v3.action_competition",
+            type=EntryType.INTENTION,
+            priority=8,
+            confidence=1.0 - risk,
+            metadata=proposal,
+        )
+        return {"allowed": allowed, "reason": reason}
 
     async def _append(
         self,
@@ -145,16 +285,25 @@ class V3CognitiveRuntime(CognitiveRuntime):
 
     async def _finalize_episode(self, ts: _TickState, start: float) -> EpisodeResult:
         result = await super()._finalize_episode(ts, start)
-        proposals = self._episode_proposals.pop(ts.episode_id, [])
-        selected = next((p for p in proposals if p["action"] == result.selected_action), None)
-        if selected is None and proposals:
-            selected = proposals[0]
+        self._episode_proposals.pop(ts.episode_id, None)
+        selected = self._episode_selected_proposal.pop(ts.episode_id, None)
+        resolutions = await self._resolve_predictions(ts.episode_id, result)
+        selected_action = str((selected or {}).get("action", ""))
+        tool_failed = any(bool(item.get("error")) for item in result.tool_results)
         outcome = ActionOutcome(
             proposal_id=str((selected or {}).get("proposal_id", "executor")),
             action=result.selected_action,
-            succeeded=result.selected_action not in {"wait"} or bool(result.output),
+            succeeded=(
+                not selected_action
+                or result.selected_action == selected_action
+                or (selected_action == "act" and bool(result.tool_results))
+            )
+            and not tool_failed,
             observation=result.output[:1000],
-            prediction_errors={"runtime_prediction_errors": float(result.metrics.prediction_errors)},
+            prediction_errors={
+                **{item["prediction_id"]: item["error"] for item in resolutions if item["error"] is not None},
+                "runtime_prediction_errors": float(result.metrics.prediction_errors),
+            },
         )
         await self._append(ts.episode_id, "action_outcome", "environment", outcome.to_dict())
         checkpoint = self.recurrent_core.checkpoint()
@@ -168,6 +317,7 @@ class V3CognitiveRuntime(CognitiveRuntime):
             model_input={
                 "dynamic_context": result.model_context,
                 "calls": self.executor.model_inputs,
+                "prediction_adapter_digest": self.prediction_adapter.digest(),
                 "lesions": {
                     "memory": not self.ablation.memory_retrieval,
                     "self_model": not self.ablation.self_state_coupling,
@@ -184,6 +334,38 @@ class V3CognitiveRuntime(CognitiveRuntime):
         result.action_outcomes = [outcome.to_dict()]
         result.exact_model_inputs = self.executor.model_inputs
         return result
+
+    async def _resolve_predictions(
+        self, episode_id: str, result: EpisodeResult
+    ) -> list[dict[str, Any]]:
+        initial_uncertainty = self._episode_initial_uncertainty.pop(episode_id, 0.0)
+        resolutions: list[dict[str, Any]] = []
+        for prediction in self._episode_predictions.get(episode_id, []):
+            target = prediction["target"]
+            observed: bool | None
+            if target == "next_observation":
+                observed = bool(result.output.strip() or result.tool_results)
+            elif target == "future_uncertainty" and self.ablation.self_state_coupling:
+                observed = self.self_state.uncertainty <= initial_uncertainty
+            else:
+                observed = None
+            error = (
+                (float(prediction["probability"]) - float(observed)) ** 2
+                if observed is not None
+                else None
+            )
+            resolution = {
+                "prediction_id": prediction["prediction_id"],
+                "target": target,
+                "observed": observed,
+                "error": error,
+                "scoring_rule": "brier",
+            }
+            resolutions.append(resolution)
+            await self._append(episode_id, "prediction_resolution", "action_evaluation", resolution)
+            prediction["resolved"] = observed is not None
+            prediction["error"] = error
+        return resolutions
 
     async def set_safe_affect_state(
         self,
@@ -205,4 +387,16 @@ class V3CognitiveRuntime(CognitiveRuntime):
             before_state=before.to_dict(),
             after_state=after.to_dict(),
         )
+        if episode_id:
+            await self._append(
+                episode_id,
+                "affect_intervention",
+                operator,
+                {
+                    "intervention_id": intervention_id,
+                    "reason": reason,
+                    "before": before.to_dict(),
+                    "after": after.to_dict(),
+                },
+            )
         return after

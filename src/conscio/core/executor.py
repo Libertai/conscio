@@ -284,6 +284,7 @@ class EpisodeExecutor:
         max_tokens: int = 2400,
         prediction: PredictionEngine,
         on_stream_event: Callable[[dict[str, Any]], None] | None = None,
+        authorize_tool: Callable[[ToolRequest], Awaitable[dict[str, Any] | bool | None]] | None = None,
     ) -> None:
         self.tools = tools
         self.memory = memory
@@ -295,6 +296,7 @@ class EpisodeExecutor:
         self.max_tokens = max_tokens
         self.prediction = prediction
         self.on_stream_event = on_stream_event
+        self.authorize_tool = authorize_tool
         self.last_model_context = ""
         self.tool_requests: list[ToolRequest] = []
         self.tool_results: list[dict[str, Any]] = []
@@ -402,9 +404,12 @@ class EpisodeExecutor:
         """Exact messages and completion kwargs captured before every LLM call."""
         return list(self._session.model_inputs) if self._session is not None else []
 
-    async def _pre_tool_hook(self, request: ToolRequest) -> None:
+    async def _pre_tool_hook(self, request: ToolRequest) -> dict[str, Any] | bool | None:
         """Form the tool expectation BEFORE the tool executes."""
         self._pending_expectation = self.prediction.expect_tool(request, self._tick)
+        if self.authorize_tool is not None:
+            return await self.authorize_tool(request)
+        return None
 
     async def _on_tool_observation(self, request: ToolRequest, result: dict[str, Any]) -> None:
         self.tool_results.append({"tool": request.name, **result})

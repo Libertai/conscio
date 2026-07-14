@@ -33,8 +33,28 @@ but the service now instantiates `V3CognitiveRuntime`.
   prompt exposure, and self-state updates. Prediction and broadcast lesions also
   remove their V3 computations/exposure.
 - Condition-blind system instructions that do not disclose the architecture.
+- Pre-execution action competition. Language-model tool calls are typed proposals
+  that receive an independent risk decision before the existing policy registry
+  can execute them; rejected proposals become observable outcomes.
+- Prediction resolution against observable action results using Brier error.
+  Replay extraction is conservative and records rejected/ambiguous examples.
+- A bounded affine-logit prediction adapter trained only in shadow with an
+  episode-separated validation set, minimum-data and improvement gates, and
+  parameter delta/norm limits. `POST /learning/prediction-shadow` evaluates it;
+  `{"promote": true}` still promotes only a candidate that passes every gate.
+  Promotions are append-only, operator-attributed, model-version checked, and
+  restored after restart. Recurrent base weights are never mutated online.
+- Immutable preregistration manifests, sealed condition mappings, matched
+  single-lesion randomization, prompt-leakage validation, controlled unblinding,
+  exact-binomial identification analysis, and confidence calibration metrics.
+- Restart-safe persistence-trial logs with production 24-hour, 7-day, and
+  30-day stages. A stage needs a persisted heartbeat at its duration threshold,
+  continuous checkpoint lineage, required restarts, bounded heartbeat gaps, and
+  no uncontrolled affect/action escalation. Wall-clock age alone cannot pass.
+- Configurable affect exposure limits plus authenticated
+  `POST /control/affect-safe`; every automatic or operator recovery is audited.
 
-The bootstrap recurrent weights are fixed and untrained. This is intentional:
+The bootstrap recurrent base weights are fixed and untrained. This is intentional:
 the implementation creates reproducible prediction/outcome records from which
 synthetic curricula and replay training can be built, but it is not evidence
 that the core has learned a world model yet.
@@ -52,14 +72,15 @@ condition-blind analysis; neither is inserted into the model prompt.
 The following require training runs, preregistration, external review, or real
 elapsed-time trials and are not claimed complete by the code foundation:
 
-1. Train the recurrent core on synthetic text/tool curricula, then episode
-   replay; promote weights only after shadow validation.
-2. Add bounded adapter learning and prediction calibration from action outcomes.
-3. Preregister discriminating theory predictions and matched end-to-end lesion
-   experiments with condition-blind prompts.
-4. Establish independent research/welfare review before sustained affect work.
-5. Run and publish the 24-hour, 7-day, and 30-day restart-continuity trials.
-6. Consider a virtual environment only after the text-agent results are stable.
+1. Train recurrent base weights on synthetic text/tool curricula, then episode
+   replay; keep base-weight promotion offline and shadow validated.
+2. Freeze a study-specific manifest and execute the matched, condition-blind
+   experiments described in `research/v3-preregistration-template.md`.
+3. Establish independent research/welfare review before sustained affect work.
+4. Enable the persistence trial with an exact revision, then actually run and
+   publish the 24-hour, 7-day, and 30-day stages. The harness exists; no stage is
+   claimed passed yet.
+5. Consider a virtual environment only after the text-agent results are stable.
 
 No implementation result is presented as proof of phenomenal consciousness.
 Reports should state evidence for or against specific functional indicators.

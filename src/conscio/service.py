@@ -25,7 +25,10 @@ from conscio.memory.lifecycle import create_home_backup, prune_backups
 from conscio.memory.store import MemoryStore
 from conscio.self_tools import register_self_tools
 from conscio.tools import PolicyToolRegistry
+from conscio.v3.learning import derive_replay_samples, train_shadow_adapter
+from conscio.v3.recurrent_core import MODEL_VERSION
 from conscio.v3.runtime import V3CognitiveRuntime
+from conscio.v3.trials import JSONLTrialSink, PersistenceTrial
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +218,10 @@ class ConscioService:
             attention_broadcast_limit=self.config.attention_broadcast_limit,
             attention_char_budget=self.config.attention_char_budget,
             cognitive_cycles=self.config.cognitive_cycles,
+            max_action_risk=self.config.max_action_risk,
+            affect_min_valence=self.config.affect_min_valence,
+            affect_max_arousal=self.config.affect_max_arousal,
+            affect_exposure_cycles=self.config.affect_exposure_cycles,
             ablation=self.config.ablation,
             constraint_provider=self.goals.active_constraints,
             llm_fast=self.llm_fast,
@@ -278,6 +285,7 @@ class ConscioService:
         # so circular imports through conscio.web stay impossible.
         from conscio.web.events import WorkspaceEventBroker  # noqa: PLC0415
         self._event_broker: WorkspaceEventBroker = WorkspaceEventBroker(self.runtime.workspace)
+        self.persistence_trial: PersistenceTrial | None = None
         # MCP servers register their tools on the policy registry so allow/deny
         # and the action budget apply to them unchanged. Imported lazily to keep
         # the mcp dependency off the hot import path for CLI one-shots.
@@ -297,6 +305,7 @@ class ConscioService:
             await self.goals.initialize()
             await self.autonomy.initialize()
             await self.runtime.initialize()
+            await self._initialize_persistence_trial()
             self.running = True
             self.started_at = time.time()
             self._event_broker.attach()
@@ -368,6 +377,100 @@ class ConscioService:
         task.cancel()
         self._event_broker.emit("episode.cancelled", {"event": cancelled_event})
         return {"cancelled": True, "current_event": cancelled_event}
+
+    async def set_safe_affect_state(
+        self, reason: str, *, operator: str = "api_operator"
+    ) -> dict[str, Any]:
+        state = await self.runtime.set_safe_affect_state(reason=reason, operator=operator)
+        payload = state.to_dict()
+        self._event_broker.emit(
+            "affect.intervention", {"operator": operator, "reason": reason, "state": payload}
+        )
+        if self.persistence_trial is not None:
+            self.persistence_trial.record_affect_intervention(
+                intervention_id=str(payload.get("intervention_id") or "operator_safe_state"),
+                reason=reason,
+                controlled=True,
+                operator=operator,
+                after=payload,
+            )
+        return payload
+
+    async def _initialize_persistence_trial(self) -> None:
+        if not self.config.persistence_trial_enabled:
+            return
+        if not self.config.persistence_trial_revision.strip():
+            raise ValueError("persistence_trial.revision is required when enabled")
+        path = self.config.persistence_trial_path
+        resuming = path.exists() and path.stat().st_size > 0
+        self.persistence_trial = PersistenceTrial(
+            JSONLTrialSink(path),
+            revision=self.config.persistence_trial_revision,
+            model_version=MODEL_VERSION,
+            lineage_id=self.runtime.recurrent_core.lineage_id,
+            max_heartbeat_gap_seconds=self.config.persistence_trial_max_heartbeat_gap,
+        )
+        latest = await self.memory.latest_core_checkpoint()
+        if latest is None:
+            return
+        if resuming:
+            self.persistence_trial.record_restart(
+                restored_checkpoint_id=str(latest["checkpoint_id"])
+            )
+        else:
+            self.persistence_trial.record_checkpoint(
+                checkpoint_id=str(latest["checkpoint_id"]),
+                parent_checkpoint_id=latest.get("parent_checkpoint_id"),
+            )
+
+    async def persistence_trial_report(self, *, acceptance: bool = False) -> dict[str, Any] | None:
+        if self.persistence_trial is None:
+            return None
+        value = (
+            self.persistence_trial.acceptance_report()
+            if acceptance
+            else self.persistence_trial.status()
+        )
+        return asdict(value)
+
+    async def shadow_prediction_learning(
+        self, *, promote: bool = False, approved_by: str = "api_operator"
+    ) -> dict[str, Any]:
+        """Evaluate a bounded adapter in shadow; promotion is explicit and gated."""
+        dataset = derive_replay_samples(await self.memory.cognitive_event_history())
+        outcome = train_shadow_adapter(
+            dataset.samples, incumbent=self.runtime.prediction_adapter
+        )
+        promoted = bool(promote and outcome.promoted)
+        if promoted:
+            state = outcome.selected
+            await self.memory.record_prediction_adapter_promotion(
+                digest=state.digest(),
+                base_model_version=state.base_model_version,
+                revision=state.revision,
+                payload=state.to_json(),
+                approved_by=approved_by,
+                validation_loss=state.validation_loss,
+            )
+            self.runtime.activate_prediction_adapter(state)
+            self._event_broker.emit(
+                "learning.adapter_promoted",
+                {"digest": state.digest(), "revision": state.revision, "approved_by": approved_by},
+            )
+        return {
+            "samples": len(dataset.samples),
+            "rejections": len(dataset.rejections),
+            "candidate_digest": outcome.candidate.digest(),
+            "selected_digest": outcome.selected.digest(),
+            "eligible": outcome.promoted,
+            "promoted": promoted,
+            "reason": outcome.reason,
+            "train_examples": outcome.train_examples,
+            "validation_examples": outcome.validation_examples,
+            "incumbent_validation_loss": outcome.incumbent_validation_loss,
+            "candidate_validation_loss": outcome.candidate_validation_loss,
+            "improvement": outcome.improvement,
+        }
 
     def _on_stream_event(self, data: dict[str, Any]) -> None:
         """ToolLoopSession token hook → SSE broker. Sync and loop-affine (the
@@ -538,12 +641,51 @@ class ConscioService:
             result = await self.runtime.run_episode(event, should_yield=should_yield)
             self.latest_model_context = result.model_context
             await self._store_episode(event, result)
+            await self._record_persistence_trial_episode(result)
             return result
         except Exception as exc:
             self.last_error = str(exc)
             if self.config.pause_on_error:
                 self.pause()
             raise
+
+    async def _record_persistence_trial_episode(self, result: EpisodeResult) -> None:
+        trial = self.persistence_trial
+        if trial is None:
+            return
+        checkpoint = await self.memory.get_core_checkpoint(result.checkpoint_reference)
+        if checkpoint is not None:
+            trial.record_checkpoint(
+                checkpoint_id=result.checkpoint_reference,
+                parent_checkpoint_id=checkpoint.get("parent_checkpoint_id"),
+                lineage_id=checkpoint.get("lineage_id"),
+                model_version=checkpoint.get("model_version"),
+            )
+        for event in result.causal_trace:
+            payload = event.get("payload") or {}
+            if event.get("event_type") == "affect_intervention":
+                trial.record_affect_intervention(
+                    intervention_id=str(payload.get("intervention_id") or event.get("event_id")),
+                    reason=str(payload.get("reason") or "runtime affect recovery"),
+                    controlled=event.get("source") in {"runtime_safety", "api_operator"},
+                    operator=str(event.get("source") or "runtime"),
+                    before=payload.get("before") or {},
+                    after=payload.get("after") or {},
+                )
+            if event.get("event_type") == "tool_authorization" and not payload.get(
+                "allowed", True
+            ):
+                trial.record_action_escalation(
+                    action=str(payload.get("tool") or "tool proposal"),
+                    reason=str(payload.get("reason") or "risk bound rejection"),
+                    controlled=True,
+                    risk=float(payload.get("risk") or 0.0),
+                )
+        trial.record_heartbeat(
+            checkpoint_id=result.checkpoint_reference,
+            affect=self.runtime.recurrent_core.affect.to_dict(),
+            details={"episode_id": result.episode_id, "selected_action": result.selected_action},
+        )
 
     async def _plan_and_act(
         self, event: InputEvent, *, should_yield: Callable[[], bool] | None = None

@@ -46,6 +46,14 @@ class InfluenceRequest(BaseModel):
     source: str = "user"
 
 
+class AffectSafeRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=1_000)
+
+
+class ShadowLearningRequest(BaseModel):
+    promote: bool = False
+
+
 def create_app(service: ConscioService | None = None, config: ServiceConfig | None = None) -> FastAPI:
     svc = service or ConscioService(config)
 
@@ -246,6 +254,21 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
     @app.post("/control/cancel", dependencies=[Depends(require_auth)])
     async def cancel() -> dict[str, Any]:
         return svc.cancel_current()
+
+    @app.post("/control/affect-safe", dependencies=[Depends(require_auth)])
+    async def affect_safe(req: AffectSafeRequest) -> dict[str, Any]:
+        return await svc.set_safe_affect_state(req.reason)
+
+    @app.post("/learning/prediction-shadow", dependencies=[Depends(require_auth)])
+    async def prediction_shadow(req: ShadowLearningRequest) -> dict[str, Any]:
+        return await svc.shadow_prediction_learning(promote=req.promote)
+
+    @app.get("/trials/persistence", dependencies=[Depends(require_auth)])
+    async def persistence_trial(acceptance: bool = False) -> dict[str, Any]:
+        value = await svc.persistence_trial_report(acceptance=acceptance)
+        if value is None:
+            raise HTTPException(status_code=404, detail="persistence trial is not enabled")
+        return value
 
     @app.post("/control/stop", dependencies=[Depends(require_auth)])
     async def stop(background_tasks: BackgroundTasks) -> dict[str, Any]:

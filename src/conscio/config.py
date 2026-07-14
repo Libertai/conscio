@@ -177,6 +177,13 @@ class ServiceConfig:
     attention_broadcast_limit: int = 6
     attention_char_budget: int = 4000
     cognitive_cycles: int = 3
+    max_action_risk: float = 0.35
+    affect_min_valence: float = -0.85
+    affect_max_arousal: float = 0.90
+    affect_exposure_cycles: int = 8
+    persistence_trial_enabled: bool = False
+    persistence_trial_revision: str = ""
+    persistence_trial_max_heartbeat_gap: float = 300.0
     subagents_enabled: bool = True
     subagent_max_rounds: int = 12
     subagent_max_seconds: float = 120.0
@@ -195,6 +202,10 @@ class ServiceConfig:
     @property
     def lock_path(self) -> Path:
         return self.home / "service.lock"
+
+    @property
+    def persistence_trial_path(self) -> Path:
+        return self.home / "events" / "v3-persistence-trial.jsonl"
 
     @property
     def base_url(self) -> str:
@@ -233,6 +244,24 @@ class ServiceConfig:
             raise ValueError(f"engine.attention_char_budget must be >= 0 (got {self.attention_char_budget}).")
         if self.cognitive_cycles < 2:
             raise ValueError(f"engine.cognitive_cycles must be >= 2 (got {self.cognitive_cycles}).")
+        if not 0.0 <= self.max_action_risk <= 1.0:
+            raise ValueError(f"engine.max_action_risk must be in [0,1] (got {self.max_action_risk}).")
+        if not -1.0 <= self.affect_min_valence <= 0.0:
+            raise ValueError(
+                f"engine.affect_min_valence must be in [-1,0] (got {self.affect_min_valence})."
+            )
+        if not 0.0 <= self.affect_max_arousal <= 1.0:
+            raise ValueError(
+                f"engine.affect_max_arousal must be in [0,1] (got {self.affect_max_arousal})."
+            )
+        if self.affect_exposure_cycles <= 0:
+            raise ValueError(
+                f"engine.affect_exposure_cycles must be > 0 (got {self.affect_exposure_cycles})."
+            )
+        if self.persistence_trial_enabled and not self.persistence_trial_revision.strip():
+            raise ValueError("persistence_trial.revision is required when the trial is enabled.")
+        if self.persistence_trial_max_heartbeat_gap <= 0:
+            raise ValueError("persistence_trial.max_heartbeat_gap must be > 0.")
         if self.attention_broadcast_limit <= 0:
             raise ValueError(f"engine.attention_broadcast_limit must be > 0 (got {self.attention_broadcast_limit}).")
         if self.max_actions_per_hour < 0:
@@ -428,6 +457,7 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
     motivation = raw.get("motivation", {})
     mcp_raw = raw.get("mcp", {}).get("servers", {})
     subagents = raw.get("subagents", {})
+    persistence_trial = raw.get("persistence_trial", {})
     agent_raw = raw.get("agent", {})
     profile = _normalize_profile(agent_raw.get("profile", "research"))
     autonomous_vm = profile == "autonomous_vm"
@@ -547,6 +577,15 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         attention_broadcast_limit=int(engine.get("attention_broadcast_limit", 6)),
         attention_char_budget=int(engine.get("attention_char_budget", 4000)),
         cognitive_cycles=int(engine.get("cognitive_cycles", 3)),
+        max_action_risk=float(engine.get("max_action_risk", 0.35)),
+        affect_min_valence=float(engine.get("affect_min_valence", -0.85)),
+        affect_max_arousal=float(engine.get("affect_max_arousal", 0.90)),
+        affect_exposure_cycles=int(engine.get("affect_exposure_cycles", 8)),
+        persistence_trial_enabled=bool(persistence_trial.get("enabled", False)),
+        persistence_trial_revision=str(persistence_trial.get("revision") or ""),
+        persistence_trial_max_heartbeat_gap=float(
+            persistence_trial.get("max_heartbeat_gap", 300.0)
+        ),
         subagents_enabled=bool(subagents.get("enabled", True)),
         subagent_max_rounds=int(subagents.get("max_rounds", 12)),
         subagent_max_seconds=float(subagents.get("max_seconds", 120.0)),
@@ -667,10 +706,19 @@ max_reflections = 2
 attention_broadcast_limit = 6
 attention_char_budget = 4000
 cognitive_cycles = 3
+max_action_risk = 0.35
+affect_min_valence = -0.85
+affect_max_arousal = 0.90
+affect_exposure_cycles = 8
 chat_temperature = 0.4
 autonomous_temperature = 0.3
 judge_max_tokens = 200
 appraisal_max_tokens = 400
+
+[persistence_trial]
+enabled = false
+revision = "" # required exact git revision when enabled
+max_heartbeat_gap = 300
 
 [motivation]
 w_priority = 0.35

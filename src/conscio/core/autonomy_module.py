@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from conscio.core.context import provenance_marker
+from conscio.core.context import prompt_entry_label, provenance_marker
 from conscio.core.workspace import WorkspaceEntry
 from conscio.memory.store import MemoryStore
 
@@ -93,7 +93,7 @@ class AutonomousPromptAssembler:
             else:
                 for entry in broadcast_entries:
                     parts.append(
-                        f"  - {entry.source}/{entry.type.value}: {self._line(entry.content)}"
+                        f"  - {prompt_entry_label(entry)}: {self._line(entry.content)}"
                     )
             parts.append("")
         parts += [
@@ -203,5 +203,4 @@ class AutonomousPromptAssembler:
         text = "none" if value in (None, "") else str(value)
         text = " ".join(text.split())
         return text if len(text) <= limit else text[: limit - 3] + "..."
-
 

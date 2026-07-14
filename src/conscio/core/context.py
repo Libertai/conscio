@@ -182,7 +182,7 @@ class PromptAssembler:
             if not broadcast_entries:
                 return "none"
             return "\n".join(
-                f"- {entry.source}/{entry.type.value}: {_one_line(entry.content)}"
+                f"- {prompt_entry_label(entry)}: {_one_line(entry.content)}"
                 for entry in broadcast_entries
             )
         # Ablation attention_gating=False: v1 read() fallback.
@@ -192,13 +192,13 @@ class PromptAssembler:
         )
         if not entries:
             return "none"
-        return "\n".join(f"- {entry.source}/{entry.type.value}: {_one_line(entry.content)}" for entry in entries)
+        return "\n".join(f"- {prompt_entry_label(entry)}: {_one_line(entry.content)}" for entry in entries)
 
     def format_workspace_update(self, entries: list[WorkspaceEntry]) -> str:
         """Mid-episode broadcast delta, injected into a live session via
         ``ToolLoopSession.inject()`` — append-only ⇒ prefix-cache safe."""
         lines = [
-            f"- {entry.source}/{entry.type.value}: {_one_line(entry.content)}"
+            f"- {prompt_entry_label(entry)}: {_one_line(entry.content)}"
             for entry in entries
         ]
         return "WORKSPACE_UPDATE\n" + ("\n".join(lines) if lines else "none")
@@ -213,6 +213,13 @@ def provenance_marker(memory: dict[str, Any]) -> str:
     if origin == "user":
         return "[user] "
     return ""
+
+
+def prompt_entry_label(entry: WorkspaceEntry) -> str:
+    """Hide implementation identities from model input while traces retain them."""
+    if entry.source.startswith("v3."):
+        return "internal/signal"
+    return f"{entry.source}/{entry.type.value}"
 
 
 def _one_line(value: Any, limit: int = 320) -> str:

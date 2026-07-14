@@ -20,6 +20,7 @@ def _id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
 
 
+@dataclass(frozen=True)
 class Serializable:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

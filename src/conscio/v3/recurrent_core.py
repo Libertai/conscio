@@ -22,6 +22,7 @@ from conscio.v3.contracts import (
     CandidateContent,
     CognitiveEvent,
     CoreCheckpoint,
+    EpistemicKind,
     Prediction,
 )
 
@@ -80,7 +81,7 @@ class _Specialist:
             private_state_version=int(self.private["updates"]),
         )
 
-    def _kind(self) -> str:
+    def _kind(self) -> EpistemicKind:
         return "hypothesis"
 
     def _content(self, event: CognitiveEvent, previous: str, state: np.ndarray) -> str:
@@ -88,7 +89,7 @@ class _Specialist:
 
 
 class _PerceptionSpecialist(_Specialist):
-    def _kind(self) -> str:
+    def _kind(self) -> EpistemicKind:
         return "observation"
 
     def _content(self, event: CognitiveEvent, previous: str, state: np.ndarray) -> str:
@@ -96,7 +97,7 @@ class _PerceptionSpecialist(_Specialist):
 
 
 class _MemorySpecialist(_Specialist):
-    def _kind(self) -> str:
+    def _kind(self) -> EpistemicKind:
         return "belief"
 
     def _content(self, event: CognitiveEvent, previous: str, state: np.ndarray) -> str:
@@ -110,7 +111,7 @@ class _WorldSpecialist(_Specialist):
 
 
 class _SelfModelSpecialist(_Specialist):
-    def _kind(self) -> str:
+    def _kind(self) -> EpistemicKind:
         return "self_report"
 
     def _content(self, event: CognitiveEvent, previous: str, state: np.ndarray) -> str:
@@ -125,7 +126,7 @@ class _AffectSpecialist(_Specialist):
 
 
 class _PlanningSpecialist(_Specialist):
-    def _kind(self) -> str:
+    def _kind(self) -> EpistemicKind:
         return "idea"
 
     def _content(self, event: CognitiveEvent, previous: str, state: np.ndarray) -> str:
@@ -246,7 +247,7 @@ class HybridRecurrentCore:
         need_pressure = sum(abs(v) for v in self.affect.need_errors.values()) / 5.0
         answer = ActionProposal(
             specialist="planning",
-            action="answer" if event.source == "user" else "wait",
+            action="answer" if event.source == "user" else "act",
             rationale="Respond to the current observation using broadcast-accessible evidence.",
             expected_outcomes=("task-relevant response", "uncertainty does not increase"),
             confidence=0.70,

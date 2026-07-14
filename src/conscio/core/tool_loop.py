@@ -340,9 +340,25 @@ class ToolLoopSession:
             outcomes: list[tuple[str, ToolRequest, dict[str, Any]]] = []
             for call_id, request in requests:
                 self.tool_requests.append(request)
+                authorization: Any = None
                 if self.pre_tool_hook is not None:
-                    await self.pre_tool_hook(request)
-                result = await _execute_tool(self.tools, request, workspace)
+                    authorization = await self.pre_tool_hook(request)
+                rejected = authorization is False or (
+                    isinstance(authorization, dict) and not authorization.get("allowed", True)
+                )
+                if rejected:
+                    reason = (
+                        str(authorization.get("reason") or "cognitive action arbitration rejected it")
+                        if isinstance(authorization, dict)
+                        else "cognitive action arbitration rejected it"
+                    )
+                    result = {
+                        "output": f"Tool proposal rejected: {reason}",
+                        "error": True,
+                        "authorization_rejected": True,
+                    }
+                else:
+                    result = await _execute_tool(self.tools, request, workspace)
                 if self.on_tool_observation is not None:
                     await self.on_tool_observation(request, result)
                 outcomes.append((call_id, request, result))
