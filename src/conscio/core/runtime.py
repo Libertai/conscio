@@ -13,6 +13,7 @@ query; the executor's first step returns a final answer; structural constraint
 validation is deterministic; DECIDE answers and breaks). Pinned by
 ``tests/test_engine.py``.
 """
+
 from __future__ import annotations
 
 import json
@@ -59,9 +60,7 @@ EMPTY_RESPONSE_FALLBACK = (
     "I will retain the facts and continue."
 )
 
-INTERNAL_OBSERVATION_MESSAGE = (
-    "Internal observation recorded; no user-facing response needed."
-)
+INTERNAL_OBSERVATION_MESSAGE = "Internal observation recorded; no user-facing response needed."
 
 
 @dataclass
@@ -152,10 +151,9 @@ class PerceptionModule:
 
     async def tick(self, workspace: Workspace, state: SelfState) -> list[WorkspaceEntry]:
         entries = [
-            e for e in workspace.view()
-            if e.source == "input"
-            and e.type == EntryType.OBSERVATION
-            and not e.metadata.get("perceived")
+            e
+            for e in workspace.view()
+            if e.source == "input" and e.type == EntryType.OBSERVATION and not e.metadata.get("perceived")
         ]
         produced: list[WorkspaceEntry] = []
         for entry in entries:
@@ -422,6 +420,24 @@ class CognitiveRuntime:
         self.modules = modules or self._default_modules()
         self.consolidator = MemoryConsolidator(self.context_settings)
 
+    def _effective_self_state(self) -> SelfState:
+        """Return live self-state only when the self-model is in the graph.
+
+        A disabled self-state coupling is a structural lesion, not merely a
+        dropped prompt field.  Downstream APIs whose signatures require a
+        ``SelfState`` receive a fresh neutral null value so they cannot read,
+        retain, or mutate the live self-model through a legacy seam.
+        """
+        if self.ablation.self_state_coupling:
+            return self.self_state
+        return SelfState()
+
+    def _self_state_snapshot(self) -> dict[str, Any]:
+        """Expose no self-model fields while the structural lesion is active."""
+        if not self.ablation.self_state_coupling:
+            return {}
+        return self.self_state.to_dict()
+
     @property
     def _autonomous_module(self) -> AutonomousStrategy:
         """Compat shim: external consumers (service.py, eval/ci_suites.py) poke
@@ -468,11 +484,9 @@ class CognitiveRuntime:
             constraints=await self._fetch_constraints(event),  # once per episode
             metrics=EpisodeMetrics(),
             executable=event.source not in _OBSERVATION_ONLY_SOURCES,
-            prev_state=self.self_state.to_dict(),
+            prev_state=self._self_state_snapshot(),
         )
-        self.trace.record(
-            "episode_started", "runtime", event_source=event.source, carryover=len(carried)
-        )
+        self.trace.record("episode_started", "runtime", event_source=event.source, carryover=len(carried))
         self._ingest_event(event)
         await self._prepare_episode(ts)
 
@@ -504,16 +518,17 @@ class CognitiveRuntime:
     async def _tick_sense(self, ts: _TickState) -> None:
         """1 SENSE — modules produce LOCAL evidence entries (no scores)."""
         for module in self.modules:
-            module_entries = await module.tick(self.workspace, self.self_state)
+            module_entries = await module.tick(
+                self.workspace,
+                self._effective_self_state(),
+            )
             if module_entries:
                 self.trace.record("module_tick", module.name, produced=len(module_entries))
 
     async def _tick_appraise(self, ts: _TickState) -> None:
         """2 APPRAISE — centralized stamping of unappraised entries."""
         recent = [e for e in self.workspace.view() if e.appraised]
-        appraised = self.appraisal.appraise_entries(
-            self.workspace.unappraised(), self.self_state, recent
-        )
+        appraised = self.appraisal.appraise_entries(self.workspace.unappraised(), self._effective_self_state(), recent)
         if self.ablation.llm_appraisal and appraised and self.chat_strategy.llm is not None:
             if await self._llm_appraise(appraised):
                 ts.extra_llm_calls += 1
@@ -522,7 +537,7 @@ class CognitiveRuntime:
         """3 ATTEND — broadcast winners gate the model context."""
         ts.selection = self.attention.attend(
             self.workspace,
-            self.self_state,
+            self._effective_self_state(),
             self.trace,
             self.attention_schema,
             episode_id=ts.episode_id,
@@ -541,15 +556,13 @@ class CognitiveRuntime:
             event=ts.event,
             workspace=self.workspace,
             broadcast_new=broadcast_new,
-            state=self.self_state,
+            state=self._effective_self_state(),
             should_stop=should_yield,
         )
         ts.step = step
         if step.kind == "final":
             ts.pending_answer = step.text
-            ts.answer_expectation = self.prediction.expect_answer(
-                constraints=ts.constraints, tick=ts.tick
-            )
+            ts.answer_expectation = self.prediction.expect_answer(constraints=ts.constraints, tick=ts.tick)
             self._record_intention(ActionKind.ANSWER, step.text)
         elif step.kind == "control":
             self._record_intention(
@@ -561,9 +574,7 @@ class CognitiveRuntime:
                 # Deterministic offline path (autonomous, no LLM):
                 # nothing to execute — resolve to WAIT with the reason.
                 ts.output = step.text
-                ts.forced_decision = TickDecision(
-                    ActionKind.WAIT, "no LLM configured; nothing to execute"
-                )
+                ts.forced_decision = TickDecision(ActionKind.WAIT, "no LLM configured; nothing to execute")
             else:
                 # Empty LLM response: a recorded prediction failure;
                 # retry once next tick, then fall back to WAIT.
@@ -571,13 +582,9 @@ class CognitiveRuntime:
                 self._record_empty_failure(ts.constraints, ts.tick)
                 if ts.empty_steps >= 2:
                     ts.output = EMPTY_RESPONSE_FALLBACK
-                    ts.forced_decision = TickDecision(
-                        ActionKind.WAIT, "empty LLM response after retry"
-                    )
+                    ts.forced_decision = TickDecision(ActionKind.WAIT, "empty LLM response after retry")
                 else:
-                    ts.forced_decision = TickDecision(
-                        ActionKind.STEP, "empty LLM response; retrying once"
-                    )
+                    ts.forced_decision = TickDecision(ActionKind.STEP, "empty LLM response; retrying once")
 
     async def _tick_validate(self, ts: _TickState) -> None:
         """5 VALIDATE — constraint report + answer expectation resolution."""
@@ -589,9 +596,7 @@ class CognitiveRuntime:
         ts.final_report = report
         ts.metrics.constraint_violations += len(report.violations)
         if ts.answer_expectation is not None:
-            self.prediction.resolve_answer(
-                ts.answer_expectation, report, self.workspace, ts.tick
-            )
+            self.prediction.resolve_answer(ts.answer_expectation, report, self.workspace, ts.tick)
             ts.answer_expectation = None
 
     def _tick_self_state(self, ts: _TickState) -> None:
@@ -614,14 +619,12 @@ class CognitiveRuntime:
                 self.context_settings.max_dynamic_chars,
             )
         if ts.fresh_failures:
-            self.trace.record(
-                "prediction_error", "prediction_engine", error=self.self_state.prediction_error
-            )
+            self.trace.record("prediction_error", "prediction_engine", error=self.self_state.prediction_error)
 
     def _tick_decide(self, ts: _TickState) -> bool:
         """7 DECIDE — per-tick arbitration. Returns True when the episode ends."""
         decision = ts.forced_decision or self.action_selector.decide_tick(
-            state=self.self_state,
+            state=self._effective_self_state(),
             last_step=ts.step,
             pending_answer=ts.pending_answer,
             report=ts.report,
@@ -632,19 +635,19 @@ class CognitiveRuntime:
             session_live=ts.executable and not self.executor.exhausted,
         )
         self.trace.record("tick_decision", "action_selector", kind=decision.kind.value, tick=ts.tick)
-        state_now = self.self_state.to_dict()
-        ts.tick_trace.append(
-            {
-                "tick": ts.tick,
-                "decision": decision.kind.value,
-                "reason": decision.reason,
-                "broadcast": [f"{e.source}:{e.type.value}" for e in ts.selection.selected],
-                "llm_calls": self.executor.llm_calls - ts.prev_llm_calls,
-                "tool_rounds": len(self.executor.tool_requests) - ts.prev_tool_rounds,
-                "prediction_events": ts.fresh_failures,
-                "self_state_delta": _state_delta(ts.prev_state, state_now),
-            }
-        )
+        state_now = self._self_state_snapshot()
+        tick_record: dict[str, Any] = {
+            "tick": ts.tick,
+            "decision": decision.kind.value,
+            "reason": decision.reason,
+            "broadcast": [f"{e.source}:{e.type.value}" for e in ts.selection.selected],
+            "llm_calls": self.executor.llm_calls - ts.prev_llm_calls,
+            "tool_rounds": len(self.executor.tool_requests) - ts.prev_tool_rounds,
+            "prediction_events": ts.fresh_failures,
+        }
+        if self.ablation.self_state_coupling:
+            tick_record["self_state_delta"] = _state_delta(ts.prev_state, state_now)
+        ts.tick_trace.append(tick_record)
         ts.prev_llm_calls = self.executor.llm_calls
         ts.prev_tool_rounds = len(self.executor.tool_requests)
         ts.prev_state = state_now
@@ -694,7 +697,7 @@ class CognitiveRuntime:
             session_id=self.session_id,
             workspace_trace=self.workspace.format_context(limit=30),
             cognitive_trace=self.trace.format(limit=60),
-            self_state=self.self_state.to_dict(),
+            self_state=self._self_state_snapshot(),
             attention_schema=self.attention_schema.to_dict(),
             metrics=metrics,
             tool_results=list(self.executor.tool_results),
@@ -704,9 +707,7 @@ class CognitiveRuntime:
             constraint_report=ts.final_report.to_dicts() if ts.final_report is not None else [],
             outcome_reason=outcome.reason,
         )
-        result.memory_ids = await self.consolidator.consolidate(
-            self.memory, self.session_id, ts.event, result
-        )
+        result.memory_ids = await self.consolidator.consolidate(self.memory, self.session_id, ts.event, result)
         self.trace.record("episode_completed", "runtime", action=result.selected_action)
         return result
 
@@ -750,11 +751,12 @@ class CognitiveRuntime:
         )
 
     def _record_intention(self, kind: ActionKind, content: str) -> None:
+        state = self._effective_self_state()
         intention = Intention(
             kind=kind,
             content=content,
             source="executor",
-            confidence=max(0.0, min(1.0, 1.0 - self.self_state.uncertainty)),
+            confidence=max(0.0, min(1.0, 1.0 - state.uncertainty)),
         )
         self.workspace.write(
             f"Candidate {kind.value}: {content[:200]}",
@@ -767,10 +769,9 @@ class CognitiveRuntime:
             urgency=0.35,
             metadata={"intention": intention},
         )
-        self.self_state.current_intention = kind.value
-        self.trace.record(
-            "intention_selected", "action_selector", kind=kind.value, intention_source="executor"
-        )
+        if self.ablation.self_state_coupling:
+            self.self_state.current_intention = kind.value
+        self.trace.record("intention_selected", "action_selector", kind=kind.value, intention_source="executor")
 
     def _record_empty_failure(self, constraints: list[ParsedConstraint], tick: int) -> None:
         """An empty LLM response is a failed answer expectation, not a masked success."""
@@ -794,22 +795,14 @@ class CognitiveRuntime:
             lines.append(f"- {conflict.content}")
         if report is not None:
             for violation in report.violations:
-                lines.append(
-                    f"- constraint violated: {violation.text} ({violation.detail})"
-                )
-        lines.append(
-            "Revise your approach so the next answer satisfies every active constraint, "
-            "then respond again."
-        )
+                lines.append(f"- constraint violated: {violation.text} ({violation.detail})")
+        lines.append("Revise your approach so the next answer satisfies every active constraint, then respond again.")
         return "\n".join(lines)
 
     async def _llm_appraise(self, entries: list[WorkspaceEntry]) -> bool:
         """Flag-gated batched LLM appraisal pass: one scoring call per tick.
         Scores only ever raise the heuristic floors; failures fall back silently."""
-        payload = [
-            {"index": index, "content": entry.content[:300]}
-            for index, entry in enumerate(entries)
-        ]
+        payload = [{"index": index, "content": entry.content[:300]} for index, entry in enumerate(entries)]
         messages = [
             {"role": "system", "content": _LLM_APPRAISAL_SYSTEM_PROMPT},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},

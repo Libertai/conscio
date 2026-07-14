@@ -11,15 +11,11 @@ from conscio.service import ConscioService
 class V3WorldModelIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_shadow_training_does_not_mutate_the_live_core(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            service = ConscioService(
-                ServiceConfig(home=Path(tmp), autonomous=False, api_key="test-key")
-            )
+            service = ConscioService(ServiceConfig(home=Path(tmp), autonomous=False, api_key="test-key"))
             await service.start(acquire_lock=False, background=False)
             try:
                 before = await service.world_model_status()
-                result = await service.shadow_world_model_learning(
-                    promote=False, synthetic_episodes=64, seed=17
-                )
+                result = await service.shadow_world_model_learning(promote=False, synthetic_episodes=64, seed=17)
                 after = await service.world_model_status()
             finally:
                 await service.stop()
@@ -38,10 +34,11 @@ class V3WorldModelIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await first.start(acquire_lock=False, background=False)
             try:
                 before = await first.world_model_status()
-                result = await first.shadow_world_model_learning(
-                    promote=True, synthetic_episodes=64, seed=17
-                )
+                result = await first.shadow_world_model_learning(promote=True, synthetic_episodes=64, seed=17)
                 promoted = await first.world_model_status()
+                advanced_episode = await first.runtime.run_episode("advance the promoted recurrent lineage")
+                advanced = await first.world_model_status()
+                advanced_state = tuple(first.runtime.recurrent_core.deterministic)
             finally:
                 await first.stop()
 
@@ -49,6 +46,7 @@ class V3WorldModelIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await second.start(acquire_lock=False, background=False)
             try:
                 restored = await second.world_model_status()
+                restored_state = tuple(second.runtime.recurrent_core.deterministic)
                 migration_events = second.memory.fetchall(
                     "SELECT * FROM cognitive_events WHERE event_type = 'model_lineage_migration'"
                 )
@@ -62,7 +60,10 @@ class V3WorldModelIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(promoted["lineage_migrations"], 1)
         self.assertEqual(restored["model_version"], promoted["model_version"])
         self.assertEqual(restored["lineage_id"], promoted["lineage_id"])
-        self.assertEqual(restored["checkpoint_id"], promoted["checkpoint_id"])
+        self.assertEqual(advanced["checkpoint_id"], advanced_episode.checkpoint_reference)
+        self.assertNotEqual(advanced["checkpoint_id"], promoted["checkpoint_id"])
+        self.assertEqual(restored["checkpoint_id"], advanced["checkpoint_id"])
+        self.assertEqual(restored_state, advanced_state)
         self.assertEqual(len(migration_events), 1)
 
     async def test_world_model_api_is_authenticated_and_shadow_only_by_default(self) -> None:
@@ -74,9 +75,7 @@ class V3WorldModelIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.skipTest("fastapi/httpx are not installed")
 
         with tempfile.TemporaryDirectory() as tmp:
-            service = ConscioService(
-                ServiceConfig(home=Path(tmp), autonomous=False, api_key="test-key")
-            )
+            service = ConscioService(ServiceConfig(home=Path(tmp), autonomous=False, api_key="test-key"))
             await service.start(acquire_lock=False, background=False)
             try:
                 app = create_app(service=service)
@@ -114,9 +113,7 @@ class V3WorldModelIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await service.start(acquire_lock=False, background=False)
             try:
                 with self.assertRaisesRegex(RuntimeError, "persistence trial"):
-                    await service.shadow_world_model_learning(
-                        promote=True, synthetic_episodes=64, seed=17
-                    )
+                    await service.shadow_world_model_learning(promote=True, synthetic_episodes=64, seed=17)
             finally:
                 await service.stop()
 

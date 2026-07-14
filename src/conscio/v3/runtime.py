@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 from conscio.core.runtime import CognitiveRuntime, EpisodeResult, _TickState
 from conscio.core.tool_loop import ToolRequest
 from conscio.core.workspace import EntryType
+from conscio.tools.registry import ScopedToolRegistry
 from conscio.v3.contracts import (
+    CORE_CHECKPOINT_SCHEMA_VERSION,
     ActionOutcome,
     ActionProposal,
     AffectiveState,
@@ -15,12 +19,33 @@ from conscio.v3.contracts import (
     CoreCheckpoint,
 )
 from conscio.v3.environment import EnvironmentAdapter, TextEnvironmentAdapter
+from conscio.v3.language_bridge import LanguageSpecialistToolLoopBridge, trace_to_dict
+from conscio.v3.language_specialist import LanguageCallTrace
 from conscio.v3.learning import AdapterState
-from conscio.v3.recurrent_core import CoreWeightBundle, HybridRecurrentCore
+from conscio.v3.recurrent_core import (
+    LEGACY_SPECIALIST_ARCHITECTURE_ID,
+    MODEL_VERSION,
+    CoreWeightBundle,
+    HybridRecurrentCore,
+    migrate_legacy_specialist_checkpoint,
+)
 
 
 def _checkpoint_from_dict(data: dict[str, Any]) -> CoreCheckpoint:
     payload = dict(data)
+    schema_version = payload.get("schema_version", 1)
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+        raise ValueError("checkpoint schema_version must be an integer")
+    if schema_version == 1:
+        architecture = payload.get("specialist_architecture_id")
+        if architecture not in (None, LEGACY_SPECIALIST_ARCHITECTURE_ID):
+            raise ValueError("legacy checkpoint declares an incompatible architecture")
+        payload["specialist_architecture_id"] = LEGACY_SPECIALIST_ARCHITECTURE_ID
+    elif schema_version == CORE_CHECKPOINT_SCHEMA_VERSION:
+        if not payload.get("specialist_architecture_id"):
+            raise ValueError("current checkpoint is missing specialist architecture identity")
+    else:
+        raise ValueError(f"unsupported checkpoint schema version: {schema_version}")
     payload["affect"] = AffectiveState(**payload["affect"])
     payload["deterministic_state"] = tuple(payload["deterministic_state"])
     payload["stochastic_state"] = tuple(payload["stochastic_state"])
@@ -47,9 +72,31 @@ class V3CognitiveRuntime(CognitiveRuntime):
         affect_min_valence: float = -0.85,
         affect_max_arousal: float = 0.90,
         affect_exposure_cycles: int = 8,
+        strict_recurrent_workspace: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
+        self.strict_recurrent_workspace = bool(strict_recurrent_workspace)
+        if self.strict_recurrent_workspace:
+            # In strict research mode the legacy V2 modules and direct prompt
+            # retrieval surfaces cannot independently expose memory/self state.
+            # The language specialist sees those signals only when selected
+            # into the recurrent workspace broadcast.
+            self.modules = []
+            self.prompt_assembler.memory_enabled = False
+            self.prompt_assembler.self_state_enabled = False
+            self.chat_strategy.memory_enabled = False
+            self.autonomous_strategy.memory_enabled = False
+            # Prompt retrieval is not the only memory surface: registered
+            # memory tools otherwise remain in the language model's function
+            # schemas.  Scope the executor itself so both schema advertisement
+            # and delegated calls exclude direct reads and writes, while the
+            # recurrent specialists retain their private memory access.
+            self.executor.tools = ScopedToolRegistry(
+                self.tools,
+                denied_names=frozenset(),
+                denied_capabilities=frozenset({"memory_read", "memory_write"}),
+            )
         self.environment = environment or TextEnvironmentAdapter()
         self.recurrent_core = HybridRecurrentCore(seed=core_seed, weights=recurrent_weights)
         self.restore_checkpoint_id = restore_checkpoint_id
@@ -65,8 +112,38 @@ class V3CognitiveRuntime(CognitiveRuntime):
         self._episode_selected_proposal: dict[str, dict[str, Any]] = {}
         self._episode_initial_uncertainty: dict[str, float] = {}
         self._episode_initial_need_pressure: dict[str, float] = {}
-        self.prediction_adapter = AdapterState(base_model_version=self.recurrent_core.model_version)
+        self._episode_language_calls: dict[str, list[dict[str, Any]]] = {}
+        self._language_manifests: dict[str, dict[str, Any]] = {}
+        self._language_boundaries: list[LanguageSpecialistToolLoopBridge] = []
+        self.prediction_adapter = AdapterState(base_model_version=self.recurrent_core.runtime_identity)
         self.executor.authorize_tool = self._authorize_tool_proposal
+        for boundary in (self.chat_strategy.llm, self.autonomous_strategy.llm):
+            if isinstance(boundary, LanguageSpecialistToolLoopBridge):
+                self.attach_language_specialist(boundary)
+
+    def attach_language_specialist(self, boundary: LanguageSpecialistToolLoopBridge) -> None:
+        """Attach a typed language boundary and persist each call in sequence."""
+        if boundary not in self._language_boundaries:
+            self._language_boundaries.append(boundary)
+        self._language_manifests[boundary.manifest_digest] = boundary.manifest
+        boundary.set_trace_observer(self._record_language_trace)
+
+    @property
+    def language_manifest_digests(self) -> tuple[str, ...]:
+        return tuple(sorted(self._language_manifests))
+
+    async def _record_language_trace(self, trace: LanguageCallTrace) -> None:
+        episode_id = self.workspace.current_episode
+        if not episode_id:
+            raise RuntimeError("language specialist call occurred outside a cognitive episode")
+        structured = trace_to_dict(trace)
+        self._episode_language_calls.setdefault(episode_id, []).append(structured)
+        await self._append(
+            episode_id,
+            "language_specialist_call",
+            "language_specialist",
+            structured,
+        )
 
     async def initialize(self) -> None:
         await super().initialize()
@@ -78,23 +155,114 @@ class V3CognitiveRuntime(CognitiveRuntime):
         if self.restore_checkpoint_id and latest is None:
             raise ValueError(f"required migrated checkpoint not found: {self.restore_checkpoint_id}")
         if latest is not None:
-            self.recurrent_core.restore(_checkpoint_from_dict(latest))
-        adapter = await self.memory.latest_prediction_adapter(
-            base_model_version=self.recurrent_core.model_version
-        )
+            checkpoint = _checkpoint_from_dict(latest)
+            checkpoint = await self._resolve_specialist_checkpoint(checkpoint)
+            self.recurrent_core.restore(checkpoint)
+        adapter = await self.memory.latest_prediction_adapter(base_model_version=self.recurrent_core.runtime_identity)
         if adapter is not None:
             self.activate_prediction_adapter(AdapterState.from_dict(adapter["state"]))
 
+    async def _resolve_specialist_checkpoint(self, checkpoint: CoreCheckpoint) -> CoreCheckpoint:
+        if checkpoint.specialist_architecture_id == self.recurrent_core.specialist_architecture_id:
+            return checkpoint
+        if checkpoint.specialist_architecture_id != LEGACY_SPECIALIST_ARCHITECTURE_ID:
+            raise ValueError("unsupported specialist checkpoint architecture")
+        if checkpoint.model_version != MODEL_VERSION:
+            raise ValueError(
+                "trained legacy checkpoints require validated specialist-architecture "
+                "migration; trained v1 migration is not enabled"
+            )
+
+        migration_episode = f"specialist_migration_{checkpoint.checkpoint_id}"
+        transform = {
+            "kind": "six-to-eight-private-specialists-v1",
+            "source_architecture": LEGACY_SPECIALIST_ARCHITECTURE_ID,
+            "target_architecture": self.recurrent_core.specialist_architecture_id,
+            "neutral_initializations": (
+                "observation_metadata",
+                "episodic_index",
+                "semantic_cues",
+                "action_evaluation",
+            ),
+        }
+        transform_digest = hashlib.sha256(
+            json.dumps(transform, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        record = await self.memory.core_checkpoint_architecture_migration(checkpoint.checkpoint_id)
+        if record is None:
+            migrated = migrate_legacy_specialist_checkpoint(checkpoint)
+            # Validate every tensor, RNG field, affect value, and specialist
+            # envelope in a throwaway core before persistence.
+            probe = HybridRecurrentCore(
+                seed=0,
+                weights=self.recurrent_core.active_weight_bundle,
+            )
+            probe.restore(migrated)
+            record = await self.memory.migrate_core_checkpoint_architecture(
+                source_checkpoint_id=checkpoint.checkpoint_id,
+                source_architecture_id=checkpoint.specialist_architecture_id,
+                target_checkpoint=migrated,
+                runtime_identity=self.recurrent_core.runtime_identity,
+                transform_digest=transform_digest,
+            )
+        if (
+            record.source_checkpoint_id != checkpoint.checkpoint_id
+            or record.source_lineage_id != checkpoint.lineage_id
+            or record.source_architecture_id != checkpoint.specialist_architecture_id
+            or record.model_version != checkpoint.model_version
+            or record.runtime_identity != self.recurrent_core.runtime_identity
+            or record.transform_digest != transform_digest
+        ):
+            raise ValueError("specialist architecture migration does not match its source")
+        if checkpoint.model_version != self.recurrent_core.model_version:
+            raise ValueError("specialist migration weights do not match the active core")
+        restored_payload = await self.memory.get_core_checkpoint(record.target_checkpoint_id)
+        if restored_payload is None:
+            raise ValueError("specialist migration target checkpoint is missing")
+        restored = _checkpoint_from_dict(restored_payload)
+        if (
+            restored.parent_checkpoint_id != checkpoint.checkpoint_id
+            or restored.lineage_id != record.target_lineage_id
+            or restored.specialist_architecture_id != record.target_architecture_id
+            or restored.specialist_architecture_id != self.recurrent_core.specialist_architecture_id
+        ):
+            raise ValueError("specialist migration target linkage is inconsistent")
+        probe = HybridRecurrentCore(
+            seed=0,
+            weights=self.recurrent_core.active_weight_bundle,
+        )
+        probe.restore(restored)
+
+        prior_events = await self.memory.cognitive_events(migration_episode)
+        migration_events = [event for event in prior_events if event["event_type"] == "checkpoint_lineage_migration"]
+        if migration_events and migration_events[0]["payload"].get("migration_record_hash") != record.record_hash:
+            raise ValueError("specialist migration event disagrees with the registry")
+        if not migration_events:
+            await self._append(
+                migration_episode,
+                "checkpoint_lineage_migration",
+                "v3_specialist_schema_migrator",
+                {
+                    **record.to_dict(),
+                    "transform": transform,
+                    "migration_record_hash": record.record_hash,
+                },
+                checkpoint_id=record.target_checkpoint_id,
+            )
+        self.restore_checkpoint_id = record.target_checkpoint_id
+        return restored
+
     def activate_prediction_adapter(self, state: AdapterState) -> None:
         """Activate only an explicitly promoted adapter for this exact base model."""
-        if state.base_model_version != self.recurrent_core.model_version:
+        if state.base_model_version != self.recurrent_core.runtime_identity:
             raise ValueError(
                 f"adapter base model {state.base_model_version!r} does not match "
-                f"{self.recurrent_core.model_version!r}"
+                f"{self.recurrent_core.runtime_identity!r}"
             )
         self.prediction_adapter = state
 
     async def _prepare_episode(self, ts: _TickState) -> None:
+        self._episode_language_calls[ts.episode_id] = []
         observation = await self.environment.observe(ts.event, episode_id=ts.episode_id)
         await self.memory.append_cognitive_event(observation)
         results = self.recurrent_core.run_cycles(
@@ -108,14 +276,15 @@ class V3CognitiveRuntime(CognitiveRuntime):
         self._episode_predictions[ts.episode_id] = []
         self._episode_affect[ts.episode_id] = []
         self._episode_proposals[ts.episode_id] = []
-        self._episode_initial_uncertainty[ts.episode_id] = self.self_state.uncertainty
-        self._episode_initial_need_pressure[ts.episode_id] = self._need_pressure(
-            self.recurrent_core.affect
-        )
+        self._episode_initial_uncertainty[ts.episode_id] = self._effective_self_state().uncertainty
+        self._episode_initial_need_pressure[ts.episode_id] = self._need_pressure(self.recurrent_core.affect)
         for cycle in results:
             if self.ablation.attention_gating:
                 await self._append(
-                    ts.episode_id, "broadcast", "recurrent_workspace", cycle.broadcast.to_dict(),
+                    ts.episode_id,
+                    "broadcast",
+                    "recurrent_workspace",
+                    cycle.broadcast.to_dict(),
                     parent_event_id=observation.event_id,
                 )
             for candidate in cycle.broadcast.candidates:
@@ -163,8 +332,7 @@ class V3CognitiveRuntime(CognitiveRuntime):
                 metadata={"need_errors": cycle.affect.need_errors},
             )
             unsafe_affect = (
-                cycle.affect.valence <= self.affect_min_valence
-                or cycle.affect.arousal >= self.affect_max_arousal
+                cycle.affect.valence <= self.affect_min_valence or cycle.affect.arousal >= self.affect_max_arousal
             )
             self._unsafe_affect_cycles = self._unsafe_affect_cycles + 1 if unsafe_affect else 0
             for proposal in cycle.proposals:
@@ -196,8 +364,7 @@ class V3CognitiveRuntime(CognitiveRuntime):
         eligible = [
             proposal
             for proposal in proposals
-            if proposal.get("constraints_satisfied", False)
-            and float(proposal.get("risk", 1.0)) <= self.max_action_risk
+            if proposal.get("constraints_satisfied", False) and float(proposal.get("risk", 1.0)) <= self.max_action_risk
         ]
         if eligible:
             return max(
@@ -301,6 +468,9 @@ class V3CognitiveRuntime(CognitiveRuntime):
 
     async def _finalize_episode(self, ts: _TickState, start: float) -> EpisodeResult:
         result = await super()._finalize_episode(ts, start)
+        language_calls = self._episode_language_calls.pop(ts.episode_id, [])
+        for boundary in self._language_boundaries:
+            boundary.drain_traces()
         self._episode_proposals.pop(ts.episode_id, None)
         selected = self._episode_selected_proposal.pop(ts.episode_id, None)
         await self._record_tool_outcomes(ts.episode_id, result)
@@ -329,11 +499,20 @@ class V3CognitiveRuntime(CognitiveRuntime):
             ts.episode_id,
             "checkpoint",
             "recurrent_core",
-            {"lineage_id": checkpoint.lineage_id, "model_version": checkpoint.model_version},
+            {
+                "lineage_id": checkpoint.lineage_id,
+                "model_version": checkpoint.model_version,
+                "specialist_architecture_id": checkpoint.specialist_architecture_id,
+                "runtime_identity": self.recurrent_core.runtime_identity,
+                "language_manifest_digests": list(self.language_manifest_digests),
+            },
             checkpoint_id=checkpoint.checkpoint_id,
             model_input={
                 "dynamic_context": result.model_context,
                 "calls": self.executor.model_inputs,
+                "language_calls": language_calls,
+                "language_manifests": [self._language_manifests[digest] for digest in sorted(self._language_manifests)],
+                "runtime_identity": self.recurrent_core.runtime_identity,
                 "prediction_adapter_digest": self.prediction_adapter.digest(),
                 "lesions": {
                     "memory": not self.ablation.memory_retrieval,
@@ -349,7 +528,9 @@ class V3CognitiveRuntime(CognitiveRuntime):
         result.predictions = self._episode_predictions.pop(ts.episode_id, [])
         result.affect_trajectory = self._episode_affect.pop(ts.episode_id, [])
         result.action_outcomes = [outcome.to_dict()]
-        result.exact_model_inputs = self.executor.model_inputs
+        result.exact_model_inputs = (
+            [dict(call["request"]) for call in language_calls] if language_calls else self.executor.model_inputs
+        )
         return result
 
     async def _record_tool_outcomes(self, episode_id: str, result: EpisodeResult) -> None:
@@ -384,22 +565,17 @@ class V3CognitiveRuntime(CognitiveRuntime):
                 },
             )
 
-    async def _resolve_predictions(
-        self, episode_id: str, result: EpisodeResult
-    ) -> list[dict[str, Any]]:
+    async def _resolve_predictions(self, episode_id: str, result: EpisodeResult) -> list[dict[str, Any]]:
         initial_uncertainty = self._episode_initial_uncertainty.pop(episode_id, 0.0)
         initial_need_pressure = self._episode_initial_need_pressure.pop(episode_id, 0.0)
+        current_uncertainty = self._effective_self_state().uncertainty
         tool_attempted = bool(result.tool_results)
-        tool_succeeded = tool_attempted and not any(
-            bool(item.get("error")) for item in result.tool_results
-        )
-        action_succeeded = bool(result.output.strip() or tool_succeeded) and (
-            not tool_attempted or tool_succeeded
-        )
+        tool_succeeded = tool_attempted and not any(bool(item.get("error")) for item in result.tool_results)
+        action_succeeded = bool(result.output.strip() or tool_succeeded) and (not tool_attempted or tool_succeeded)
         before_affect = self.recurrent_core.affect
         after_affect = self.recurrent_core.apply_action_feedback(
             succeeded=action_succeeded,
-            uncertainty_delta=self.self_state.uncertainty - initial_uncertainty,
+            uncertainty_delta=current_uncertainty - initial_uncertainty,
         )
         affect_payload = {
             **after_affect.to_dict(),
@@ -423,14 +599,10 @@ class V3CognitiveRuntime(CognitiveRuntime):
             elif target == "homeostatic_affect_change":
                 observed = self._need_pressure(self.recurrent_core.affect) <= initial_need_pressure
             elif target == "future_uncertainty" and self.ablation.self_state_coupling:
-                observed = self.self_state.uncertainty <= initial_uncertainty
+                observed = current_uncertainty <= initial_uncertainty
             else:
                 observed = None
-            error = (
-                (float(prediction["probability"]) - float(observed)) ** 2
-                if observed is not None
-                else None
-            )
+            error = (float(prediction["probability"]) - float(observed)) ** 2 if observed is not None else None
             resolution = {
                 "prediction_id": prediction["prediction_id"],
                 "target": target,

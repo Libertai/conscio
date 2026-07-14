@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import tomllib
 from dataclasses import dataclass, field
@@ -94,6 +95,20 @@ class AgentConfig:
 
 
 @dataclass(frozen=True)
+class ResearchConfig:
+    """Opt-in controls for reproducible V3 primary research runs."""
+
+    strict_recurrent_workspace: bool = False
+    require_pinned_language_model: bool = False
+    language_provider: str = ""
+    language_endpoint_id: str = ""
+    language_model_revision: str = ""
+    language_weight_digest: str = ""
+    language_config_digest: str = ""
+    language_seed: int = 0
+
+
+@dataclass(frozen=True)
 class McpServerConfig:
     """One external MCP tool server from [mcp.servers.<name>].
 
@@ -168,6 +183,7 @@ class ServiceConfig:
     episode_timeout: float = 600.0  # wall-clock cap per episode; 0 disables
     message_timeout: float = 300.0  # HTTP caller deadline on /message; 0 disables
     agent: AgentConfig = field(default_factory=AgentConfig)
+    research: ResearchConfig = field(default_factory=ResearchConfig)
     ablation: AblationFlags = field(default_factory=AblationFlags)
     motivation: MotivationConfig = field(default_factory=MotivationConfig)
     mcp_servers: list[McpServerConfig] = field(default_factory=list)
@@ -251,21 +267,45 @@ class ServiceConfig:
         if not 0.0 <= self.max_action_risk <= 1.0:
             raise ValueError(f"engine.max_action_risk must be in [0,1] (got {self.max_action_risk}).")
         if not -1.0 <= self.affect_min_valence <= 0.0:
-            raise ValueError(
-                f"engine.affect_min_valence must be in [-1,0] (got {self.affect_min_valence})."
-            )
+            raise ValueError(f"engine.affect_min_valence must be in [-1,0] (got {self.affect_min_valence}).")
         if not 0.0 <= self.affect_max_arousal <= 1.0:
-            raise ValueError(
-                f"engine.affect_max_arousal must be in [0,1] (got {self.affect_max_arousal})."
-            )
+            raise ValueError(f"engine.affect_max_arousal must be in [0,1] (got {self.affect_max_arousal}).")
         if self.affect_exposure_cycles <= 0:
-            raise ValueError(
-                f"engine.affect_exposure_cycles must be > 0 (got {self.affect_exposure_cycles})."
-            )
+            raise ValueError(f"engine.affect_exposure_cycles must be > 0 (got {self.affect_exposure_cycles}).")
         if self.persistence_trial_enabled and not self.persistence_trial_revision.strip():
             raise ValueError("persistence_trial.revision is required when the trial is enabled.")
         if self.persistence_trial_max_heartbeat_gap <= 0:
             raise ValueError("persistence_trial.max_heartbeat_gap must be > 0.")
+        if self.research.language_seed < 0:
+            raise ValueError("research.language_seed must be non-negative.")
+        for name in ("language_weight_digest", "language_config_digest"):
+            value = getattr(self.research, name)
+            if value and re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                raise ValueError(f"research.{name} must be a lowercase SHA-256 digest.")
+        if self.research.require_pinned_language_model:
+            required = {
+                "language_provider": self.research.language_provider,
+                "language_endpoint_id": self.research.language_endpoint_id,
+                "language_model_revision": self.research.language_model_revision,
+                "language_weight_digest": self.research.language_weight_digest,
+                "language_config_digest": self.research.language_config_digest,
+            }
+            missing = [name for name, value in required.items() if not value.strip()]
+            if missing:
+                raise ValueError("pinned language research requires: " + ", ".join(sorted(missing)))
+            main_role = self.llm_roles.get("main")
+            if main_role is not None and main_role.fallback:
+                raise ValueError("pinned language research does not permit main-role fallbacks.")
+            if main_role is not None:
+                main_endpoint = self.llm_endpoints.get(main_role.endpoint)
+                if main_endpoint is not None and not main_endpoint.tool_choice:
+                    raise ValueError("pinned language research requires tool_choice support on the main endpoint.")
+            if not self.llm_base_url and not self.llm_endpoints:
+                raise ValueError("pinned language research requires a configured LLM endpoint.")
+            if self.ablation.constraint_judge or self.ablation.llm_appraisal:
+                raise ValueError("pinned language research requires constraint_judge and llm_appraisal to be disabled.")
+            if self.enable_contradiction_check:
+                raise ValueError("pinned language research requires enable_contradiction_check = false.")
         if self.attention_broadcast_limit <= 0:
             raise ValueError(f"engine.attention_broadcast_limit must be > 0 (got {self.attention_broadcast_limit}).")
         if self.max_actions_per_hour < 0:
@@ -304,9 +344,7 @@ class ServiceConfig:
             if endpoint.timeout <= 0 or endpoint.max_retries < 0:
                 raise ValueError(f"llm.endpoints.{name} timeout/max_retries out of range.")
             if endpoint.response_format not in _RESPONSE_FORMAT_MODES:
-                raise ValueError(
-                    f"llm.endpoints.{name}.response_format must be one of {_RESPONSE_FORMAT_MODES}."
-                )
+                raise ValueError(f"llm.endpoints.{name}.response_format must be one of {_RESPONSE_FORMAT_MODES}.")
         known_endpoints = set(self.llm_endpoints)
         if self.llm_base_url:
             known_endpoints.add("default")
@@ -316,15 +354,11 @@ class ServiceConfig:
             if not spec.endpoint and not self.llm_base_url:
                 # An empty role endpoint resolves to the implicit "default"
                 # endpoint, which only exists when [llm] base_url is set.
-                raise ValueError(
-                    f"llm.roles.{role}.endpoint is required (no [llm] base_url default endpoint)."
-                )
+                raise ValueError(f"llm.roles.{role}.endpoint is required (no [llm] base_url default endpoint).")
             targets = [(spec.endpoint, spec.model), *spec.fallback]
             for endpoint_name, _model in targets:
                 if endpoint_name and endpoint_name not in known_endpoints:
-                    raise ValueError(
-                        f"llm.roles.{role} references unknown endpoint '{endpoint_name}'."
-                    )
+                    raise ValueError(f"llm.roles.{role} references unknown endpoint '{endpoint_name}'.")
             if spec.max_tokens is not None and spec.max_tokens <= 0:
                 raise ValueError(f"llm.roles.{role}.max_tokens must be > 0.")
         if self.llm_endpoints and not self.llm_base_url and "main" not in self.llm_roles:
@@ -462,6 +496,7 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
     mcp_raw = raw.get("mcp", {}).get("servers", {})
     subagents = raw.get("subagents", {})
     persistence_trial = raw.get("persistence_trial", {})
+    research = raw.get("research", {})
     agent_raw = raw.get("agent", {})
     profile = _normalize_profile(agent_raw.get("profile", "research"))
     autonomous_vm = profile == "autonomous_vm"
@@ -483,12 +518,10 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         api_key=str(os.environ.get("CONSCIO_API_KEY") or service.get("api_key") or ""),
         web_password=str(os.environ.get("CONSCIO_WEB_PASSWORD") or service.get("web_password") or ""),
         web_secure_cookies=bool(
-            service.get("web_secure_cookies", False)
-            or os.environ.get("CONSCIO_WEB_SECURE_COOKIES") == "1"
+            service.get("web_secure_cookies", False) or os.environ.get("CONSCIO_WEB_SECURE_COOKIES") == "1"
         ),
         allow_insecure_public_bind=bool(
-            service.get("allow_insecure_public_bind", False)
-            or os.environ.get("CONSCIO_ALLOW_INSECURE_BIND") == "1"
+            service.get("allow_insecure_public_bind", False) or os.environ.get("CONSCIO_ALLOW_INSECURE_BIND") == "1"
         ),
         autonomous=bool(service.get("autonomous", True)),
         tick_interval=float(service.get("tick_interval", 30.0)),
@@ -511,10 +544,7 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
             or ""
         ),
         llm_model=str(
-            os.environ.get("LIBERTAI_MODEL")
-            or llm.get("model")
-            or service.get("llm_model")
-            or "deepseek-v4-flash"
+            os.environ.get("LIBERTAI_MODEL") or llm.get("model") or service.get("llm_model") or "deepseek-v4-flash"
         ),
         llm_timeout=float(llm.get("timeout", 120.0)),
         llm_max_retries=int(llm.get("max_retries", 2)),
@@ -552,6 +582,16 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         episode_timeout=float(service.get("episode_timeout", 600.0)),
         message_timeout=float(service.get("message_timeout", 300.0)),
         agent=agent_cfg,
+        research=ResearchConfig(
+            strict_recurrent_workspace=bool(research.get("strict_recurrent_workspace", False)),
+            require_pinned_language_model=bool(research.get("require_pinned_language_model", False)),
+            language_provider=str(research.get("language_provider") or ""),
+            language_endpoint_id=str(research.get("language_endpoint_id") or ""),
+            language_model_revision=str(research.get("language_model_revision") or ""),
+            language_weight_digest=str(research.get("language_weight_digest") or ""),
+            language_config_digest=str(research.get("language_config_digest") or ""),
+            language_seed=int(research.get("language_seed", 0)),
+        ),
         ablation=AblationFlags(
             attention_gating=bool(ablation.get("attention_gating", True)),
             memory_retrieval=bool(ablation.get("memory_retrieval", True)),
@@ -587,9 +627,7 @@ def load_config(path: str | Path | None = None) -> ServiceConfig:
         affect_exposure_cycles=int(engine.get("affect_exposure_cycles", 8)),
         persistence_trial_enabled=bool(persistence_trial.get("enabled", False)),
         persistence_trial_revision=str(persistence_trial.get("revision") or ""),
-        persistence_trial_max_heartbeat_gap=float(
-            persistence_trial.get("max_heartbeat_gap", 300.0)
-        ),
+        persistence_trial_max_heartbeat_gap=float(persistence_trial.get("max_heartbeat_gap", 300.0)),
         subagents_enabled=bool(subagents.get("enabled", True)),
         subagent_max_rounds=int(subagents.get("max_rounds", 12)),
         subagent_max_seconds=float(subagents.get("max_seconds", 120.0)),
@@ -723,6 +761,16 @@ appraisal_max_tokens = 400
 enabled = false
 revision = "" # required exact git revision when enabled
 max_heartbeat_gap = 300
+
+[research]
+strict_recurrent_workspace = false
+require_pinned_language_model = false
+language_provider = ""
+language_endpoint_id = ""
+language_model_revision = ""
+language_weight_digest = ""
+language_config_digest = ""
+language_seed = 0
 
 [motivation]
 w_priority = 0.35

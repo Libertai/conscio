@@ -7,12 +7,14 @@ replayed without importing a training framework.
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 SCHEMA_VERSION = 1
+CORE_CHECKPOINT_SCHEMA_VERSION = 2
 EpistemicKind = Literal["observation", "belief", "hypothesis", "idea", "self_report"]
 
 
@@ -77,13 +79,15 @@ class AffectiveState(Serializable):
     valence: float = 0.0
     arousal: float = 0.0
     controllability: float = 0.5
-    need_errors: dict[str, float] = field(default_factory=lambda: {
-        "epistemic_coherence": 0.0,
-        "competence": 0.0,
-        "integrity": 0.0,
-        "social_interaction": 0.0,
-        "continuity_of_memory": 0.0,
-    })
+    need_errors: dict[str, float] = field(
+        default_factory=lambda: {
+            "epistemic_coherence": 0.0,
+            "competence": 0.0,
+            "integrity": 0.0,
+            "social_interaction": 0.0,
+            "continuity_of_memory": 0.0,
+        }
+    )
     intervention_id: str | None = None
 
     def bounded(self) -> AffectiveState:
@@ -125,6 +129,7 @@ class CoreCheckpoint(Serializable):
     lineage_id: str
     parent_checkpoint_id: str | None
     model_version: str
+    specialist_architecture_id: str
     deterministic_state: tuple[float, ...]
     stochastic_state: tuple[float, ...]
     specialist_states: dict[str, dict[str, Any]]
@@ -133,4 +138,10 @@ class CoreCheckpoint(Serializable):
     event_sequence: int
     rng_state: dict[str, Any]
     created_at: float = field(default_factory=time.time)
-    schema_version: int = SCHEMA_VERSION
+    schema_version: int = CORE_CHECKPOINT_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.schema_version not in (1, CORE_CHECKPOINT_SCHEMA_VERSION):
+            raise ValueError("unsupported core checkpoint schema version")
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", self.specialist_architecture_id) is None:
+            raise ValueError("specialist_architecture_id must be content addressed")

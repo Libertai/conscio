@@ -1,5 +1,6 @@
 """Ablation-flag tests: each flag off reproduces the corresponding v1-ish
 behavior through the same runtime (one engine with flags, not forks)."""
+
 from __future__ import annotations
 
 import os
@@ -84,9 +85,7 @@ class AblationTests(unittest.IsolatedAsyncioTestCase):
 
         section = _workspace_section(fake.calls[0][1]["content"])
         # Every rendered line is a broadcast (GLOBAL) winner.
-        broadcast_lines = {
-            f"- {entry.source}/{entry.type.value}" for entry in runtime.workspace.global_entries
-        }
+        broadcast_lines = {f"- {entry.source}/{entry.type.value}" for entry in runtime.workspace.global_entries}
         for line in section.splitlines():
             prefix = line.split(":", 1)[0]
             self.assertIn(prefix, broadcast_lines)
@@ -117,9 +116,7 @@ class AblationTests(unittest.IsolatedAsyncioTestCase):
         section = prompt[len("WORKSPACE\n") : prompt.index("\n\nACTIVE_GOAL")]
         self.assertNotEqual(section.strip(), "none")
         # Every rendered line is a broadcast (GLOBAL) winner.
-        broadcast_lines = {
-            f"  - {entry.source}/{entry.type.value}" for entry in runtime.workspace.global_entries
-        }
+        broadcast_lines = {f"  - {entry.source}/{entry.type.value}" for entry in runtime.workspace.global_entries}
         for line in section.splitlines():
             prefix = line.split(":", 1)[0]
             self.assertIn(prefix, broadcast_lines)
@@ -164,9 +161,7 @@ class AblationTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await runtime.close()
 
-        self.assertFalse(
-            any(e.type == EntryType.MEMORY for e in runtime.workspace.view(second.episode_id))
-        )
+        self.assertFalse(any(e.type == EntryType.MEMORY for e in runtime.workspace.view(second.episode_id)))
 
         # Control: with the flag on (same DB pattern), episodic memory surfaces.
         with tempfile.TemporaryDirectory() as tmp:
@@ -181,9 +176,7 @@ class AblationTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await runtime.close()
 
-        self.assertTrue(
-            any(e.type == EntryType.MEMORY for e in runtime.workspace.view(second.episode_id))
-        )
+        self.assertTrue(any(e.type == EntryType.MEMORY for e in runtime.workspace.view(second.episode_id)))
 
     async def test_prediction_off_records_no_conflicts_for_failed_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -193,10 +186,12 @@ class AblationTests(unittest.IsolatedAsyncioTestCase):
                 return {"output": "boom", "error": True, "exit_code": 1}
 
             tools.register("bash", bash, "Execute shell commands.")
-            llm = ScriptedLLM([
-                tool_call("bash", '{"input": "explode"}'),
-                {"content": "Done despite the failure."},
-            ])
+            llm = ScriptedLLM(
+                [
+                    tool_call("bash", '{"input": "explode"}'),
+                    {"content": "Done despite the failure."},
+                ]
+            )
             runtime = CognitiveRuntime(
                 llm=llm,  # type: ignore[arg-type]
                 memory=MemoryStore(db_path=os.path.join(tmp, "no-prediction.db")),
@@ -211,9 +206,7 @@ class AblationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.selected_action, "answer")
         self.assertEqual(result.metrics.prediction_errors, 0)
-        self.assertFalse(
-            any(e.type == EntryType.CONFLICT for e in runtime.workspace.view(result.episode_id))
-        )
+        self.assertFalse(any(e.type == EntryType.CONFLICT for e in runtime.workspace.view(result.episode_id)))
 
     async def test_reflection_off_answers_with_violation_logged(self) -> None:
         # v1-ish: the constraint violation is recorded, not corrected.
@@ -256,12 +249,92 @@ class AblationTests(unittest.IsolatedAsyncioTestCase):
         entry = WorkspaceEntry(content="candidate", source="test", salience=0.5, novelty=0.5)
         calm = SelfState(uncertainty=0.0)
         anxious = SelfState(uncertainty=1.0)
-        self.assertEqual(
-            ablated.attention.score(entry, calm), ablated.attention.score(entry, anxious)
-        )
-        self.assertNotEqual(
-            coupled.attention.score(entry, calm), coupled.attention.score(entry, anxious)
-        )
+        self.assertEqual(ablated.attention.score(entry, calm), ablated.attention.score(entry, anxious))
+        self.assertNotEqual(coupled.attention.score(entry, calm), coupled.attention.score(entry, anxious))
+
+    async def test_self_state_lesion_never_passes_mutates_or_exposes_live_state(self) -> None:
+        neutral_snapshots: list[dict] = []
+
+        def record_state(state: SelfState) -> None:
+            self.assertIsNot(state, sentinel)
+            neutral_snapshots.append(state.to_dict())
+
+        class ProbeModule:
+            name = "self-state-boundary-probe"
+
+            async def tick(self, workspace, state):  # type: ignore[no-untyped-def]
+                record_state(state)
+                return []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = ScriptedLLM([{"content": "bounded"}])
+            runtime = CognitiveRuntime(
+                llm=fake,  # type: ignore[arg-type]
+                memory=MemoryStore(db_path=os.path.join(tmp, "true-self-lesion.db")),
+                modules=[ProbeModule()],  # type: ignore[list-item]
+                ablation=AblationFlags(self_state_coupling=False),
+            )
+            sentinel = SelfState(
+                active_goal="SECRET_SENTINEL_GOAL",
+                uncertainty=0.99,
+                conflict_level=0.99,
+                cognitive_load=0.99,
+                current_strategy="SECRET_STRATEGY",
+                attention_focus="SECRET_FOCUS",
+                current_intention="SECRET_INTENTION",
+                prediction_error=0.99,
+                known_limitations=["SECRET_LIMITATION"],
+                tool_failures={"secret_tool": 9},
+            )
+            sentinel_before = sentinel.to_dict()
+            runtime.self_state = sentinel
+
+            original_appraise = runtime.appraisal.appraise_entries
+
+            def appraise(entries, state, recent=None):  # type: ignore[no-untyped-def]
+                record_state(state)
+                return original_appraise(entries, state, recent)
+
+            runtime.appraisal.appraise_entries = appraise  # type: ignore[method-assign]
+
+            original_attend = runtime.attention.attend
+
+            def attend(workspace, state, trace, schema=None, **kwargs):  # type: ignore[no-untyped-def]
+                record_state(state)
+                return original_attend(workspace, state, trace, schema, **kwargs)
+
+            runtime.attention.attend = attend  # type: ignore[method-assign]
+
+            original_step = runtime.executor.step
+
+            async def step(**kwargs):  # type: ignore[no-untyped-def]
+                record_state(kwargs["state"])
+                return await original_step(**kwargs)
+
+            runtime.executor.step = step  # type: ignore[method-assign]
+
+            original_decide = runtime.action_selector.decide_tick
+
+            def decide_tick(**kwargs):  # type: ignore[no-untyped-def]
+                record_state(kwargs["state"])
+                return original_decide(**kwargs)
+
+            runtime.action_selector.decide_tick = decide_tick  # type: ignore[method-assign]
+
+            await runtime.initialize()
+            try:
+                result = await runtime.run_episode(InputEvent(content="Do not inspect the sentinel", source="user"))
+            finally:
+                await runtime.close()
+
+        self.assertGreaterEqual(len(neutral_snapshots), 5)
+        self.assertTrue(all(snapshot == SelfState().to_dict() for snapshot in neutral_snapshots))
+        self.assertEqual(sentinel.to_dict(), sentinel_before)
+        self.assertEqual(result.self_state, {})
+        self.assertTrue(result.tick_trace)
+        self.assertTrue(all("self_state_delta" not in tick for tick in result.tick_trace))
+        self.assertNotIn("SECRET_SENTINEL", result.model_context)
+        self.assertNotIn("self:", result.model_context)
 
     async def test_appraisal_off_returns_neutral_constants(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -272,9 +345,7 @@ class AblationTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertFalse(runtime.appraisal.enabled)
-        scores = runtime.appraisal.appraise(
-            "URGENT: an error happened now!", source="user", type=EntryType.OBSERVATION
-        )
+        scores = runtime.appraisal.appraise("URGENT: an error happened now!", source="user", type=EntryType.OBSERVATION)
         self.assertEqual(scores, dict(runtime.appraisal.NEUTRAL))
 
 

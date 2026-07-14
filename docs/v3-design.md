@@ -13,16 +13,43 @@ but the service now instantiates `V3CognitiveRuntime`.
   latent state, explicit world/self predictions, configurable multi-cycle
   processing, and immutable injectable weight bundles. The deterministic
   bootstrap remains the default until a candidate passes offline validation.
-- Private state for perception, memory, world-model, self-model, affect, and
-  planning specialists. Specialists communicate only through typed candidates
-  and the prior cycle's broadcast.
+- Schema-versioned private state for perception, autobiographical memory,
+  semantic belief, world prediction, self-model, affect, planning, and action
+  evaluation specialists. Specialists receive isolated inputs and communicate
+  only through typed candidates and the prior cycle's broadcast. Permanent and
+  per-cycle lesions remove construction/computation as well as exposure.
 - Append-only SQLite cognitive events and immutable, versioned checkpoints.
   Restarts restore recurrent state, random-generator state, specialist-private
   state, affect, cycle count, and lineage. A model-version mismatch requires an
   explicit migration rather than silently loading incompatible state.
+- Specialist architecture is versioned separately from recurrent weight
+  identity. Its content ID binds the ordered specialist set, each private-state
+  schema, and each concrete implementation identity, so an alternate specialist
+  requires an explicit lineage migration. Checkpoints from the earlier
+  six-specialist bootstrap are
+  deterministically converted into a new lineage with neutral initialization
+  for fields that did not previously exist; the source/target checkpoints and
+  content digests and transform digest are committed atomically to a
+  hash-chained migration registry, then exposed as a migration event. Reopening
+  the legacy checkpoint resolves the exact registered target instead of
+  migrating twice. Legacy trained checkpoints are rejected: no schema-v1
+  trained state can cross into this architecture until a separate evidence-bound
+  migration pipeline is implemented and validated. Prediction adapters are
+  keyed by the composite weight-plus-specialist runtime identity, so an adapter
+  learned under the old architecture is not silently reactivated.
 - Pre-execution action proposals and predictions, followed by recorded action
   outcomes and exact dynamic model context. `GET /episodes/{episode_id}` returns
   the episode, ordered causal events, and referenced checkpoint.
+- An opt-in pinned language-specialist boundary. Its immutable manifest binds
+  provider identity, endpoint identity, open-weight model/revision digests, and
+  the complete sampling policy. Each exact request and response is canonicalized,
+  authenticated, and appended to the episode trace. Generated function calls
+  cross the boundary only as inert typed proposals; they cannot execute a tool
+  or mutate cognitive state without the independent V3 authorization path.
+- An opt-in strict recurrent-workspace mode that disables the legacy V2 module
+  path and direct prompt retrieval of episodic/semantic memory and self-state.
+  Checkpointed specialist state and selected recurrent broadcasts remain the
+  cognitive path into the language specialist.
 - Causal affect dimensions and need errors with recovery dynamics. The need set
   deliberately excludes process survival and shutdown resistance. Operator
   safe-state changes are recorded in the append-only intervention audit.
@@ -65,6 +92,12 @@ but the service now instantiates `V3CognitiveRuntime`.
 - Immutable preregistration manifests, sealed condition mappings, matched
   single-lesion randomization, prompt-leakage validation, controlled unblinding,
   exact-binomial identification analysis, and confidence calibration metrics.
+- A causal workspace-mechanism harness with frozen broadcast
+  suppress/replace/inject interventions, constrained information load, sham
+  controls, matched assignments, true-lesion compute/exposure audits, paired
+  specialist/prediction/action effects, and immutable hash-chained run logs.
+  `HybridCoreMechanismAdapter` runs that protocol against the production
+  recurrent core rather than only a test double.
 - Restart-safe persistence-trial logs with production 24-hour, 7-day, and
   30-day stages. A stage needs a persisted heartbeat at its duration threshold,
   continuous checkpoint lineage, required restarts, bounded heartbeat gaps, and
@@ -101,10 +134,36 @@ during a persistence trial. Artifacts and audit logs live under
 ## Persistence invariants
 
 Every V3 episode orders its causal record as observation, recurrent cycles,
-predictions and proposals, executor outcome, then checkpoint. Event rows are
-insert-only. Checkpoints have a parent link and lineage id. The checkpoint event
-stores the exact model dynamic context and the hidden lesion manifest for later
-condition-blind analysis; neither is inserted into the model prompt.
+predictions and proposals, authenticated language-specialist calls, executor
+outcome, then checkpoint. Event rows are insert-only. Checkpoints have a parent
+link and lineage id. The checkpoint event stores the exact model dynamic
+context, canonical language requests/responses and manifests, and the hidden
+lesion manifest for later condition-blind analysis; hidden condition data is
+never inserted into the model prompt.
+
+## Primary research configuration
+
+Set `[research].strict_recurrent_workspace = true` to remove legacy prompt
+memory/self-state access and to omit direct `memory_read`/`memory_write` tools
+from the language-facing registry. Set `require_pinned_language_model = true`
+only with an exact provider/endpoint identity, model revision, weight digest,
+config digest, and deterministic seed. Primary mode rejects main-role fallback
+chains and auxiliary free-form LLM appraisal/judging. Periodic goal-review LLM
+calls and LLM summarization during consolidation are disabled; deterministic
+memory decay and size bounds remain active.
+
+Chat and autonomous sampling temperatures produce two separately digested
+manifests for the same pinned weights. Their digests appear in checkpoints and
+persistence-trial heartbeats. These controls improve replayability; they do not
+turn a model label or operator-supplied digest into independently verified
+provenance. Study operators must publish and verify the referenced artifacts.
+
+The immutable world-weight artifact ABI remains readable as originally
+published. Its historical feature-dimension metadata is distinct from the
+private-specialist checkpoint schema. Training evidence, runtime status,
+adapter selection, and persistence-trial identity include the current
+specialist architecture/content identity without rewriting old weight bytes or
+digests.
 
 ## Remaining research milestones
 

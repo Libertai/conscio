@@ -104,6 +104,16 @@ enabled = false
 revision = "" # required exact git revision when enabled
 max_heartbeat_gap = 300
 
+[research]
+strict_recurrent_workspace = false
+require_pinned_language_model = false
+language_provider = ""
+language_endpoint_id = ""
+language_model_revision = ""
+language_weight_digest = ""
+language_config_digest = ""
+language_seed = 0
+
 [motivation]
 w_priority = 0.35
 w_appetite = 0.35

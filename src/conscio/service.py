@@ -34,6 +34,12 @@ from conscio.v3.curriculum import (
     derive_curriculum_examples,
     generate_synthetic_curriculum,
 )
+from conscio.v3.language_bridge import LanguageSpecialistToolLoopBridge
+from conscio.v3.language_specialist import (
+    LanguageModelManifest,
+    LanguageSpecialist,
+    SamplingPolicy,
+)
 from conscio.v3.learning import AdapterState, derive_replay_samples, train_shadow_adapter
 from conscio.v3.model_registry import (
     ModelArtifact,
@@ -59,9 +65,7 @@ logger = logging.getLogger(__name__)
 
 # Tasks-state sentinel: "no pending task" is visible model state the agent must
 # resolve itself (the v1 filler task is gone).
-NO_PENDING_TASK_SENTINEL = (
-    "NO_PENDING_TASK — you must add_task or set_task_status before acting"
-)
+NO_PENDING_TASK_SENTINEL = "NO_PENDING_TASK — you must add_task or set_task_status before acting"
 
 # Self-management tools never count against the per-hour world-tool budget.
 _SELF_MANAGEMENT_TOOLS = {
@@ -83,7 +87,10 @@ _MAX_IN_MEMORY_EPISODES = 200
 _MAX_EVENT_FILES = 500
 
 _WORLD_MODEL_FAMILY = "conscio-v3-hybrid-rssm"
-_WORLD_SPECIALIST_DIMS = {
+# Immutable learned-weight ABI from the first world-model artifact schema.
+# These are feature-head dimensions, not the independently versioned private
+# specialist checkpoint envelopes introduced later.
+_WORLD_WEIGHT_FEATURE_DIMS = {
     "affect": 2,
     "memory": 2,
     "perception": 2,
@@ -101,7 +108,7 @@ def _world_model_spec(weights: WorldCoreWeights) -> WorldModelSpec:
         deterministic_dim=STATE_SIZE,
         stochastic_dim=STATE_SIZE,
         affect_dim=8,
-        specialist_dims=_WORLD_SPECIALIST_DIMS,
+        specialist_dims=_WORLD_WEIGHT_FEATURE_DIMS,
     )
 
 
@@ -125,6 +132,39 @@ def _loss_dict(loss: WorldLoss | None) -> dict[str, Any] | None:
     if loss is None:
         return None
     return {"total": loss.total, "by_target": dict(loss.by_target)}
+
+
+def _pinned_language_bridge(
+    client: Any,
+    config: ServiceConfig,
+    *,
+    temperature: float,
+    max_tokens: int,
+) -> LanguageSpecialistToolLoopBridge:
+    """Create one immutable language role for a primary research episode."""
+    research = config.research
+    manifest = LanguageModelManifest(
+        provider=research.language_provider,
+        endpoint_id=research.language_endpoint_id,
+        model_id=str(client.model),
+        model_revision=research.language_model_revision,
+        sampling=SamplingPolicy(
+            temperature=temperature,
+            top_p=1.0,
+            max_tokens=max_tokens,
+            seed=research.language_seed,
+        ),
+        weight_digest=research.language_weight_digest,
+        config_digest=research.language_config_digest,
+        research_use="primary",
+    )
+    specialist = LanguageSpecialist.from_chat_async(
+        client,
+        manifest=manifest,
+        provider=manifest.provider,
+        endpoint_id=manifest.endpoint_id,
+    )
+    return LanguageSpecialistToolLoopBridge(specialist)
 
 
 @dataclass
@@ -242,6 +282,7 @@ class ServiceLock:
 class ConscioService:
     def __init__(self, config: ServiceConfig | None = None) -> None:
         self.config = config or load_config()
+        self.config.validate()
         self.config.ensure_layout()
         self.world_model_registry = ModelArtifactRegistry(self.config.world_model_path)
         self.world_model_artifact = self.world_model_registry.latest_promoted()
@@ -261,8 +302,34 @@ class ConscioService:
         tools.load_builtins()
         register_self_tools(self, tools)
         self.router = LLMRouter.from_config(self.config)
-        llm = self.router.for_role("main") if self.router is not None else None
-        self.llm_fast = self.router.for_role("fast") if self.router is not None else None
+        raw_llm = self.router.for_role("main") if self.router is not None else None
+        main_max_tokens = (self.router.roles["main"].max_tokens if self.router is not None else None) or 2400
+        llm: Any = raw_llm
+        autonomous_llm: Any = raw_llm
+        self.language_bridges: tuple[LanguageSpecialistToolLoopBridge, ...] = ()
+        if self.config.research.require_pinned_language_model:
+            if raw_llm is None:  # validate() should make this unreachable.
+                raise ValueError("pinned language research requires a configured LLM")
+            chat_bridge = _pinned_language_bridge(
+                raw_llm,
+                self.config,
+                temperature=self.config.chat_temperature,
+                max_tokens=main_max_tokens,
+            )
+            autonomous_bridge = _pinned_language_bridge(
+                raw_llm,
+                self.config,
+                temperature=self.config.autonomous_temperature,
+                max_tokens=main_max_tokens,
+            )
+            llm = chat_bridge
+            autonomous_llm = autonomous_bridge
+            self.language_bridges = (chat_bridge, autonomous_bridge)
+            # Auxiliary free-form model calls are deliberately disabled in
+            # primary mode. Consolidation still performs deterministic decay.
+            self.llm_fast = None
+        else:
+            self.llm_fast = self.router.for_role("fast") if self.router is not None else None
         if self.router is not None:
             embed_client = self.router.for_role("embeddings")
             self.memory.embedder = LibertAIEmbedder(embed_client, model=embed_client.model)
@@ -298,30 +365,35 @@ class ConscioService:
             affect_min_valence=self.config.affect_min_valence,
             affect_max_arousal=self.config.affect_max_arousal,
             affect_exposure_cycles=self.config.affect_exposure_cycles,
+            strict_recurrent_workspace=self.config.research.strict_recurrent_workspace,
             ablation=self.config.ablation,
             constraint_provider=self.goals.active_constraints,
             llm_fast=self.llm_fast,
             chat_temperature=self.config.chat_temperature,
             autonomous_temperature=self.config.autonomous_temperature,
-            loop_max_tokens=(self.router.roles["main"].max_tokens if self.router is not None else None) or 2400,
+            loop_max_tokens=main_max_tokens,
             judge_max_tokens=self.config.judge_max_tokens,
             appraisal_max_tokens=self.config.appraisal_max_tokens,
         )
         # Strategy wiring through the public surface (no module-private pokes).
         self.runtime.autonomous_strategy.context_provider = self._autonomous_context_state
+        self.runtime.autonomous_strategy.llm = autonomous_llm
+        if isinstance(autonomous_llm, LanguageSpecialistToolLoopBridge):
+            self.runtime.attach_language_specialist(autonomous_llm)
         self.runtime.autonomous_strategy.on_tool_observation = self._on_autonomous_tool_observation
         self.runtime.chat_strategy.on_tool_observation = self._on_chat_tool_observation
         self.runtime.executor.on_stream_event = self._on_stream_event
         self.episode_taint = EpisodeTaint()
         # Periodic budgeted consolidation (design §4.3): one persistent engine
         # so _last_cycle_ts carries the summarization window across cycles.
-        self.consolidation = ConsolidationEngine(self.memory, llm=self.llm_fast or llm)
+        consolidation_llm = None if self.config.research.require_pinned_language_model else self.llm_fast or llm
+        self.consolidation = ConsolidationEngine(self.memory, llm=consolidation_llm)
         self._consolidation_ticks = 0
         self._add_only_ticks = 0
         self._current_goal_id: str | None = None
         self._current_project_id: str | None = None
         self._tick_count = 0
-        self._goal_review_interval = 10
+        self._goal_review_interval = 0 if self.config.research.require_pinned_language_model else 10
         self.lock = ServiceLock(self.config.lock_path)
         # Interactive events (user/API) outrank autonomous heartbeats; seq keeps
         # FIFO order within a priority class (QueuedEvent itself is not comparable).
@@ -347,6 +419,7 @@ class ConscioService:
         self.rate_limited_total = 0
         # Lazily imported like the broker: conscio.web must not import at module load.
         from conscio.web.ratelimit import TokenBucket  # noqa: PLC0415
+
         self.episode_bucket: TokenBucket | None = (
             TokenBucket(
                 capacity=float(self.config.episode_rate_burst),
@@ -360,12 +433,14 @@ class ConscioService:
         # SSE broker — attached on start(), detached on stop(). Imported lazily
         # so circular imports through conscio.web stay impossible.
         from conscio.web.events import WorkspaceEventBroker  # noqa: PLC0415
+
         self._event_broker: WorkspaceEventBroker = WorkspaceEventBroker(self.runtime.workspace)
         self.persistence_trial: PersistenceTrial | None = None
         # MCP servers register their tools on the policy registry so allow/deny
         # and the action budget apply to them unchanged. Imported lazily to keep
         # the mcp dependency off the hot import path for CLI one-shots.
         from conscio.mcp_client import McpManager  # noqa: PLC0415
+
         self.mcp = McpManager(
             self.config.mcp_servers,
             self.runtime.tools,
@@ -455,14 +530,10 @@ class ConscioService:
         self._event_broker.emit("episode.cancelled", {"event": cancelled_event})
         return {"cancelled": True, "current_event": cancelled_event}
 
-    async def set_safe_affect_state(
-        self, reason: str, *, operator: str = "api_operator"
-    ) -> dict[str, Any]:
+    async def set_safe_affect_state(self, reason: str, *, operator: str = "api_operator") -> dict[str, Any]:
         state = await self.runtime.set_safe_affect_state(reason=reason, operator=operator)
         payload = state.to_dict()
-        self._event_broker.emit(
-            "affect.intervention", {"operator": operator, "reason": reason, "state": payload}
-        )
+        self._event_broker.emit("affect.intervention", {"operator": operator, "reason": reason, "state": payload})
         if self.persistence_trial is not None:
             self.persistence_trial.record_affect_intervention(
                 intervention_id=str(payload.get("intervention_id") or "operator_safe_state"),
@@ -512,9 +583,7 @@ class ConscioService:
             return
         migration = self.world_model_registry.latest_lineage_migration()
         if migration is None or migration.target_artifact_digest != active.digest:
-            raise RuntimeError(
-                "active trained world model has no verified checkpoint-lineage migration"
-            )
+            raise RuntimeError("active trained world model has no verified checkpoint-lineage migration")
         checkpoint = await self.memory.get_core_checkpoint(migration.target_checkpoint_id)
         if checkpoint is None:
             raise RuntimeError("migrated world-model checkpoint is missing from the state store")
@@ -523,7 +592,11 @@ class ConscioService:
             or checkpoint.get("lineage_id") != migration.target_lineage_id
         ):
             raise RuntimeError("migrated checkpoint does not match the active world-model artifact")
-        self.runtime.restore_checkpoint_id = migration.target_checkpoint_id
+        lineage_head = await self.memory.core_checkpoint_lineage_head(
+            root_checkpoint_id=migration.target_checkpoint_id,
+            lineage_id=migration.target_lineage_id,
+        )
+        self.runtime.restore_checkpoint_id = str(lineage_head["checkpoint_id"])
 
     async def world_model_status(self) -> dict[str, Any]:
         active = self.world_model_registry.latest_promoted()
@@ -536,6 +609,10 @@ class ConscioService:
             "revision": self.world_weights.revision,
             "lineage_id": self.runtime.recurrent_core.lineage_id,
             "checkpoint_id": self.runtime.recurrent_core.parent_checkpoint_id,
+            "specialist_architecture_id": (self.runtime.recurrent_core.specialist_architecture_id),
+            "runtime_identity": self.runtime.recurrent_core.runtime_identity,
+            "strict_recurrent_workspace": self.runtime.strict_recurrent_workspace,
+            "language_manifest_digests": list(self.runtime.language_manifest_digests),
             "promotion_records": len(self.world_model_registry.promotion_records()),
             "lineage_migrations": len(migrations),
             "latest_migration": migrations[-1].to_dict() if migrations else None,
@@ -559,9 +636,7 @@ class ConscioService:
             events = await self.memory.cognitive_event_history()
             derived = derive_curriculum_examples(events)
             synthetic = generate_synthetic_curriculum(seed=seed, episodes=synthetic_episodes)
-            accepted_recorded, recorded_examples, incomplete_episodes = self._recorded_world_examples(
-                derived.examples
-            )
+            accepted_recorded, recorded_examples, incomplete_episodes = self._recorded_world_examples(derived.examples)
             curriculum = (*synthetic, *accepted_recorded)
             training_examples = (
                 *examples_from_curriculum(synthetic),
@@ -593,7 +668,13 @@ class ConscioService:
                     candidate_digest=candidate_artifact.digest,
                     incumbent_digest=active.digest,
                     dataset_digest=manifest.dataset_digest.removeprefix("sha256:"),
-                    protocol_digest=_sha256_json(asdict(settings)),
+                    protocol_digest=_sha256_json(
+                        {
+                            "settings": asdict(settings),
+                            "specialist_architecture_id": (self.runtime.recurrent_core.specialist_architecture_id),
+                            "runtime_identity": (self.runtime.recurrent_core.runtime_identity),
+                        }
+                    ),
                     metric_name="joint_brier_loss",
                     candidate_score=candidate_loss.total,
                     incumbent_score=incumbent_loss.total,
@@ -631,6 +712,8 @@ class ConscioService:
                 "candidate_validation_loss": _loss_dict(candidate_loss),
                 "diagnostics": asdict(outcome.diagnostics) if outcome.diagnostics else None,
                 "active_model": self.runtime.recurrent_core.model_version,
+                "active_runtime_identity": self.runtime.recurrent_core.runtime_identity,
+                "specialist_architecture_id": (self.runtime.recurrent_core.specialist_architecture_id),
                 "llm_training_reachable": False,
             }
 
@@ -663,8 +746,7 @@ class ConscioService:
             # cycle but only one action/tool outcome. Select the latest causal
             # record from each family to form the completed action window.
             episode_records = tuple(
-                max(by_family[family], key=lambda item: (item.step, item.example_id))
-                for family in sorted(required)
+                max(by_family[family], key=lambda item: (item.step, item.example_id)) for family in sorted(required)
             )
             try:
                 converted = examples_from_curriculum(episode_records)
@@ -735,15 +817,11 @@ class ConscioService:
             self.last_error = f"world-model promotion requires operator recovery: {exc}"
             self.pause()
             raise
-        migrated_core = HybridRecurrentCore(
-            seed=0, lineage_id=target_lineage_id, weights=candidate
-        )
+        migrated_core = HybridRecurrentCore(seed=0, lineage_id=target_lineage_id, weights=candidate)
         migrated_core.restore(target_checkpoint)
         self.runtime.recurrent_core = migrated_core
         self.runtime.restore_checkpoint_id = target_checkpoint.checkpoint_id
-        self.runtime.prediction_adapter = AdapterState(
-            base_model_version=candidate.model_version
-        )
+        self.runtime.prediction_adapter = AdapterState(base_model_version=migrated_core.runtime_identity)
         self.world_weights = candidate
         self.world_model_artifact = candidate_artifact
         await self.memory.append_cognitive_event(
@@ -784,7 +862,7 @@ class ConscioService:
         self.persistence_trial = PersistenceTrial(
             JSONLTrialSink(path),
             revision=self.config.persistence_trial_revision,
-            model_version=self.runtime.recurrent_core.model_version,
+            model_version=self.runtime.recurrent_core.runtime_identity,
             lineage_id=self.runtime.recurrent_core.lineage_id,
             max_heartbeat_gap_seconds=self.config.persistence_trial_max_heartbeat_gap,
         )
@@ -792,9 +870,7 @@ class ConscioService:
         if latest is None:
             return
         if resuming:
-            self.persistence_trial.record_restart(
-                restored_checkpoint_id=str(latest["checkpoint_id"])
-            )
+            self.persistence_trial.record_restart(restored_checkpoint_id=str(latest["checkpoint_id"]))
         else:
             self.persistence_trial.record_checkpoint(
                 checkpoint_id=str(latest["checkpoint_id"]),
@@ -804,11 +880,7 @@ class ConscioService:
     async def persistence_trial_report(self, *, acceptance: bool = False) -> dict[str, Any] | None:
         if self.persistence_trial is None:
             return None
-        value = (
-            self.persistence_trial.acceptance_report()
-            if acceptance
-            else self.persistence_trial.status()
-        )
+        value = self.persistence_trial.acceptance_report() if acceptance else self.persistence_trial.status()
         return asdict(value)
 
     async def shadow_prediction_learning(
@@ -816,9 +888,7 @@ class ConscioService:
     ) -> dict[str, Any]:
         """Evaluate a bounded adapter in shadow; promotion is explicit and gated."""
         dataset = derive_replay_samples(await self.memory.cognitive_event_history())
-        outcome = train_shadow_adapter(
-            dataset.samples, incumbent=self.runtime.prediction_adapter
-        )
+        outcome = train_shadow_adapter(dataset.samples, incumbent=self.runtime.prediction_adapter)
         promoted = bool(promote and outcome.promoted)
         if promoted:
             state = outcome.selected
@@ -879,9 +949,7 @@ class ConscioService:
         return allowed, retry_after
 
     async def submit_message(self, content: str, *, source: str = "user", ref: str = "") -> EpisodeResult:
-        result = await self._submit_event(
-            InputEvent(content=content, source=source, event_type="message"), ref=ref
-        )
+        result = await self._submit_event(InputEvent(content=content, source=source, event_type="message"), ref=ref)
         assert result is not None
         return result
 
@@ -965,9 +1033,7 @@ class ConscioService:
                 self.last_error = "episode_cancelled"
             except TimeoutError:
                 if not item.future.done():
-                    item.future.set_exception(
-                        EpisodeCancelled(f"episode exceeded {self.config.episode_timeout:.0f}s")
-                    )
+                    item.future.set_exception(EpisodeCancelled(f"episode exceeded {self.config.episode_timeout:.0f}s"))
                 self.last_error = "episode_timeout"
             except Exception as exc:
                 if not item.future.done():
@@ -1003,17 +1069,13 @@ class ConscioService:
             try:
                 async with asyncio.timeout(self.config.episode_timeout or None):
                     if autonomous:
-                        return await self._plan_and_act(
-                            event, should_yield=lambda: self._pending_interactive > 0
-                        )
+                        return await self._plan_and_act(event, should_yield=lambda: self._pending_interactive > 0)
                     return await self._run_episode(event)
             finally:
                 self.current_event = ""
                 self._current_ref = ""
 
-    async def _run_episode(
-        self, event: InputEvent, *, should_yield: Callable[[], bool] | None = None
-    ) -> EpisodeResult:
+    async def _run_episode(self, event: InputEvent, *, should_yield: Callable[[], bool] | None = None) -> EpisodeResult:
         self.episode_taint.reset()
         try:
             result = await self.runtime.run_episode(event, should_yield=should_yield)
@@ -1050,9 +1112,7 @@ class ConscioService:
                     before=payload.get("before") or {},
                     after=payload.get("after") or {},
                 )
-            if event.get("event_type") == "tool_authorization" and not payload.get(
-                "allowed", True
-            ):
+            if event.get("event_type") == "tool_authorization" and not payload.get("allowed", True):
                 trial.record_action_escalation(
                     action=str(payload.get("tool") or "tool proposal"),
                     reason=str(payload.get("reason") or "risk bound rejection"),
@@ -1062,7 +1122,13 @@ class ConscioService:
         trial.record_heartbeat(
             checkpoint_id=result.checkpoint_reference,
             affect=self.runtime.recurrent_core.affect.to_dict(),
-            details={"episode_id": result.episode_id, "selected_action": result.selected_action},
+            details={
+                "episode_id": result.episode_id,
+                "selected_action": result.selected_action,
+                "runtime_identity": self.runtime.recurrent_core.runtime_identity,
+                "specialist_architecture_id": (self.runtime.recurrent_core.specialist_architecture_id),
+                "language_manifest_digests": list(self.runtime.language_manifest_digests),
+            },
         )
 
     async def _plan_and_act(
@@ -1172,8 +1238,7 @@ class ConscioService:
                     {
                         "role": "system",
                         "content": (
-                            "You judge whether two stored memory facts contradict "
-                            "each other. Answer ONLY YES or NO."
+                            "You judge whether two stored memory facts contradict each other. Answer ONLY YES or NO."
                         ),
                     },
                     {
@@ -1237,9 +1302,7 @@ class ConscioService:
     ) -> None:
         name = getattr(request, "name", "")
         capabilities = self._tool_capabilities(name)
-        taint_origin = external_taint_origin(
-            request, result, capabilities=frozenset(capabilities)
-        ) or ""
+        taint_origin = external_taint_origin(request, result, capabilities=frozenset(capabilities)) or ""
         summary = " ".join(str(result.get("output") or result.get("error") or "").split())[:500]
         try:
             self.memory.record_tool_event(
@@ -1270,21 +1333,16 @@ class ConscioService:
         recently_completed: list[dict[str, Any]] = []
         if project:
             tasks = await self.autonomy.list_tasks(project["id"])
-            pending = [
-                {**t, "stale": t["id"] in stale_ids}
-                for t in tasks
-                if t["status"] == "pending"
-            ]
+            pending = [{**t, "stale": t["id"] in stale_ids} for t in tasks if t["status"] == "pending"]
             recently_completed = [t for t in tasks if t["status"] in {"done", "blocked"}][-3:]
         tasks_status = "ok" if (pending or active_task) else NO_PENDING_TASK_SENTINEL
         constraints = await self.goals.active_constraints()
-        recent_episodes = await self.memory.recent_episodes(5)
+        strict_workspace = self.config.research.strict_recurrent_workspace
+        recent_episodes = [] if strict_workspace else await self.memory.recent_episodes(5)
         relevant_memory: list[dict[str, Any]] = []
-        if goal:
+        if goal and not strict_workspace:
             try:
-                relevant_memory = await self.memory.search_facts(
-                    str(goal.get("description", ""))[:120], limit=5
-                )
+                relevant_memory = await self.memory.search_facts(str(goal.get("description", ""))[:120], limit=5)
             except Exception:  # noqa: BLE001 — search is best-effort
                 relevant_memory = []
         recent_tool_actions = await self.autonomy.count_recent_actions("tool")
@@ -1409,11 +1467,7 @@ class ConscioService:
     async def recent_trace(self) -> str:
         episodes = await self.memory.recent_episodes(20)
         notes = await self.autonomy.recent_notes(20)
-        items = [
-            (float(e.get("created_at") or 0.0), e.get("trace") or "")
-            for e in episodes
-            if e.get("trace")
-        ]
+        items = [(float(e.get("created_at") or 0.0), e.get("trace") or "") for e in episodes if e.get("trace")]
         items += [(float(n.get("created_at") or 0.0), n["content"]) for n in notes]
         items.sort(key=lambda item: item[0])
         stored = "\n\n".join(content for _, content in items[-20:])
@@ -1430,9 +1484,7 @@ class ConscioService:
 
     async def metrics(self) -> dict[str, Any]:
         row = self.memory.fetchone("SELECT COUNT(*) AS n FROM tool_events")
-        episode_metrics = [
-            e.get("metrics") or {} for e in await self.memory.recent_episodes(200)
-        ]
+        episode_metrics = [e.get("metrics") or {} for e in await self.memory.recent_episodes(200)]
         return {
             "running": self.running,
             "paused": self.paused,
@@ -1460,10 +1512,7 @@ class ConscioService:
     async def list_procedures(self) -> list[dict[str, Any]]:
         rows = await self.memory.list_procedures()
         # v1 UI compat: keep `skill`/`use_count` aliases alongside v2 columns.
-        return [
-            {**row, "skill": row["name"], "use_count": row["success_count"]}
-            for row in rows
-        ]
+        return [{**row, "skill": row["name"], "use_count": row["success_count"]} for row in rows]
 
     async def list_projects(self) -> list[dict[str, Any]]:
         return await self.autonomy.list_projects()
@@ -1475,9 +1524,7 @@ class ConscioService:
         changed = await self.autonomy.set_project_status(project_id, status)
         if not changed:
             raise KeyError(project_id)
-        self._event_broker.emit(
-            "project.updated", {"project_id": project_id, "status": status}
-        )
+        self._event_broker.emit("project.updated", {"project_id": project_id, "status": status})
 
     async def list_influences(self) -> list[dict[str, Any]]:
         return await self.goals.list_influences()

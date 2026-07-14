@@ -7,12 +7,15 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from conscio.memory import embeddings as _embeddings
 from conscio.memory.embeddings import Embedder
+
+if TYPE_CHECKING:
+    from conscio.v3.checkpoint_migration import CheckpointArchitectureMigration
 
 _HOME_DIR = Path.home() / ".conscio"
 _DB_PATH = _HOME_DIR / "sessions.db"
@@ -34,7 +37,7 @@ _TRUST_BY_ORIGIN = {
     "quarantined": 0,
 }
 _CONF_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Schema v2 (fresh-start DB, no migration from v1):
 # - unified `episodes` keyed by the runtime's per-episode uuid (canonical id),
@@ -174,6 +177,16 @@ CREATE TABLE IF NOT EXISTS core_checkpoints (
 );
 CREATE INDEX IF NOT EXISTS idx_core_checkpoints_lineage
     ON core_checkpoints (lineage_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS checkpoint_architecture_migrations (
+    sequence      INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_id     TEXT NOT NULL UNIQUE,
+    source_checkpoint_id TEXT NOT NULL UNIQUE,
+    target_checkpoint_id TEXT NOT NULL UNIQUE,
+    previous_record_hash TEXT,
+    record_hash   TEXT NOT NULL UNIQUE,
+    payload       TEXT NOT NULL,
+    created_at    REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS affect_interventions (
     intervention_id TEXT PRIMARY KEY,
     episode_id    TEXT NOT NULL DEFAULT '',
@@ -258,17 +271,12 @@ def _repair_legacy_schema(conn: sqlite3.Connection) -> None:
     fts_columns = _table_columns(conn, "memory_fts")
     if fts_columns and "ref_id" not in fts_columns:
         conn.execute("DROP TABLE memory_fts")
-        conn.execute(
-            "CREATE VIRTUAL TABLE memory_fts USING fts5(content, memory_type, ref_id UNINDEXED)"
-        )
+        conn.execute("CREATE VIRTUAL TABLE memory_fts USING fts5(content, memory_type, ref_id UNINDEXED)")
         _rebuild_memory_fts(conn)
     episode_columns = _table_columns(conn, "episodes")
     if episode_columns and "parent_episode_id" not in episode_columns:
         conn.execute("ALTER TABLE episodes ADD COLUMN parent_episode_id TEXT")
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_episodes_parent "
-        "ON episodes (parent_episode_id, created_at DESC)"
-    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_episodes_parent ON episodes (parent_episode_id, created_at DESC)")
 
 
 def _rebuild_memory_fts(conn: sqlite3.Connection) -> None:
@@ -511,9 +519,7 @@ class MemoryStore:
                     now,
                 ),
             )
-            row = conn.execute(
-                "SELECT summary, input, output FROM episodes WHERE id = ?", (episode_id,)
-            ).fetchone()
+            row = conn.execute("SELECT summary, input, output FROM episodes WHERE id = ?", (episode_id,)).fetchone()
             fts_content = (row["summary"] or f"{row['input'][:300]} -> {row['output'][:300]}").strip()
             conn.execute(
                 "DELETE FROM memory_fts WHERE memory_type = ? AND ref_id = ?",
@@ -567,12 +573,16 @@ class MemoryStore:
                 "(event_id, episode_id, event_type, source, payload, model_input, checkpoint_id, "
                 "parent_event_id, schema_version, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    data["event_id"], data["episode_id"], data["event_type"], data["source"],
+                    data["event_id"],
+                    data["episode_id"],
+                    data["event_type"],
+                    data["source"],
                     json.dumps(data.get("payload") or {}, sort_keys=True),
-                    json.dumps(data["model_input"], sort_keys=True)
-                    if data.get("model_input") is not None else None,
-                    data.get("checkpoint_id"), data.get("parent_event_id"),
-                    int(data.get("schema_version", 1)), float(data.get("observed_at", time.time())),
+                    json.dumps(data["model_input"], sort_keys=True) if data.get("model_input") is not None else None,
+                    data.get("checkpoint_id"),
+                    data.get("parent_event_id"),
+                    int(data.get("schema_version", 1)),
+                    float(data.get("observed_at", time.time())),
                 ),
             )
             conn.commit()
@@ -581,14 +591,10 @@ class MemoryStore:
             return cursor.lastrowid
 
     async def cognitive_events(self, episode_id: str) -> list[dict[str, Any]]:
-        rows = self._fetchall(
-            "SELECT * FROM cognitive_events WHERE episode_id = ? ORDER BY sequence", (episode_id,)
-        )
+        rows = self._fetchall("SELECT * FROM cognitive_events WHERE episode_id = ? ORDER BY sequence", (episode_id,))
         for row in rows:
             row["payload"] = json.loads(row.get("payload") or "{}")
-            row["model_input"] = (
-                json.loads(row["model_input"]) if row.get("model_input") is not None else None
-            )
+            row["model_input"] = json.loads(row["model_input"]) if row.get("model_input") is not None else None
         return rows
 
     async def save_core_checkpoint(self, checkpoint: Any) -> None:
@@ -601,9 +607,13 @@ class MemoryStore:
                 "(checkpoint_id, lineage_id, parent_checkpoint_id, model_version, payload, "
                 "event_sequence, schema_version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    data["checkpoint_id"], data["lineage_id"], data.get("parent_checkpoint_id"),
-                    data["model_version"], json.dumps(data, sort_keys=True),
-                    int(data.get("event_sequence", 0)), int(data.get("schema_version", 1)),
+                    data["checkpoint_id"],
+                    data["lineage_id"],
+                    data.get("parent_checkpoint_id"),
+                    data["model_version"],
+                    json.dumps(data, sort_keys=True),
+                    int(data.get("event_sequence", 0)),
+                    int(data.get("schema_version", 1)),
                     float(data.get("created_at", time.time())),
                 ),
             )
@@ -620,10 +630,223 @@ class MemoryStore:
         return json.loads(row["payload"]) if row else None
 
     async def get_core_checkpoint(self, checkpoint_id: str) -> dict[str, Any] | None:
-        row = self.fetchone(
-            "SELECT payload FROM core_checkpoints WHERE checkpoint_id = ?", (checkpoint_id,)
-        )
+        row = self.fetchone("SELECT payload FROM core_checkpoints WHERE checkpoint_id = ?", (checkpoint_id,))
         return json.loads(row["payload"]) if row else None
+
+    async def core_checkpoint_lineage_head(
+        self,
+        *,
+        root_checkpoint_id: str,
+        lineage_id: str,
+    ) -> dict[str, Any]:
+        """Return the unique validated descendant head for a checkpoint lineage."""
+        if not root_checkpoint_id or not lineage_id:
+            raise ValueError("checkpoint root and lineage identifiers are required")
+        with self._lock:
+            conn = self._conn()
+            rows = conn.execute(
+                "SELECT * FROM core_checkpoints WHERE lineage_id = ?",
+                (lineage_id,),
+            ).fetchall()
+            checkpoints: dict[str, dict[str, Any]] = {}
+            children: dict[str, list[str]] = {}
+            for row in rows:
+                payload = json.loads(row["payload"])
+                checkpoint_id = str(payload.get("checkpoint_id") or "")
+                if (
+                    not checkpoint_id
+                    or row["checkpoint_id"] != checkpoint_id
+                    or row["lineage_id"] != payload.get("lineage_id")
+                    or row["parent_checkpoint_id"] != payload.get("parent_checkpoint_id")
+                    or row["model_version"] != payload.get("model_version")
+                    or row["event_sequence"] != payload.get("event_sequence")
+                    or row["schema_version"] != payload.get("schema_version")
+                    or float(row["created_at"]) != float(payload.get("created_at"))
+                ):
+                    raise ValueError("checkpoint lineage index is inconsistent")
+                if checkpoint_id in checkpoints:
+                    raise ValueError("checkpoint lineage contains a duplicate checkpoint")
+                checkpoints[checkpoint_id] = payload
+                parent = payload.get("parent_checkpoint_id")
+                if isinstance(parent, str):
+                    children.setdefault(parent, []).append(checkpoint_id)
+
+            if root_checkpoint_id not in checkpoints:
+                raise ValueError("checkpoint lineage root is missing")
+            root = checkpoints[root_checkpoint_id]
+            current_id = root_checkpoint_id
+            visited = {current_id}
+            while True:
+                next_ids = children.get(current_id, [])
+                if len(next_ids) > 1:
+                    raise ValueError("checkpoint lineage is branched")
+                if not next_ids:
+                    break
+                next_id = next_ids[0]
+                if next_id in visited:
+                    raise ValueError("checkpoint lineage contains a cycle")
+                current = checkpoints[current_id]
+                successor = checkpoints[next_id]
+                if (
+                    successor.get("model_version") != root.get("model_version")
+                    or successor.get("schema_version") != root.get("schema_version")
+                    or successor.get("specialist_architecture_id") != root.get("specialist_architecture_id")
+                ):
+                    raise ValueError("checkpoint lineage runtime identity changed")
+                if int(successor["event_sequence"]) < int(current["event_sequence"]):
+                    raise ValueError("checkpoint lineage event sequence regressed")
+                visited.add(next_id)
+                current_id = next_id
+            if visited != set(checkpoints):
+                raise ValueError("checkpoint lineage contains disconnected checkpoints")
+            return checkpoints[current_id]
+
+    @staticmethod
+    def _architecture_migration_records(
+        conn: sqlite3.Connection,
+    ) -> tuple[CheckpointArchitectureMigration, ...]:
+        from conscio.v3.checkpoint_migration import (  # noqa: PLC0415
+            CheckpointArchitectureMigration,
+        )
+
+        rows = conn.execute("SELECT * FROM checkpoint_architecture_migrations ORDER BY sequence").fetchall()
+        records: list[CheckpointArchitectureMigration] = []
+        previous: str | None = None
+        for row in rows:
+            payload = json.loads(row["payload"])
+            record = CheckpointArchitectureMigration.from_dict(payload)
+            if record.previous_record_hash != previous:
+                raise ValueError("checkpoint architecture migration hash chain is broken")
+            if (
+                row["record_id"] != record.record_id
+                or row["source_checkpoint_id"] != record.source_checkpoint_id
+                or row["target_checkpoint_id"] != record.target_checkpoint_id
+                or row["record_hash"] != record.record_hash
+                or row["previous_record_hash"] != record.previous_record_hash
+            ):
+                raise ValueError("checkpoint architecture migration index is inconsistent")
+            records.append(record)
+            previous = record.record_hash
+        return tuple(records)
+
+    async def core_checkpoint_architecture_migration(
+        self, source_checkpoint_id: str
+    ) -> CheckpointArchitectureMigration | None:
+        """Return a verified migration for one source checkpoint, if present."""
+        from conscio.v3.checkpoint_migration import content_digest  # noqa: PLC0415
+
+        with self._lock:
+            conn = self._conn()
+            records = self._architecture_migration_records(conn)
+            record = next(
+                (item for item in records if item.source_checkpoint_id == source_checkpoint_id),
+                None,
+            )
+            if record is None:
+                return None
+            source = conn.execute(
+                "SELECT payload FROM core_checkpoints WHERE checkpoint_id = ?",
+                (record.source_checkpoint_id,),
+            ).fetchone()
+            if source is None:
+                raise ValueError("checkpoint architecture migration source is missing")
+            if content_digest(json.loads(source["payload"])) != record.source_checkpoint_digest:
+                raise ValueError("checkpoint architecture migration source digest differs")
+            target = conn.execute(
+                "SELECT payload FROM core_checkpoints WHERE checkpoint_id = ?",
+                (record.target_checkpoint_id,),
+            ).fetchone()
+            if target is None:
+                raise ValueError("checkpoint architecture migration target is missing")
+            if content_digest(json.loads(target["payload"])) != record.target_checkpoint_digest:
+                raise ValueError("checkpoint architecture migration target digest differs")
+            return record
+
+    async def migrate_core_checkpoint_architecture(
+        self,
+        *,
+        source_checkpoint_id: str,
+        source_architecture_id: str,
+        target_checkpoint: Any,
+        runtime_identity: str,
+        transform_digest: str,
+        evidence_digest: str | None = None,
+        migrator: str = "runtime_bootstrap_migrator",
+        reason: str = "bootstrap specialist architecture migration",
+    ) -> CheckpointArchitectureMigration:
+        """Atomically save a migrated checkpoint and its hash-chained audit record."""
+        from conscio.v3.checkpoint_migration import (  # noqa: PLC0415
+            CheckpointArchitectureMigration,
+        )
+
+        target = target_checkpoint.to_dict() if hasattr(target_checkpoint, "to_dict") else dict(target_checkpoint)
+        with self._lock:
+            conn = self._conn()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                records = self._architecture_migration_records(conn)
+                existing = next(
+                    (item for item in records if item.source_checkpoint_id == source_checkpoint_id),
+                    None,
+                )
+                if existing is not None:
+                    conn.commit()
+                    return existing
+                source_row = conn.execute(
+                    "SELECT payload FROM core_checkpoints WHERE checkpoint_id = ?",
+                    (source_checkpoint_id,),
+                ).fetchone()
+                if source_row is None:
+                    raise ValueError("architecture migration source checkpoint is missing")
+                source = json.loads(source_row["payload"])
+                created_at = time.time()
+                record = CheckpointArchitectureMigration.create(
+                    source_checkpoint=source,
+                    source_architecture_id=source_architecture_id,
+                    target_checkpoint=target,
+                    runtime_identity=runtime_identity,
+                    transform_digest=transform_digest,
+                    evidence_digest=evidence_digest,
+                    migrator=migrator,
+                    reason=reason,
+                    previous_record_hash=(records[-1].record_hash if records else None),
+                    created_at=created_at,
+                )
+                conn.execute(
+                    "INSERT INTO core_checkpoints "
+                    "(checkpoint_id, lineage_id, parent_checkpoint_id, model_version, payload, "
+                    "event_sequence, schema_version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        target["checkpoint_id"],
+                        target["lineage_id"],
+                        target.get("parent_checkpoint_id"),
+                        target["model_version"],
+                        json.dumps(target, sort_keys=True),
+                        int(target.get("event_sequence", 0)),
+                        int(target["schema_version"]),
+                        float(target.get("created_at", created_at)),
+                    ),
+                )
+                conn.execute(
+                    "INSERT INTO checkpoint_architecture_migrations "
+                    "(record_id, source_checkpoint_id, target_checkpoint_id, "
+                    "previous_record_hash, record_hash, payload, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        record.record_id,
+                        record.source_checkpoint_id,
+                        record.target_checkpoint_id,
+                        record.previous_record_hash,
+                        record.record_hash,
+                        json.dumps(record.to_dict(), sort_keys=True),
+                        record.created_at,
+                    ),
+                )
+                conn.commit()
+                return record
+            except Exception:
+                conn.rollback()
+                raise
 
     async def record_affect_intervention(
         self,
@@ -642,8 +865,12 @@ class MemoryStore:
                 "(intervention_id, episode_id, operator, reason, before_state, after_state, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
-                    intervention_id, episode_id, operator, reason,
-                    json.dumps(before_state, sort_keys=True), json.dumps(after_state, sort_keys=True),
+                    intervention_id,
+                    episode_id,
+                    operator,
+                    reason,
+                    json.dumps(before_state, sort_keys=True),
+                    json.dumps(after_state, sort_keys=True),
                     time.time(),
                 ),
             )
@@ -678,13 +905,9 @@ class MemoryStore:
             )
             conn.commit()
 
-    async def latest_prediction_adapter(
-        self, base_model_version: str | None = None
-    ) -> dict[str, Any] | None:
+    async def latest_prediction_adapter(self, base_model_version: str | None = None) -> dict[str, Any] | None:
         if base_model_version is None:
-            row = self.fetchone(
-                "SELECT * FROM prediction_adapter_promotions ORDER BY sequence DESC LIMIT 1"
-            )
+            row = self.fetchone("SELECT * FROM prediction_adapter_promotions ORDER BY sequence DESC LIMIT 1")
         else:
             row = self.fetchone(
                 "SELECT * FROM prediction_adapter_promotions WHERE base_model_version = ? "
@@ -696,15 +919,11 @@ class MemoryStore:
         return row
 
     async def cognitive_event_history(self, limit: int = 100_000) -> list[dict[str, Any]]:
-        rows = self._fetchall(
-            "SELECT * FROM cognitive_events ORDER BY sequence DESC LIMIT ?", (max(1, limit),)
-        )
+        rows = self._fetchall("SELECT * FROM cognitive_events ORDER BY sequence DESC LIMIT ?", (max(1, limit),))
         rows.reverse()
         for row in rows:
             row["payload"] = json.loads(row.get("payload") or "{}")
-            row["model_input"] = (
-                json.loads(row["model_input"]) if row.get("model_input") is not None else None
-            )
+            row["model_input"] = json.loads(row["model_input"]) if row.get("model_input") is not None else None
         return rows
 
     # ── Facts (semantic memory with provenance + embeddings) ─────────────
@@ -738,9 +957,7 @@ class MemoryStore:
         resolved_trust = trust_for_origin(resolved_origin) if trust is None else int(trust)
         nh = norm_hash(text)
 
-        existing = self.fetchone(
-            "SELECT id, trust, confidence, origin, status FROM facts WHERE norm_hash = ?", (nh,)
-        )
+        existing = self.fetchone("SELECT id, trust, confidence, origin, status FROM facts WHERE norm_hash = ?", (nh,))
         if existing:
             return self._merge_into(existing, trust=resolved_trust, confidence=confidence)
 
@@ -762,11 +979,7 @@ class MemoryStore:
                     best = candidate
             if best is not None and best_cos > MERGE_THRESHOLD:
                 return self._merge_into(best, trust=resolved_trust, confidence=confidence)
-            if (
-                best is not None
-                and contradiction_judge is not None
-                and CONTRADICTION_LOW <= best_cos < MERGE_THRESHOLD
-            ):
+            if best is not None and contradiction_judge is not None and CONTRADICTION_LOW <= best_cos < MERGE_THRESHOLD:
                 contradicts = False
                 try:
                     contradicts = bool(await contradiction_judge(text, best["fact"]))
@@ -778,23 +991,16 @@ class MemoryStore:
                     )
                     if fact_id is None:
                         refetched = self.fetchone(
-                            "SELECT id, trust, confidence, origin, status FROM facts "
-                            "WHERE norm_hash = ?",
+                            "SELECT id, trust, confidence, origin, status FROM facts WHERE norm_hash = ?",
                             (nh,),
                         )
                         if refetched:
-                            return self._merge_into(
-                                refetched, trust=resolved_trust, confidence=confidence
-                            )
+                            return self._merge_into(refetched, trust=resolved_trust, confidence=confidence)
                         return FactWriteResult(action="skipped")
                     losers = await self.mark_contradiction(fact_id, int(best["id"]))
-                    return FactWriteResult(
-                        action="contradiction", fact_id=fact_id, contradicted=losers
-                    )
+                    return FactWriteResult(action="contradiction", fact_id=fact_id, contradicted=losers)
 
-        fact_id = self._insert_fact_row(
-            text, nh, resolved_origin, resolved_trust, episode_id, confidence, vec
-        )
+        fact_id = self._insert_fact_row(text, nh, resolved_origin, resolved_trust, episode_id, confidence, vec)
         if fact_id is None:
             # norm_hash race or legitimate normalization collision: merge instead of failing.
             refetched = self.fetchone(
@@ -889,9 +1095,7 @@ class MemoryStore:
         loses; equal tiers mark both. Never deletes."""
         rows = {
             int(r["id"]): r
-            for r in self.fetchall(
-                "SELECT id, trust FROM facts WHERE id IN (?, ?)", (fact_id_a, fact_id_b)
-            )
+            for r in self.fetchall("SELECT id, trust FROM facts WHERE id IN (?, ?)", (fact_id_a, fact_id_b))
         }
         a = rows.get(int(fact_id_a))
         b = rows.get(int(fact_id_b))
@@ -994,8 +1198,7 @@ class MemoryStore:
 
     async def list_chat_sessions(self, limit: int = 50) -> list[dict]:
         return self._fetchall(
-            "SELECT id, title, created_at, updated_at FROM chat_sessions "
-            "ORDER BY updated_at DESC LIMIT ?",
+            "SELECT id, title, created_at, updated_at FROM chat_sessions ORDER BY updated_at DESC LIMIT ?",
             (limit,),
         )
 
@@ -1040,9 +1243,7 @@ class MemoryStore:
             conn.commit()
             return int(cursor.lastrowid or 0)
 
-    async def get_chat_messages(
-        self, session_id: str, limit: int = 200, before_id: int | None = None
-    ) -> list[dict]:
+    async def get_chat_messages(self, session_id: str, limit: int = 200, before_id: int | None = None) -> list[dict]:
         if before_id is not None:
             return self._fetchall(
                 "SELECT id, session_id, role, content, selected_action, episode_id, created_at "

@@ -22,6 +22,14 @@ custodian until collection and exclusions are complete.
 - Report effect estimates and calibration whether predictions are supported or
   refuted. Never aggregate the result into a claim of phenomenal consciousness.
 
+For recurrent-workspace studies, freeze a `MechanismManifest`, generate matched
+assignments with `create_matched_assignments`, and keep the
+`MechanismConditionSeal` with the independent custodian. Execute assignments
+through `HybridCoreMechanismAdapter`, persist each `MechanismRunRecord` in a
+`ChainedJSONLArtifactStore`, and open the seal only after collection and
+exclusions are frozen. The adapter audit must report zero computation, exposure,
+and emitted candidates for every truly lesioned specialist.
+
 ## Discriminating predictions
 
 ### Recurrent broadcast versus local/feed-forward processing
@@ -79,6 +87,9 @@ formatting alone predicts no access once tokens are matched and removed.
 
 - Manifest and sealed-mapping hashes
 - Exact revision, model, checkpoint, adapter digest, and lesion implementation
+- Pinned language manifests plus canonical request/response digests
+- Mechanism manifest, blinded trial plan, condition-seal digest, information
+  constraint, production-adapter identity, and hash-chain head
 - All assignments, exclusions, traces, and model inputs
 - Paired effects with preregistered direction/threshold
 - Hidden-condition identification accuracy, exact-binomial result, Brier score,

@@ -139,6 +139,34 @@ the constraint judge, LLM appraisal, consolidation, and goal review; `embeddings
 serves memory retrieval; `subagent` is reserved for spawned sub-tasks. Any role
 left unset falls back to `main`.
 
+## V3 Research Controls
+
+These settings are opt-in and are intended for reproducible primary research,
+not ordinary deployments:
+
+```toml
+[research]
+strict_recurrent_workspace = true
+require_pinned_language_model = true
+language_provider = "local-openai-compatible"
+language_endpoint_id = "research-node-a"
+language_model_revision = "exact-upstream-revision"
+language_weight_digest = "<lowercase-sha256>"
+language_config_digest = "<lowercase-sha256>"
+language_seed = 17
+```
+
+`strict_recurrent_workspace` removes legacy V2 modules, direct prompt access to
+stored episodes, semantic retrieval, and V2 self-state, and language-facing
+tools with `memory_read` or `memory_write` capabilities. The recurrent
+specialists and their selected broadcasts remain available. Pinned language
+mode also requires a configured endpoint, rejects a fallback chain on the
+`main` role, and requires `constraint_judge`, `llm_appraisal`, and
+`enable_contradiction_check` to remain disabled. It records canonical exact
+requests/responses and immutable chat/autonomous manifests in the V3 causal
+trace. Goal-review LLM calls and consolidation summarization are disabled in
+this mode; deterministic consolidation maintenance still runs.
+
 ## Context, Engine, and Tools
 
 ```toml
@@ -272,4 +300,3 @@ The last two are core-only knobs the eval harness never toggles:
 - `constraint_judge` enables the LLM judge that scores semantic constraints
   (off by default; the default constraint path is rule-based).
 - `llm_appraisal` enables a batched LLM appraisal pass (off by default).
-

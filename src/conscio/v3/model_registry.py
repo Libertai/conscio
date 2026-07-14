@@ -31,6 +31,9 @@ from typing import Any, Literal
 
 MODEL_ARTIFACT_SCHEMA_VERSION = 1
 REGISTRY_RECORD_SCHEMA_VERSION = 1
+# Recurrent tensor/weight ABI embedded in immutable model artifacts. Private
+# specialist checkpoint envelopes carry their own architecture identity and
+# CoreCheckpoint wire schema; changing those does not rewrite weight artifacts.
 CHECKPOINT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = "conscio.v3.recurrent_world_model"
 SUPPORTED_DTYPES = frozenset({"float32", "float64"})
@@ -89,9 +92,7 @@ class WorldModelSpec:
         if self.artifact_kind != ARTIFACT_KIND:
             raise ValueError(f"unsupported artifact kind: {self.artifact_kind!r}")
         if self.checkpoint_schema_version != CHECKPOINT_SCHEMA_VERSION:
-            raise ValueError(
-                f"unsupported checkpoint schema: {self.checkpoint_schema_version}"
-            )
+            raise ValueError(f"unsupported checkpoint schema: {self.checkpoint_schema_version}")
         if not self.model_family.strip() or not self.model_version.strip():
             raise ValueError("model_family and model_version cannot be empty")
         _require_non_negative_int(self.revision, "revision")
@@ -191,9 +192,7 @@ class WorldModelSpec:
                 for name, dimension in specialist_dims.items()
             },
             dtype=_require_string(data["dtype"], "dtype"),
-            checkpoint_schema_version=_require_int(
-                data["checkpoint_schema_version"], "checkpoint_schema_version"
-            ),
+            checkpoint_schema_version=_require_int(data["checkpoint_schema_version"], "checkpoint_schema_version"),
             schema_version=_require_int(data["schema_version"], "schema_version"),
             artifact_kind=_require_string(data["artifact_kind"], "artifact_kind"),
         )
@@ -281,17 +280,13 @@ class ValidationEvidence:
         return cls(
             candidate_digest=_require_string(data["candidate_digest"], "candidate_digest"),
             incumbent_digest=(
-                None
-                if incumbent_digest is None
-                else _require_string(incumbent_digest, "incumbent_digest")
+                None if incumbent_digest is None else _require_string(incumbent_digest, "incumbent_digest")
             ),
             dataset_digest=_require_string(data["dataset_digest"], "dataset_digest"),
             protocol_digest=_require_string(data["protocol_digest"], "protocol_digest"),
             metric_name=_require_string(data["metric_name"], "metric_name"),
             candidate_score=_require_float(data["candidate_score"], "candidate_score"),
-            incumbent_score=(
-                None if incumbent_score is None else _require_float(incumbent_score, "incumbent_score")
-            ),
+            incumbent_score=(None if incumbent_score is None else _require_float(incumbent_score, "incumbent_score")),
             lower_is_better=_require_bool(data["lower_is_better"], "lower_is_better"),
             sample_count=_require_int(data["sample_count"], "sample_count"),
             passed=_require_bool(data["passed"], "passed"),
@@ -464,9 +459,7 @@ class PromotionRecord:
             decided_by=_require_string(data["decided_by"], "decided_by"),
             decided_at=_require_float(data["decided_at"], "decided_at"),
             eligibility_issues=tuple(issues),
-            previous_record_hash=(
-                None if previous is None else _require_string(previous, "previous_record_hash")
-            ),
+            previous_record_hash=(None if previous is None else _require_string(previous, "previous_record_hash")),
             record_hash=_require_string(data["record_hash"], "record_hash"),
             schema_version=_require_int(data["schema_version"], "schema_version"),
         )
@@ -614,22 +607,16 @@ class LineageMigrationRecord:
             record_id=_require_string(data["record_id"], "record_id"),
             source_checkpoint_id=_require_string(data["source_checkpoint_id"], "source_checkpoint_id"),
             source_lineage_id=_require_string(data["source_lineage_id"], "source_lineage_id"),
-            source_artifact_digest=_require_string(
-                data["source_artifact_digest"], "source_artifact_digest"
-            ),
+            source_artifact_digest=_require_string(data["source_artifact_digest"], "source_artifact_digest"),
             target_checkpoint_id=_require_string(data["target_checkpoint_id"], "target_checkpoint_id"),
             target_lineage_id=_require_string(data["target_lineage_id"], "target_lineage_id"),
-            target_artifact_digest=_require_string(
-                data["target_artifact_digest"], "target_artifact_digest"
-            ),
+            target_artifact_digest=_require_string(data["target_artifact_digest"], "target_artifact_digest"),
             transform_digest=_require_string(data["transform_digest"], "transform_digest"),
             evidence_digest=_require_string(data["evidence_digest"], "evidence_digest"),
             migrator=_require_string(data["migrator"], "migrator"),
             reason=_require_string(data["reason"], "reason"),
             migrated_at=_require_float(data["migrated_at"], "migrated_at"),
-            previous_record_hash=(
-                None if previous is None else _require_string(previous, "previous_record_hash")
-            ),
+            previous_record_hash=(None if previous is None else _require_string(previous, "previous_record_hash")),
             record_hash=_require_string(data["record_hash"], "record_hash"),
             schema_version=_require_int(data["schema_version"], "schema_version"),
         )
@@ -715,8 +702,7 @@ class ModelArtifactRegistry:
             raise ArtifactIntegrityError(f"invalid artifact descriptor {digest}: {exc}") from exc
         if expected_spec is not None and spec != expected_spec:
             raise ModelCompatibilityError(
-                f"artifact {digest} has {spec.model_version!r}, not exact expected spec "
-                f"{expected_spec.model_version!r}"
+                f"artifact {digest} has {spec.model_version!r}, not exact expected spec {expected_spec.model_version!r}"
             )
         weights_path = self._weights_path(weights_digest)
         if not weights_path.is_file():
@@ -862,9 +848,7 @@ class ModelArtifactRegistry:
         """Return all verified recurrent checkpoint migration records."""
         return self._read_migrations()
 
-    def latest_lineage_migration(
-        self, target_lineage_id: str | None = None
-    ) -> LineageMigrationRecord | None:
+    def latest_lineage_migration(self, target_lineage_id: str | None = None) -> LineageMigrationRecord | None:
         """Return the last migration, optionally for one target lineage."""
         records = self._read_migrations()
         for record in reversed(records):
