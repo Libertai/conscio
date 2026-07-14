@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import itertools
 import json
 import logging
 import os
 import time
+import uuid
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -25,10 +27,32 @@ from conscio.memory.lifecycle import create_home_backup, prune_backups
 from conscio.memory.store import MemoryStore
 from conscio.self_tools import register_self_tools
 from conscio.tools import PolicyToolRegistry
-from conscio.v3.learning import derive_replay_samples, train_shadow_adapter
-from conscio.v3.recurrent_core import MODEL_VERSION
+from conscio.v3.contracts import CognitiveEvent
+from conscio.v3.curriculum import (
+    CurriculumExample,
+    build_curriculum_manifest,
+    derive_curriculum_examples,
+    generate_synthetic_curriculum,
+)
+from conscio.v3.learning import AdapterState, derive_replay_samples, train_shadow_adapter
+from conscio.v3.model_registry import (
+    ModelArtifact,
+    ModelArtifactRegistry,
+    ValidationEvidence,
+    WorldModelSpec,
+)
+from conscio.v3.recurrent_core import STATE_SIZE, HybridRecurrentCore
 from conscio.v3.runtime import V3CognitiveRuntime
 from conscio.v3.trials import JSONLTrialSink, PersistenceTrial
+from conscio.v3.world_training import (
+    WorldCoreWeights,
+    WorldLoss,
+    WorldTrainingConfig,
+    WorldTrainingExample,
+    active_world_weights,
+    examples_from_curriculum,
+    train_shadow_world_model,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +81,50 @@ _REDACT_KEYS = ("password", "token", "secret", "api_key", "apikey", "key")
 # these are just fast-access caches / audit files.
 _MAX_IN_MEMORY_EPISODES = 200
 _MAX_EVENT_FILES = 500
+
+_WORLD_MODEL_FAMILY = "conscio-v3-hybrid-rssm"
+_WORLD_SPECIALIST_DIMS = {
+    "affect": 2,
+    "memory": 2,
+    "perception": 2,
+    "planning": 2,
+    "self_model": 3,
+    "world_model": 2,
+}
+
+
+def _world_model_spec(weights: WorldCoreWeights) -> WorldModelSpec:
+    return WorldModelSpec(
+        model_family=_WORLD_MODEL_FAMILY,
+        model_version=weights.model_version,
+        revision=weights.revision,
+        deterministic_dim=STATE_SIZE,
+        stochastic_dim=STATE_SIZE,
+        affect_dim=8,
+        specialist_dims=_WORLD_SPECIALIST_DIMS,
+    )
+
+
+def _weights_from_artifact(artifact: ModelArtifact) -> WorldCoreWeights:
+    try:
+        weights = WorldCoreWeights.from_json(artifact.weights.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise ValueError("world-model artifact weights are not UTF-8 JSON") from exc
+    expected = _world_model_spec(weights)
+    if artifact.spec != expected:
+        raise ValueError("world-model artifact descriptor does not match its weight bundle")
+    return weights
+
+
+def _sha256_json(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _loss_dict(loss: WorldLoss | None) -> dict[str, Any] | None:
+    if loss is None:
+        return None
+    return {"total": loss.total, "by_target": dict(loss.by_target)}
 
 
 @dataclass
@@ -175,6 +243,13 @@ class ConscioService:
     def __init__(self, config: ServiceConfig | None = None) -> None:
         self.config = config or load_config()
         self.config.ensure_layout()
+        self.world_model_registry = ModelArtifactRegistry(self.config.world_model_path)
+        self.world_model_artifact = self.world_model_registry.latest_promoted()
+        self.world_weights = (
+            _weights_from_artifact(self.world_model_artifact)
+            if self.world_model_artifact is not None
+            else WorldCoreWeights.bootstrap()
+        )
         self.memory = MemoryStore(db_path=str(self.config.db_path))
         tools = PolicyToolRegistry(
             unsafe_autonomy=self.config.unsafe_autonomy,
@@ -218,6 +293,7 @@ class ConscioService:
             attention_broadcast_limit=self.config.attention_broadcast_limit,
             attention_char_budget=self.config.attention_char_budget,
             cognitive_cycles=self.config.cognitive_cycles,
+            recurrent_weights=self.world_weights,
             max_action_risk=self.config.max_action_risk,
             affect_min_valence=self.config.affect_min_valence,
             affect_max_arousal=self.config.affect_max_arousal,
@@ -304,6 +380,7 @@ class ConscioService:
         try:
             await self.goals.initialize()
             await self.autonomy.initialize()
+            await self._initialize_world_model_registry()
             await self.runtime.initialize()
             await self._initialize_persistence_trial()
             self.running = True
@@ -396,6 +473,307 @@ class ConscioService:
             )
         return payload
 
+    async def _initialize_world_model_registry(self) -> None:
+        """Register the deterministic baseline or require a verified migration."""
+        active = self.world_model_registry.latest_promoted()
+        if active is None:
+            artifact = self.world_model_registry.register_artifact(
+                _world_model_spec(self.world_weights), self.world_weights.to_json().encode("utf-8")
+            )
+            evidence = ValidationEvidence(
+                candidate_digest=artifact.digest,
+                incumbent_digest=None,
+                dataset_digest=hashlib.sha256(b"deterministic-bootstrap-weights").hexdigest(),
+                protocol_digest=hashlib.sha256(b"v3-bootstrap-registration-v1").hexdigest(),
+                metric_name="deterministic_equivalence",
+                candidate_score=0.0,
+                incumbent_score=None,
+                lower_is_better=True,
+                sample_count=1,
+                passed=True,
+                notes="Initial immutable registration; no live model replacement.",
+            )
+            self.world_model_registry.decide_promotion(
+                incumbent_digest=None,
+                candidate_digest=artifact.digest,
+                evidence=evidence,
+                approve=True,
+                reason="register the deterministic V3 bootstrap artifact",
+                decided_by="runtime_bootstrap",
+            )
+            self.world_model_artifact = artifact
+            return
+
+        active_weights = _weights_from_artifact(active)
+        if active_weights.digest() != self.world_weights.digest():
+            raise RuntimeError("active world-model artifact changed during service initialization")
+        self.world_model_artifact = active
+        if active_weights.revision == 0:
+            return
+        migration = self.world_model_registry.latest_lineage_migration()
+        if migration is None or migration.target_artifact_digest != active.digest:
+            raise RuntimeError(
+                "active trained world model has no verified checkpoint-lineage migration"
+            )
+        checkpoint = await self.memory.get_core_checkpoint(migration.target_checkpoint_id)
+        if checkpoint is None:
+            raise RuntimeError("migrated world-model checkpoint is missing from the state store")
+        if (
+            checkpoint.get("model_version") != active.spec.model_version
+            or checkpoint.get("lineage_id") != migration.target_lineage_id
+        ):
+            raise RuntimeError("migrated checkpoint does not match the active world-model artifact")
+        self.runtime.restore_checkpoint_id = migration.target_checkpoint_id
+
+    async def world_model_status(self) -> dict[str, Any]:
+        active = self.world_model_registry.latest_promoted()
+        migrations = self.world_model_registry.lineage_migrations()
+        return {
+            "active": active is not None,
+            "artifact_digest": active.digest if active is not None else None,
+            "weights_digest": active.weights_digest if active is not None else None,
+            "model_version": self.runtime.recurrent_core.model_version,
+            "revision": self.world_weights.revision,
+            "lineage_id": self.runtime.recurrent_core.lineage_id,
+            "checkpoint_id": self.runtime.recurrent_core.parent_checkpoint_id,
+            "promotion_records": len(self.world_model_registry.promotion_records()),
+            "lineage_migrations": len(migrations),
+            "latest_migration": migrations[-1].to_dict() if migrations else None,
+            "llm_training_reachable": False,
+        }
+
+    async def shadow_world_model_learning(
+        self,
+        *,
+        promote: bool = False,
+        synthetic_episodes: int = 64,
+        seed: int = 17,
+        approved_by: str = "api_operator",
+    ) -> dict[str, Any]:
+        """Train frozen-LLM world weights offline and optionally migrate them."""
+        if synthetic_episodes < 8 or synthetic_episodes > 512:
+            raise ValueError("synthetic_episodes must be in [8, 512]")
+        if promote and self.persistence_trial is not None:
+            raise RuntimeError("world-model promotion is disabled during a persistence trial")
+        async with self._event_lock:
+            events = await self.memory.cognitive_event_history()
+            derived = derive_curriculum_examples(events)
+            synthetic = generate_synthetic_curriculum(seed=seed, episodes=synthetic_episodes)
+            accepted_recorded, recorded_examples, incomplete_episodes = self._recorded_world_examples(
+                derived.examples
+            )
+            curriculum = (*synthetic, *accepted_recorded)
+            training_examples = (
+                *examples_from_curriculum(synthetic),
+                *recorded_examples,
+            )
+            manifest = build_curriculum_manifest(curriculum)
+            settings = WorldTrainingConfig(seed=seed)
+            incumbent = active_world_weights(self.runtime.recurrent_core)
+            outcome = await asyncio.to_thread(
+                train_shadow_world_model,
+                training_examples,
+                incumbent=incumbent,
+                config=settings,
+            )
+            candidate_artifact = self.world_model_registry.register_artifact(
+                _world_model_spec(outcome.candidate), outcome.candidate.to_json().encode("utf-8")
+            )
+            active = self.world_model_registry.latest_promoted()
+            if active is None or self.world_model_artifact is None:
+                raise RuntimeError("world-model bootstrap artifact is not registered")
+            if active.digest != self.world_model_artifact.digest:
+                raise RuntimeError("world-model incumbent changed during shadow training")
+            incumbent_loss = outcome.incumbent_validation_loss
+            candidate_loss = outcome.candidate_validation_loss
+            promoted = False
+            evidence: ValidationEvidence | None = None
+            if incumbent_loss is not None and candidate_loss is not None:
+                evidence = ValidationEvidence(
+                    candidate_digest=candidate_artifact.digest,
+                    incumbent_digest=active.digest,
+                    dataset_digest=manifest.dataset_digest.removeprefix("sha256:"),
+                    protocol_digest=_sha256_json(asdict(settings)),
+                    metric_name="joint_brier_loss",
+                    candidate_score=candidate_loss.total,
+                    incumbent_score=incumbent_loss.total,
+                    lower_is_better=True,
+                    sample_count=len(outcome.validation_episode_ids),
+                    passed=outcome.promoted,
+                    notes="Episode-disjoint offline shadow validation; LLM weights inaccessible.",
+                )
+            if promote and outcome.promoted and evidence is not None:
+                await self._promote_world_model(
+                    candidate=outcome.candidate,
+                    candidate_artifact=candidate_artifact,
+                    evidence=evidence,
+                    approved_by=approved_by,
+                    reason=outcome.reason,
+                )
+                promoted = True
+            return {
+                "synthetic_examples": len(synthetic),
+                "recorded_examples": len(accepted_recorded),
+                "training_transitions": len(training_examples),
+                "curriculum_rejections": len(derived.rejections) + incomplete_episodes,
+                "dataset_digest": manifest.dataset_digest,
+                "candidate_artifact_digest": candidate_artifact.digest,
+                "candidate_weights_digest": outcome.candidate.digest(),
+                "candidate_model_version": outcome.candidate.model_version,
+                "eligible": outcome.promoted,
+                "promoted": promoted,
+                "reason": outcome.reason,
+                "train_episodes": len(outcome.train_episode_ids),
+                "validation_episodes": len(outcome.validation_episode_ids),
+                "training_loss_before": _loss_dict(outcome.training_loss_before),
+                "training_loss_after": _loss_dict(outcome.training_loss_after),
+                "incumbent_validation_loss": _loss_dict(incumbent_loss),
+                "candidate_validation_loss": _loss_dict(candidate_loss),
+                "diagnostics": asdict(outcome.diagnostics) if outcome.diagnostics else None,
+                "active_model": self.runtime.recurrent_core.model_version,
+                "llm_training_reachable": False,
+            }
+
+    @staticmethod
+    def _recorded_world_examples(
+        records: tuple[CurriculumExample, ...],
+    ) -> tuple[tuple[CurriculumExample, ...], tuple[WorldTrainingExample, ...], int]:
+        by_episode: dict[str, list[CurriculumExample]] = {}
+        for record in records:
+            by_episode.setdefault(record.episode_id, []).append(record)
+        accepted: list[CurriculumExample] = []
+        training: list[WorldTrainingExample] = []
+        rejected = 0
+        for episode_id in sorted(by_episode):
+            episode_records = tuple(by_episode[episode_id])
+            by_family: dict[str, list[CurriculumExample]] = {}
+            for record in episode_records:
+                by_family.setdefault(record.target_family, []).append(record)
+            required = {
+                "next_observation",
+                "tool_outcome",
+                "action_effect",
+                "homeostatic_affect_change",
+                "future_uncertainty",
+            }
+            if set(by_family) != required:
+                rejected += 1
+                continue
+            # Runtime episodes can emit one prediction/affect row per cognitive
+            # cycle but only one action/tool outcome. Select the latest causal
+            # record from each family to form the completed action window.
+            episode_records = tuple(
+                max(by_family[family], key=lambda item: (item.step, item.example_id))
+                for family in sorted(required)
+            )
+            try:
+                converted = examples_from_curriculum(episode_records)
+            except ValueError:
+                rejected += 1
+                continue
+            accepted.extend(episode_records)
+            training.extend(converted)
+        return tuple(accepted), tuple(training), rejected
+
+    async def _promote_world_model(
+        self,
+        *,
+        candidate: WorldCoreWeights,
+        candidate_artifact: ModelArtifact,
+        evidence: ValidationEvidence,
+        approved_by: str,
+        reason: str,
+    ) -> None:
+        source_artifact = self.world_model_artifact
+        if source_artifact is None:
+            raise RuntimeError("cannot migrate without an active incumbent artifact")
+        source_core = self.runtime.recurrent_core
+        if source_core.model_version != source_artifact.spec.model_version:
+            raise RuntimeError("live recurrent core does not match the registered incumbent")
+        source_checkpoint = source_core.checkpoint()
+        await self.memory.save_core_checkpoint(source_checkpoint)
+        target_lineage_id = f"lineage_{uuid.uuid4().hex}"
+        target_checkpoint = replace(
+            source_checkpoint,
+            checkpoint_id=f"ckpt_{uuid.uuid4().hex}",
+            lineage_id=target_lineage_id,
+            parent_checkpoint_id=source_checkpoint.checkpoint_id,
+            model_version=candidate.model_version,
+            created_at=time.time(),
+        )
+        await self.memory.save_core_checkpoint(target_checkpoint)
+        self.world_model_registry.decide_promotion(
+            incumbent_digest=source_artifact.digest,
+            candidate_digest=candidate_artifact.digest,
+            evidence=evidence,
+            approve=True,
+            reason=reason,
+            decided_by=approved_by,
+        )
+        transform_digest = _sha256_json(
+            {
+                "kind": "identity-state-transfer-v1",
+                "source_model": source_core.model_version,
+                "target_model": candidate.model_version,
+                "state_size": STATE_SIZE,
+            }
+        )
+        try:
+            migration = self.world_model_registry.record_lineage_migration(
+                source_checkpoint_id=source_checkpoint.checkpoint_id,
+                source_lineage_id=source_checkpoint.lineage_id,
+                source_artifact_digest=source_artifact.digest,
+                target_checkpoint_id=target_checkpoint.checkpoint_id,
+                target_lineage_id=target_lineage_id,
+                target_artifact_digest=candidate_artifact.digest,
+                transform_digest=transform_digest,
+                evidence_digest=evidence.digest(),
+                migrator=approved_by,
+                reason="checkpoint-compatible identity state transfer after shadow validation",
+            )
+        except Exception as exc:  # noqa: BLE001 - any audit failure makes activation unsafe
+            self.last_error = f"world-model promotion requires operator recovery: {exc}"
+            self.pause()
+            raise
+        migrated_core = HybridRecurrentCore(
+            seed=0, lineage_id=target_lineage_id, weights=candidate
+        )
+        migrated_core.restore(target_checkpoint)
+        self.runtime.recurrent_core = migrated_core
+        self.runtime.restore_checkpoint_id = target_checkpoint.checkpoint_id
+        self.runtime.prediction_adapter = AdapterState(
+            base_model_version=candidate.model_version
+        )
+        self.world_weights = candidate
+        self.world_model_artifact = candidate_artifact
+        await self.memory.append_cognitive_event(
+            CognitiveEvent(
+                event_type="model_lineage_migration",
+                source="offline_world_training",
+                payload={
+                    "source_artifact_digest": source_artifact.digest,
+                    "target_artifact_digest": candidate_artifact.digest,
+                    "source_checkpoint_id": source_checkpoint.checkpoint_id,
+                    "target_checkpoint_id": target_checkpoint.checkpoint_id,
+                    "source_lineage_id": source_checkpoint.lineage_id,
+                    "target_lineage_id": target_lineage_id,
+                    "evidence_digest": evidence.digest(),
+                    "migration_record_hash": migration.record_hash,
+                },
+                episode_id=f"model_migration_{migration.record_hash[:16]}",
+                checkpoint_id=target_checkpoint.checkpoint_id,
+            )
+        )
+        self._event_broker.emit(
+            "learning.world_model_promoted",
+            {
+                "artifact_digest": candidate_artifact.digest,
+                "model_version": candidate.model_version,
+                "lineage_id": target_lineage_id,
+                "checkpoint_id": target_checkpoint.checkpoint_id,
+            },
+        )
+
     async def _initialize_persistence_trial(self) -> None:
         if not self.config.persistence_trial_enabled:
             return
@@ -406,7 +784,7 @@ class ConscioService:
         self.persistence_trial = PersistenceTrial(
             JSONLTrialSink(path),
             revision=self.config.persistence_trial_revision,
-            model_version=MODEL_VERSION,
+            model_version=self.runtime.recurrent_core.model_version,
             lineage_id=self.runtime.recurrent_core.lineage_id,
             max_heartbeat_gap_seconds=self.config.persistence_trial_max_heartbeat_gap,
         )

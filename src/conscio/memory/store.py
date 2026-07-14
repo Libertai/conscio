@@ -678,10 +678,19 @@ class MemoryStore:
             )
             conn.commit()
 
-    async def latest_prediction_adapter(self) -> dict[str, Any] | None:
-        row = self.fetchone(
-            "SELECT * FROM prediction_adapter_promotions ORDER BY sequence DESC LIMIT 1"
-        )
+    async def latest_prediction_adapter(
+        self, base_model_version: str | None = None
+    ) -> dict[str, Any] | None:
+        if base_model_version is None:
+            row = self.fetchone(
+                "SELECT * FROM prediction_adapter_promotions ORDER BY sequence DESC LIMIT 1"
+            )
+        else:
+            row = self.fetchone(
+                "SELECT * FROM prediction_adapter_promotions WHERE base_model_version = ? "
+                "ORDER BY sequence DESC LIMIT 1",
+                (base_model_version,),
+            )
         if row is not None:
             row["state"] = json.loads(row["payload"])
         return row

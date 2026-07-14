@@ -208,6 +208,10 @@ class ServiceConfig:
         return self.home / "events" / "v3-persistence-trial.jsonl"
 
     @property
+    def world_model_path(self) -> Path:
+        return self.home / "models" / "v3"
+
+    @property
     def base_url(self) -> str:
         if self.client_url:
             return self.client_url.rstrip("/")
@@ -216,7 +220,7 @@ class ServiceConfig:
 
     def ensure_layout(self) -> None:
         self.home.mkdir(parents=True, exist_ok=True)
-        for child in ("logs", "events", "approvals", "sessions"):
+        for child in ("logs", "events", "approvals", "sessions", "models"):
             (self.home / child).mkdir(parents=True, exist_ok=True)
 
     def validate_public_bind(self) -> None:

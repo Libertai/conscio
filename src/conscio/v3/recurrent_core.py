@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -28,6 +29,29 @@ from conscio.v3.contracts import (
 
 MODEL_VERSION = "v3-bootstrap-rssm-1"
 STATE_SIZE = 24
+
+
+class CoreWeightBundle(Protocol):
+    """Structural interface for an immutable, versioned core weight bundle.
+
+    The inference core deliberately depends only on this small interface.  The
+    offline trainer can therefore remain optional and no language model or
+    training framework is reachable from the recurrent transition.
+    """
+
+    @property
+    def model_version(self) -> str: ...
+
+    @property
+    def history_kernel(self) -> Sequence[Sequence[float]]: ...
+
+    @property
+    def observation_kernel(self) -> Sequence[Sequence[float]]: ...
+
+    @property
+    def broadcast_kernel(self) -> Sequence[Sequence[float]]: ...
+
+    def predict_targets(self, state: np.ndarray) -> Mapping[str, float]: ...
 
 
 @dataclass(frozen=True)
@@ -139,13 +163,29 @@ class _PlanningSpecialist(_Specialist):
 class HybridRecurrentCore:
     """Deterministic history + stochastic latent state with recurrent broadcasts."""
 
-    def __init__(self, *, seed: int = 17, lineage_id: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        seed: int = 17,
+        lineage_id: str | None = None,
+        weights: CoreWeightBundle | None = None,
+    ) -> None:
         self.lineage_id = lineage_id or f"lineage_{uuid.uuid4().hex}"
         self.rng = np.random.default_rng(seed)
-        weights = np.random.default_rng(7301)
-        self._wh = weights.normal(0.0, 0.12, (STATE_SIZE, STATE_SIZE))
-        self._wx = weights.normal(0.0, 0.18, (STATE_SIZE, STATE_SIZE))
-        self._wb = weights.normal(0.0, 0.10, (STATE_SIZE, STATE_SIZE))
+        self._prediction_weights = weights
+        if weights is None:
+            bootstrap = np.random.default_rng(7301)
+            self._wh = bootstrap.normal(0.0, 0.12, (STATE_SIZE, STATE_SIZE))
+            self._wx = bootstrap.normal(0.0, 0.18, (STATE_SIZE, STATE_SIZE))
+            self._wb = bootstrap.normal(0.0, 0.10, (STATE_SIZE, STATE_SIZE))
+            self.model_version = MODEL_VERSION
+        else:
+            self._wh = self._validated_kernel(weights.history_kernel, "history_kernel")
+            self._wx = self._validated_kernel(weights.observation_kernel, "observation_kernel")
+            self._wb = self._validated_kernel(weights.broadcast_kernel, "broadcast_kernel")
+            if not weights.model_version:
+                raise ValueError("weight bundle model_version must be non-empty")
+            self.model_version = weights.model_version
         self.deterministic = np.zeros(STATE_SIZE, dtype=np.float64)
         self.stochastic = np.zeros(STATE_SIZE, dtype=np.float64)
         self.affect = AffectiveState()
@@ -160,6 +200,15 @@ class HybridRecurrentCore:
             "affect": _AffectSpecialist("affect"),
             "planning": _PlanningSpecialist("planning"),
         }
+
+    @property
+    def active_weight_bundle(self) -> CoreWeightBundle | None:
+        """Return the immutable installed bundle; ``None`` denotes bootstrap.
+
+        The core has no setter because changing weights in place would blur the
+        checkpoint's model lineage.  Install promoted weights in a fresh core.
+        """
+        return self._prediction_weights
 
     def run_cycles(
         self,
@@ -200,22 +249,7 @@ class HybridRecurrentCore:
             digest = hashlib.sha256(joint.tobytes()).hexdigest()
             broadcast = Broadcast(cycle=cycle, candidates=winners, recurrent_state_digest=digest)
             self.affect = self._update_affect(winners, joint)
-            predictions = (
-                Prediction(
-                    target="next_observation",
-                    observable="the next cycle contains a task-relevant observation or outcome",
-                    probability=float(np.clip(0.5 + 0.25 * abs(joint[4]), 0.05, 0.95)),
-                    horizon=1,
-                    basis_broadcast_id=broadcast.broadcast_id,
-                ),
-                Prediction(
-                    target="future_uncertainty",
-                    observable="uncertainty does not increase after the selected action",
-                    probability=float(np.clip(0.55 + 0.2 * self.affect.controllability, 0.05, 0.95)),
-                    horizon=1,
-                    basis_broadcast_id=broadcast.broadcast_id,
-                ),
-            ) if prediction_enabled else ()
+            predictions = self._predictions(joint, broadcast) if prediction_enabled else ()
             proposals = self._proposals(event, broadcast)
             results.append(CycleResult(broadcast, predictions, proposals, self.affect))
             previous = broadcast if broadcast_enabled else None
@@ -242,6 +276,51 @@ class HybridRecurrentCore:
             need_errors=errors,
         ).bounded()
 
+    def apply_action_feedback(
+        self, *, succeeded: bool, uncertainty_delta: float = 0.0
+    ) -> AffectiveState:
+        """Apply an observable action outcome to causal affect/homeostasis.
+
+        This transition is deliberately independent of generated emotion text.
+        Success lowers competence and coherence error; failure and increased
+        uncertainty raise them. Recovery remains present in every other need,
+        and no process-survival or shutdown-resistance need exists.
+        """
+        if not np.isfinite(uncertainty_delta):
+            raise ValueError("uncertainty_delta must be finite")
+        prior = self.affect
+        errors = dict(prior.need_errors)
+        if succeeded:
+            errors["competence"] *= 0.65
+            errors["epistemic_coherence"] = (
+                0.72 * errors["epistemic_coherence"]
+                + 0.20 * max(0.0, uncertainty_delta)
+            )
+        else:
+            errors["competence"] = 0.82 * errors["competence"] + 0.18
+            errors["epistemic_coherence"] = (
+                0.85 * errors["epistemic_coherence"]
+                + 0.10
+                + 0.20 * max(0.0, uncertainty_delta)
+            )
+        errors["integrity"] *= 0.94
+        errors["social_interaction"] *= 0.94
+        errors["continuity_of_memory"] *= 0.96
+        errors = {name: float(np.clip(value, -1.0, 1.0)) for name, value in errors.items()}
+        mean_error = sum(abs(value) for value in errors.values()) / len(errors)
+        outcome_valence = 0.35 if succeeded else -0.45
+        self.affect = AffectiveState(
+            valence=0.78 * prior.valence + 0.22 * (outcome_valence - 0.25 * mean_error),
+            arousal=0.80 * prior.arousal + 0.20 * min(
+                1.0, mean_error + (0.0 if succeeded else 0.25)
+            ),
+            controllability=0.80 * prior.controllability + 0.20 * (
+                0.78 if succeeded else 0.25
+            ),
+            need_errors=errors,
+        ).bounded()
+        return self.affect
+
     def _proposals(self, event: CognitiveEvent, broadcast: Broadcast) -> tuple[ActionProposal, ...]:
         content = str(event.payload.get("content", ""))
         need_pressure = sum(abs(v) for v in self.affect.need_errors.values()) / 5.0
@@ -265,13 +344,63 @@ class HybridRecurrentCore:
         )
         return tuple(sorted((answer, clarify), key=lambda p: p.utility - p.risk, reverse=True))
 
+    @staticmethod
+    def _validated_kernel(values: Sequence[Sequence[float]], name: str) -> np.ndarray:
+        kernel = np.asarray(values, dtype=np.float64)
+        if kernel.shape != (STATE_SIZE, STATE_SIZE):
+            raise ValueError(f"{name} must have shape {(STATE_SIZE, STATE_SIZE)}, got {kernel.shape}")
+        if not np.all(np.isfinite(kernel)):
+            raise ValueError(f"{name} must contain only finite values")
+        return kernel.copy()
+
+    def _predictions(self, state: np.ndarray, broadcast: Broadcast) -> tuple[Prediction, ...]:
+        if self._prediction_weights is None:
+            return (
+                Prediction(
+                    target="next_observation",
+                    observable="the next cycle contains a task-relevant observation or outcome",
+                    probability=float(np.clip(0.5 + 0.25 * abs(state[4]), 0.05, 0.95)),
+                    horizon=1,
+                    basis_broadcast_id=broadcast.broadcast_id,
+                ),
+                Prediction(
+                    target="future_uncertainty",
+                    observable="uncertainty does not increase after the selected action",
+                    probability=float(np.clip(0.55 + 0.2 * self.affect.controllability, 0.05, 0.95)),
+                    horizon=1,
+                    basis_broadcast_id=broadcast.broadcast_id,
+                ),
+            )
+        observables = {
+            "next_observation": "a task-relevant observation occurs in the next horizon",
+            "tool_outcome": "the proposed tool action has a successful observable outcome",
+            "action_effect": "the selected action produces its intended observable effect",
+            "homeostatic_affect_change": "aggregate need error improves after the selected action",
+            "future_uncertainty": "uncertainty does not increase after the selected action",
+        }
+        values = self._prediction_weights.predict_targets(state)
+        if set(values) != set(observables):
+            raise ValueError("weight bundle must predict every supported target exactly once")
+        if any(not np.isfinite(value) or not 0.0 <= value <= 1.0 for value in values.values()):
+            raise ValueError("weight bundle target predictions must be finite and in [0, 1]")
+        return tuple(
+            Prediction(
+                target=target,
+                observable=observable,
+                probability=float(values[target]),
+                horizon=1,
+                basis_broadcast_id=broadcast.broadcast_id,
+            )
+            for target, observable in observables.items()
+        )
+
     def checkpoint(self) -> CoreCheckpoint:
         checkpoint_id = f"ckpt_{uuid.uuid4().hex}"
         checkpoint = CoreCheckpoint(
             checkpoint_id=checkpoint_id,
             lineage_id=self.lineage_id,
             parent_checkpoint_id=self.parent_checkpoint_id,
-            model_version=MODEL_VERSION,
+            model_version=self.model_version,
             deterministic_state=tuple(float(v) for v in self.deterministic),
             stochastic_state=tuple(float(v) for v in self.stochastic),
             specialist_states={name: dict(module.private) for name, module in self.specialists.items()},
@@ -284,7 +413,7 @@ class HybridRecurrentCore:
         return checkpoint
 
     def restore(self, checkpoint: CoreCheckpoint) -> None:
-        if checkpoint.model_version != MODEL_VERSION:
+        if checkpoint.model_version != self.model_version:
             raise ValueError(
                 f"checkpoint model {checkpoint.model_version!r} requires an explicit lineage migration"
             )

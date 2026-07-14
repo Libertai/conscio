@@ -16,7 +16,7 @@ from conscio.v3.contracts import (
 )
 from conscio.v3.environment import EnvironmentAdapter, TextEnvironmentAdapter
 from conscio.v3.learning import AdapterState
-from conscio.v3.recurrent_core import MODEL_VERSION, HybridRecurrentCore
+from conscio.v3.recurrent_core import CoreWeightBundle, HybridRecurrentCore
 
 
 def _checkpoint_from_dict(data: dict[str, Any]) -> CoreCheckpoint:
@@ -41,6 +41,8 @@ class V3CognitiveRuntime(CognitiveRuntime):
         environment: EnvironmentAdapter | None = None,
         cognitive_cycles: int = 3,
         core_seed: int = 17,
+        recurrent_weights: CoreWeightBundle | None = None,
+        restore_checkpoint_id: str | None = None,
         max_action_risk: float = 0.35,
         affect_min_valence: float = -0.85,
         affect_max_arousal: float = 0.90,
@@ -49,7 +51,8 @@ class V3CognitiveRuntime(CognitiveRuntime):
     ) -> None:
         super().__init__(*args, **kwargs)
         self.environment = environment or TextEnvironmentAdapter()
-        self.recurrent_core = HybridRecurrentCore(seed=core_seed)
+        self.recurrent_core = HybridRecurrentCore(seed=core_seed, weights=recurrent_weights)
+        self.restore_checkpoint_id = restore_checkpoint_id
         self.cognitive_cycles = max(2, int(cognitive_cycles))
         self.max_action_risk = max(0.0, min(1.0, float(max_action_risk)))
         self.affect_min_valence = max(-1.0, min(0.0, float(affect_min_valence)))
@@ -61,23 +64,33 @@ class V3CognitiveRuntime(CognitiveRuntime):
         self._episode_proposals: dict[str, list[dict[str, Any]]] = {}
         self._episode_selected_proposal: dict[str, dict[str, Any]] = {}
         self._episode_initial_uncertainty: dict[str, float] = {}
-        self.prediction_adapter = AdapterState(base_model_version=MODEL_VERSION)
+        self._episode_initial_need_pressure: dict[str, float] = {}
+        self.prediction_adapter = AdapterState(base_model_version=self.recurrent_core.model_version)
         self.executor.authorize_tool = self._authorize_tool_proposal
 
     async def initialize(self) -> None:
         await super().initialize()
-        latest = await self.memory.latest_core_checkpoint()
+        latest = (
+            await self.memory.get_core_checkpoint(self.restore_checkpoint_id)
+            if self.restore_checkpoint_id
+            else await self.memory.latest_core_checkpoint()
+        )
+        if self.restore_checkpoint_id and latest is None:
+            raise ValueError(f"required migrated checkpoint not found: {self.restore_checkpoint_id}")
         if latest is not None:
             self.recurrent_core.restore(_checkpoint_from_dict(latest))
-        adapter = await self.memory.latest_prediction_adapter()
+        adapter = await self.memory.latest_prediction_adapter(
+            base_model_version=self.recurrent_core.model_version
+        )
         if adapter is not None:
             self.activate_prediction_adapter(AdapterState.from_dict(adapter["state"]))
 
     def activate_prediction_adapter(self, state: AdapterState) -> None:
         """Activate only an explicitly promoted adapter for this exact base model."""
-        if state.base_model_version != MODEL_VERSION:
+        if state.base_model_version != self.recurrent_core.model_version:
             raise ValueError(
-                f"adapter base model {state.base_model_version!r} does not match {MODEL_VERSION!r}"
+                f"adapter base model {state.base_model_version!r} does not match "
+                f"{self.recurrent_core.model_version!r}"
             )
         self.prediction_adapter = state
 
@@ -96,6 +109,9 @@ class V3CognitiveRuntime(CognitiveRuntime):
         self._episode_affect[ts.episode_id] = []
         self._episode_proposals[ts.episode_id] = []
         self._episode_initial_uncertainty[ts.episode_id] = self.self_state.uncertainty
+        self._episode_initial_need_pressure[ts.episode_id] = self._need_pressure(
+            self.recurrent_core.affect
+        )
         for cycle in results:
             if self.ablation.attention_gating:
                 await self._append(
@@ -127,11 +143,11 @@ class V3CognitiveRuntime(CognitiveRuntime):
                 self._episode_predictions[ts.episode_id].append(data)
                 await self._append(ts.episode_id, "prediction", "world_model", data)
                 self.workspace.write(
-                    f"P={prediction.probability:.2f}: {prediction.observable}",
+                    f"P={float(data['probability']):.2f}: {prediction.observable}",
                     source="v3.world_model",
                     type=EntryType.PREDICTION,
                     priority=5,
-                    confidence=prediction.probability,
+                    confidence=float(data["probability"]),
                     metadata={"prediction_id": prediction.prediction_id, "target": prediction.target},
                 )
             affect = cycle.affect.to_dict()
@@ -287,6 +303,7 @@ class V3CognitiveRuntime(CognitiveRuntime):
         result = await super()._finalize_episode(ts, start)
         self._episode_proposals.pop(ts.episode_id, None)
         selected = self._episode_selected_proposal.pop(ts.episode_id, None)
+        await self._record_tool_outcomes(ts.episode_id, result)
         resolutions = await self._resolve_predictions(ts.episode_id, result)
         selected_action = str((selected or {}).get("action", ""))
         tool_failed = any(bool(item.get("error")) for item in result.tool_results)
@@ -335,16 +352,76 @@ class V3CognitiveRuntime(CognitiveRuntime):
         result.exact_model_inputs = self.executor.model_inputs
         return result
 
+    async def _record_tool_outcomes(self, episode_id: str, result: EpisodeResult) -> None:
+        """Persist typed execution labels without copying untrusted tool text."""
+        requests = self.executor.tool_requests
+        for index, item in enumerate(result.tool_results):
+            request = requests[index] if index < len(requests) else None
+            tool = str(item.get("tool") or (request.name if request is not None else ""))
+            if not tool:
+                continue
+            succeeded = not bool(item.get("error"))
+            status = "success" if succeeded else "error"
+            arguments = dict(request.args) if request is not None else {}
+            await self._append(
+                episode_id,
+                "tool_outcome",
+                "runtime_executor",
+                {
+                    "tool": tool,
+                    "arguments": arguments,
+                    "succeeded": succeeded,
+                    "status": status,
+                },
+            )
+            await self._append(
+                episode_id,
+                "observation",
+                "tool_executor",
+                {
+                    "content": f"tool_outcome:{tool}:{status}",
+                    "content_kind": "typed_execution_status",
+                },
+            )
+
     async def _resolve_predictions(
         self, episode_id: str, result: EpisodeResult
     ) -> list[dict[str, Any]]:
         initial_uncertainty = self._episode_initial_uncertainty.pop(episode_id, 0.0)
+        initial_need_pressure = self._episode_initial_need_pressure.pop(episode_id, 0.0)
+        tool_attempted = bool(result.tool_results)
+        tool_succeeded = tool_attempted and not any(
+            bool(item.get("error")) for item in result.tool_results
+        )
+        action_succeeded = bool(result.output.strip() or tool_succeeded) and (
+            not tool_attempted or tool_succeeded
+        )
+        before_affect = self.recurrent_core.affect
+        after_affect = self.recurrent_core.apply_action_feedback(
+            succeeded=action_succeeded,
+            uncertainty_delta=self.self_state.uncertainty - initial_uncertainty,
+        )
+        affect_payload = {
+            **after_affect.to_dict(),
+            "phase": "action_outcome",
+            "succeeded": action_succeeded,
+            "before_need_pressure": self._need_pressure(before_affect),
+            "after_need_pressure": self._need_pressure(after_affect),
+        }
+        self._episode_affect.setdefault(episode_id, []).append(affect_payload)
+        await self._append(episode_id, "affect", "action_evaluation", affect_payload)
         resolutions: list[dict[str, Any]] = []
         for prediction in self._episode_predictions.get(episode_id, []):
             target = prediction["target"]
             observed: bool | None
             if target == "next_observation":
                 observed = bool(result.output.strip() or result.tool_results)
+            elif target == "tool_outcome":
+                observed = tool_succeeded if tool_attempted else None
+            elif target == "action_effect":
+                observed = bool(result.output.strip() or tool_succeeded)
+            elif target == "homeostatic_affect_change":
+                observed = self._need_pressure(self.recurrent_core.affect) <= initial_need_pressure
             elif target == "future_uncertainty" and self.ablation.self_state_coupling:
                 observed = self.self_state.uncertainty <= initial_uncertainty
             else:
@@ -366,6 +443,11 @@ class V3CognitiveRuntime(CognitiveRuntime):
             prediction["resolved"] = observed is not None
             prediction["error"] = error
         return resolutions
+
+    @staticmethod
+    def _need_pressure(state: AffectiveState) -> float:
+        values = tuple(abs(float(value)) for value in state.need_errors.values())
+        return sum(values) / max(1, len(values))
 
     async def set_safe_affect_state(
         self,

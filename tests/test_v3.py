@@ -11,6 +11,7 @@ from conscio.eval.v3_experiments import validate_condition_blind_prompt
 from conscio.memory.store import MemoryStore
 from conscio.service import ConscioService
 from conscio.tools import ToolRegistry
+from conscio.v3.curriculum import derive_curriculum_examples
 from conscio.v3.learning import AdapterState
 from conscio.v3.recurrent_core import MODEL_VERSION
 from conscio.v3.runtime import V3CognitiveRuntime
@@ -67,7 +68,12 @@ class V3RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(types[-1], "checkpoint")
         self.assertEqual(result.causal_trace, persisted)
         self.assertTrue(result.checkpoint_reference.startswith("ckpt_"))
-        self.assertEqual(len(result.affect_trajectory), 3)
+        self.assertEqual(len(result.affect_trajectory), 4)
+        self.assertEqual(result.affect_trajectory[-1]["phase"], "action_outcome")
+        self.assertLessEqual(
+            result.affect_trajectory[-1]["after_need_pressure"],
+            result.affect_trajectory[-1]["before_need_pressure"],
+        )
         self.assertTrue(result.predictions)
         self.assertTrue(all(item["resolved"] for item in result.predictions))
         self.assertEqual(
@@ -205,6 +211,24 @@ class V3RuntimeTests(unittest.IsolatedAsyncioTestCase):
             event for event in result.causal_trace if event["event_type"] == "tool_authorization"
         )
         self.assertTrue(authorization["payload"]["allowed"])
+        curriculum = derive_curriculum_examples(result.causal_trace)
+        families = {example.target_family for example in curriculum.examples}
+        self.assertEqual(
+            families,
+            {
+                "next_observation",
+                "tool_outcome",
+                "action_effect",
+                "homeostatic_affect_change",
+                "future_uncertainty",
+            },
+        )
+        accepted, training, rejected = ConscioService._recorded_world_examples(
+            curriculum.examples
+        )
+        self.assertEqual(rejected, 0)
+        self.assertEqual(len(accepted), 5)
+        self.assertEqual(len(training), 1)
 
     async def test_explicitly_promoted_prediction_adapter_restores_and_is_traced(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

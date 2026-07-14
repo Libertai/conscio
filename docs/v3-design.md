@@ -9,9 +9,10 @@ but the service now instantiates `V3CognitiveRuntime`.
 - Typed contracts for cognitive events, candidates, broadcasts, predictions,
   affect, action proposals/outcomes, and recurrent checkpoints.
 - A text environment adapter behind the generic `EnvironmentAdapter` protocol.
-- A hybrid recurrent state-space bootstrap core with deterministic history,
-  stochastic latent state, explicit world/self predictions, and configurable
-  multi-cycle processing before language-model execution.
+- A hybrid recurrent state-space core with deterministic history, stochastic
+  latent state, explicit world/self predictions, configurable multi-cycle
+  processing, and immutable injectable weight bundles. The deterministic
+  bootstrap remains the default until a candidate passes offline validation.
 - Private state for perception, memory, world-model, self-model, affect, and
   planning specialists. Specialists communicate only through typed candidates
   and the prior cycle's broadcast.
@@ -25,6 +26,8 @@ but the service now instantiates `V3CognitiveRuntime`.
 - Causal affect dimensions and need errors with recovery dynamics. The need set
   deliberately excludes process survival and shutdown resistance. Operator
   safe-state changes are recorded in the append-only intervention audit.
+  Observable action success/failure and uncertainty change also drive a
+  post-action affect transition, which is recorded before predictions resolve.
 - Live `workspace.broadcast`, `workspace.prediction`, `workspace.affect`, and
   `workspace.self_state` events through the existing SSE broker.
 - End-to-end memory and self-model lesions: the memory lesion removes retrieval
@@ -44,6 +47,21 @@ but the service now instantiates `V3CognitiveRuntime`.
   `{"promote": true}` still promotes only a candidate that passes every gate.
   Promotions are append-only, operator-attributed, model-version checked, and
   restored after restart. Recurrent base weights are never mutated online.
+- A deterministic synthetic and event-replay curriculum for next observations,
+  tool outcomes, action effects, affect/homeostatic changes, and future
+  uncertainty. Every example records whether its target is synthetic ground
+  truth or a recorded observation, outcome, or measurement; generated model
+  output cannot be promoted to fact. Dataset JSONL files and manifests are
+  content addressed and corruption checked.
+- NumPy-only offline recurrent-core training with episode-disjoint validation,
+  deterministic seeds, finite-value checks, gradient clipping, per-step and
+  total parameter bounds, per-target regression gates, and exact immutable
+  parent-weight lineage. No LLM client or LLM parameter is reachable from this
+  training module.
+- A content-addressed world-model registry with atomic immutable artifacts and
+  hash-chained promotion/migration audits. A promoted candidate receives a new
+  recurrent lineage and checkpoint; startup refuses a trained artifact whose
+  migration record or target checkpoint is missing or inconsistent.
 - Immutable preregistration manifests, sealed condition mappings, matched
   single-lesion randomization, prompt-leakage validation, controlled unblinding,
   exact-binomial identification analysis, and confidence calibration metrics.
@@ -54,10 +72,31 @@ but the service now instantiates `V3CognitiveRuntime`.
 - Configurable affect exposure limits plus authenticated
   `POST /control/affect-safe`; every automatic or operator recovery is audited.
 
-The bootstrap recurrent base weights are fixed and untrained. This is intentional:
-the implementation creates reproducible prediction/outcome records from which
-synthetic curricula and replay training can be built, but it is not evidence
-that the core has learned a world model yet.
+The repository now contains a trainable recurrent core and a synthetic/replay
+training path. The committed bootstrap is still untrained, and test-time
+training success is not evidence that a production agent has learned a useful
+world model. No research run is claimed until its exact dataset manifest,
+validation evidence, artifact digest, promotion record, and migrated checkpoint
+are published together.
+
+## World-model operation
+
+`GET /learning/world-model` returns the active artifact, model version,
+recurrent lineage, and migration state. `POST /learning/world-model-shadow`
+builds a curriculum and trains a bounded candidate without changing the live
+runtime by default:
+
+```json
+{"promote": false, "synthetic_episodes": 64, "seed": 17}
+```
+
+Setting `promote` to `true` is only a request: the candidate must still pass
+every held-out training gate and registry compatibility check. Activation saves
+source and target checkpoints, records the content-addressed evidence and
+identity state transform, starts a new lineage, and resets prediction
+calibration for the new exact base version. Base-model promotion is prohibited
+during a persistence trial. Artifacts and audit logs live under
+`~/.conscio/models/v3/` by default.
 
 ## Persistence invariants
 
@@ -72,8 +111,9 @@ condition-blind analysis; neither is inserted into the model prompt.
 The following require training runs, preregistration, external review, or real
 elapsed-time trials and are not claimed complete by the code foundation:
 
-1. Train recurrent base weights on synthetic text/tool curricula, then episode
-   replay; keep base-weight promotion offline and shadow validated.
+1. Freeze a production curriculum manifest, train and promote a study artifact,
+   then publish held-out results. The machinery exists, but no production model
+   or real-agent performance claim is committed yet.
 2. Freeze a study-specific manifest and execute the matched, condition-blind
    experiments described in `research/v3-preregistration-template.md`.
 3. Establish independent research/welfare review before sustained affect work.

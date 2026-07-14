@@ -54,6 +54,12 @@ class ShadowLearningRequest(BaseModel):
     promote: bool = False
 
 
+class WorldModelLearningRequest(BaseModel):
+    promote: bool = False
+    synthetic_episodes: int = Field(default=64, ge=8, le=512)
+    seed: int = 17
+
+
 def create_app(service: ConscioService | None = None, config: ServiceConfig | None = None) -> FastAPI:
     svc = service or ConscioService(config)
 
@@ -262,6 +268,23 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
     @app.post("/learning/prediction-shadow", dependencies=[Depends(require_auth)])
     async def prediction_shadow(req: ShadowLearningRequest) -> dict[str, Any]:
         return await svc.shadow_prediction_learning(promote=req.promote)
+
+    @app.get("/learning/world-model", dependencies=[Depends(require_auth)])
+    async def world_model_status() -> dict[str, Any]:
+        return await svc.world_model_status()
+
+    @app.post("/learning/world-model-shadow", dependencies=[Depends(require_auth)])
+    async def world_model_shadow(req: WorldModelLearningRequest) -> dict[str, Any]:
+        try:
+            return await svc.shadow_world_model_learning(
+                promote=req.promote,
+                synthetic_episodes=req.synthetic_episodes,
+                seed=req.seed,
+            )
+        except RuntimeError as exc:
+            if "persistence trial" in str(exc):
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise
 
     @app.get("/trials/persistence", dependencies=[Depends(require_auth)])
     async def persistence_trial(acceptance: bool = False) -> dict[str, Any]:
