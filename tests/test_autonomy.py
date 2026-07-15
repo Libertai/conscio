@@ -1,5 +1,6 @@
 """Tests for the autonomous-action path: self-management tools, LLM-driven goal review,
 and end-to-end heartbeat through the autonomous executor strategy."""
+
 from __future__ import annotations
 
 import os
@@ -57,10 +58,7 @@ class AutonomyMetaToolTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         config_path = Path(self.tmp.name) / "config.toml"
         config_path.write_text(
-            "[service]\n"
-            f"home = \"{self.tmp.name}\"\n"
-            "api_key = \"test-key\"\n"
-            "autonomous = false\n",
+            f'[service]\nhome = "{self.tmp.name}"\napi_key = "test-key"\nautonomous = false\n',
             encoding="utf-8",
         )
         self.config = load_config(config_path)
@@ -77,13 +75,15 @@ class AutonomyMetaToolTests(unittest.IsolatedAsyncioTestCase):
             assert project is not None
             task = await service.autonomy.add_task(project.id, "First step.")
 
-            stub = _StubLLM([
-                _tool_call_response(
-                    "set_task_status",
-                    f'{{"task_id": "{task.id}", "status": "done", "result": "did it"}}',
-                ),
-                {"content": "Marked the task done."},
-            ])
+            stub = _StubLLM(
+                [
+                    _tool_call_response(
+                        "set_task_status",
+                        f'{{"task_id": "{task.id}", "status": "done", "result": "did it"}}',
+                    ),
+                    {"content": "Marked the task done."},
+                ]
+            )
             service.runtime._autonomous_module.llm = stub
             await service.run_autonomous_tick()
             project_after = await service.get_project(project.id)
@@ -97,13 +97,15 @@ class AutonomyMetaToolTests(unittest.IsolatedAsyncioTestCase):
         service = ConscioService(self.config)
         await service.start(background=False)
         try:
-            stub = _StubLLM([
-                _tool_call_response(
-                    "propose_subgoal",
-                    '{"description": "Research my own logging surface", "rationale": "I need observability."}',
-                ),
-                {"content": "Proposed."},
-            ])
+            stub = _StubLLM(
+                [
+                    _tool_call_response(
+                        "propose_subgoal",
+                        '{"description": "Research my own logging surface", "rationale": "I need observability."}',
+                    ),
+                    {"content": "Proposed."},
+                ]
+            )
             service.runtime._autonomous_module.llm = stub
             await service.run_autonomous_tick()
             goals = await service.goals.list_goals()
@@ -119,15 +121,9 @@ class AutonomyMetaToolTests(unittest.IsolatedAsyncioTestCase):
         await service.start(background=False)
         try:
             service.memory.embedder = StubEmbedder()
-            first = await service.goals.propose_goal(
-                "Map the conscio web UI event stream end to end."
-            )
-            dup = await service.goals.propose_goal(
-                "Map the conscio web UI event stream end to end."
-            )
-            events = service.memory.fetchall(
-                "SELECT COUNT(*) AS n FROM action_events WHERE kind = 'goal_dup_rejected'"
-            )
+            first = await service.goals.propose_goal("Map the conscio web UI event stream end to end.")
+            dup = await service.goals.propose_goal("Map the conscio web UI event stream end to end.")
+            events = service.memory.fetchall("SELECT COUNT(*) AS n FROM action_events WHERE kind = 'goal_dup_rejected'")
             goals = await service.goals.list_goals()
         finally:
             await service.stop()
@@ -144,10 +140,12 @@ class AutonomyMetaToolTests(unittest.IsolatedAsyncioTestCase):
         service = ConscioService(self.config)
         await service.start(background=False)
         try:
-            stub = _StubLLM([
-                _tool_call_response("note_progress", '{"content": "thinking aloud about the goal"}'),
-                {"content": "Noted."},
-            ])
+            stub = _StubLLM(
+                [
+                    _tool_call_response("note_progress", '{"content": "thinking aloud about the goal"}'),
+                    {"content": "Noted."},
+                ]
+            )
             service.runtime._autonomous_module.llm = stub
             await service.run_autonomous_tick()
             trace = await service.recent_trace()
@@ -174,10 +172,7 @@ class GoalReviewWithLLMTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         config_path = Path(self.tmp.name) / "config.toml"
         config_path.write_text(
-            "[service]\n"
-            f"home = \"{self.tmp.name}\"\n"
-            "api_key = \"test-key\"\n"
-            "autonomous = false\n",
+            f'[service]\nhome = "{self.tmp.name}"\napi_key = "test-key"\nautonomous = false\n',
             encoding="utf-8",
         )
         self.config = load_config(config_path)
@@ -195,11 +190,11 @@ class GoalReviewWithLLMTests(unittest.IsolatedAsyncioTestCase):
             target_reprioritize = goals_before[0]["id"]
 
             decisions_payload = (
-                '['
+                "["
                 f'{{"goal_id": "{target_retire}", "action": "retire", "reason": "Stale."}},'
                 f'{{"goal_id": "{target_reprioritize}", "action": "reprioritize", '
                 f'"new_priority": 0.95, "reason": "Top focus."}}'
-                ']'
+                "]"
             )
             stub = _StubLLM([{"content": decisions_payload}])
             applied = await service.goals.review_with_llm(
@@ -221,9 +216,7 @@ class GoalReviewWithLLMTests(unittest.IsolatedAsyncioTestCase):
         try:
             goals_before = await service.goals.list_goals(status="active")
             target = goals_before[0]["id"]
-            stub = _StubLLM([
-                {"content": f'[{{"goal_id": "{target}", "action": "keep", "reason": "Solid."}}]'}
-            ])
+            stub = _StubLLM([{"content": f'[{{"goal_id": "{target}", "action": "keep", "reason": "Solid."}}]'}])
             applied = await service.goals.review_with_llm(
                 stub,
                 recent_episodes=[],
@@ -308,15 +301,16 @@ class GoalReviewWithLLMTests(unittest.IsolatedAsyncioTestCase):
         await service.start(background=False)
         try:
             service._goal_review_interval = 1
-            stub = _StubLLM([
-                {"content": "Thinking about the goal."},
-                {"content": "no decisions today"},
-            ])
+            stub = _StubLLM(
+                [
+                    {"content": "Thinking about the goal."},
+                    {"content": "no decisions today"},
+                ]
+            )
             service.runtime._autonomous_module.llm = stub
             await service.run_autonomous_tick()
             rows = service.memory.fetchall(
-                "SELECT kind, COUNT(*) AS n FROM action_events "
-                "WHERE kind LIKE 'goal_review_%' GROUP BY kind"
+                "SELECT kind, COUNT(*) AS n FROM action_events WHERE kind LIKE 'goal_review_%' GROUP BY kind"
             )
         finally:
             await service.stop()
@@ -344,10 +338,7 @@ class PerToolSchemaTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         config_path = Path(self.tmp.name) / "config.toml"
         config_path.write_text(
-            "[service]\n"
-            f"home = \"{self.tmp.name}\"\n"
-            "api_key = \"test-key\"\n"
-            "autonomous = false\n",
+            f'[service]\nhome = "{self.tmp.name}"\napi_key = "test-key"\nautonomous = false\n',
             encoding="utf-8",
         )
         self.config = load_config(config_path)
@@ -361,14 +352,20 @@ class PerToolSchemaTests(unittest.IsolatedAsyncioTestCase):
         await service.start(background=False)
         try:
             schemas = service.runtime.tools.tool_schemas()
+            bash_manifest = service.runtime.tools.tool_manifest("bash")
             bash_caps = service.runtime.tools.tool_capabilities("bash")
             web_caps = service.runtime.tools.tool_capabilities("web_fetch")
             remember_caps = service.runtime.tools.tool_capabilities("remember_fact")
         finally:
             await service.stop()
 
-        self.assertIn("bash", schemas)
-        bash_schema = schemas["bash"]
+        # Disabled unsafe tools retain auditable metadata but are not advertised
+        # to the language specialist as available actions.
+        self.assertNotIn("bash", schemas)
+        self.assertIsNotNone(bash_manifest)
+        assert bash_manifest is not None
+        self.assertFalse(bash_manifest["policy_eligible"])
+        bash_schema = bash_manifest["schema"]
         self.assertEqual(bash_schema.get("type"), "object")
         self.assertIn("command", bash_schema.get("properties", {}))
         self.assertEqual(bash_schema.get("additionalProperties"), False)

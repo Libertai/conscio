@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -37,7 +39,7 @@ _TRUST_BY_ORIGIN = {
     "quarantined": 0,
 }
 _CONF_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Schema v2 (fresh-start DB, no migration from v1):
 # - unified `episodes` keyed by the runtime's per-episode uuid (canonical id),
@@ -165,6 +167,8 @@ CREATE TABLE IF NOT EXISTS cognitive_events (
 );
 CREATE INDEX IF NOT EXISTS idx_cognitive_events_episode
     ON cognitive_events (episode_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_cognitive_events_type_sequence
+    ON cognitive_events (event_type, sequence);
 CREATE TABLE IF NOT EXISTS core_checkpoints (
     checkpoint_id TEXT PRIMARY KEY,
     lineage_id    TEXT NOT NULL,
@@ -236,6 +240,22 @@ class FactWriteResult:
     contradicted: list[int] = field(default_factory=list)
 
 
+@dataclass(frozen=True, slots=True)
+class CognitiveEventAppendResult:
+    """Result of an idempotent append keyed by a deterministic event ID."""
+
+    sequence: int
+    inserted: bool
+
+
+class CognitiveEventConflictError(RuntimeError):
+    """A deterministic event ID was reused for different causal content."""
+
+
+class ExecutionJournalCorruptionError(RuntimeError):
+    """Execution journal records are malformed, conflicting, or out of order."""
+
+
 # Cross-process writers (CLI export/backup against a live service) get 5s of
 # grace instead of an immediate "database is locked" error.
 BUSY_TIMEOUT_MS = 5000
@@ -296,6 +316,105 @@ def _rebuild_memory_fts(conn: sqlite3.Connection) -> None:
                     "INSERT INTO memory_fts (content, memory_type, ref_id) VALUES (?, ?, ?)",
                     (content, "episode", row["id"]),
                 )
+
+
+_COGNITIVE_EVENT_COLUMNS = (
+    "event_id",
+    "episode_id",
+    "event_type",
+    "source",
+    "payload",
+    "model_input",
+    "checkpoint_id",
+    "parent_event_id",
+    "schema_version",
+    "observed_at",
+)
+_COGNITIVE_EVENT_IDENTITY_COLUMNS = _COGNITIVE_EVENT_COLUMNS[:-1]
+_EXECUTION_JOURNAL_EVENT_TYPES = (
+    "execution_intent",
+    "execution_outcome",
+    "execution_reconciliation",
+    "execution_recovery",
+)
+
+
+def _canonical_json(value: Any, label: str) -> str:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must contain finite JSON data") from exc
+
+
+def _cognitive_event_record(event: Any) -> dict[str, Any]:
+    data = event.to_dict() if hasattr(event, "to_dict") else dict(event)
+    required = {"event_id", "episode_id", "event_type", "source"}
+    missing = required - set(data)
+    if missing:
+        raise ValueError(f"cognitive event is missing fields: {sorted(missing)}")
+    for name in required:
+        if not isinstance(data[name], str) or not data[name].strip():
+            raise ValueError(f"cognitive event {name} must be a non-empty string")
+    schema_version = data.get("schema_version", 1)
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int) or schema_version < 1:
+        raise ValueError("cognitive event schema_version must be a positive integer")
+    observed_at = data.get("observed_at", time.time())
+    if isinstance(observed_at, bool) or not isinstance(observed_at, (int, float)) or not math.isfinite(observed_at):
+        raise ValueError("cognitive event observed_at must be finite and numeric")
+    payload = data["payload"] if "payload" in data else {}
+    if not isinstance(payload, Mapping):
+        raise ValueError("cognitive event payload must be an object")
+    model_input = data.get("model_input")
+    if model_input is not None and not isinstance(model_input, Mapping):
+        raise ValueError("cognitive event model_input must be an object or null")
+    for name in ("checkpoint_id", "parent_event_id"):
+        value = data.get(name)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f"cognitive event {name} must be a non-empty string or null")
+    return {
+        "event_id": data["event_id"],
+        "episode_id": data["episode_id"],
+        "event_type": data["event_type"],
+        "source": data["source"],
+        "payload": _canonical_json(dict(payload), "cognitive event payload"),
+        "model_input": (
+            _canonical_json(dict(model_input), "cognitive event model_input") if model_input is not None else None
+        ),
+        "checkpoint_id": data.get("checkpoint_id"),
+        "parent_event_id": data.get("parent_event_id"),
+        "schema_version": schema_version,
+        "observed_at": float(observed_at),
+    }
+
+
+def _event_identity(record: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Causal equality deliberately excludes insertion-time ``observed_at``."""
+
+    return tuple(record[name] for name in _COGNITIVE_EVENT_IDENTITY_COLUMNS)
+
+
+def _decode_cognitive_event_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    decoded = dict(row)
+    try:
+        payload = json.loads(str(decoded.get("payload") or "{}"))
+        model_input = json.loads(str(decoded["model_input"])) if decoded.get("model_input") is not None else None
+    except json.JSONDecodeError as exc:
+        raise ExecutionJournalCorruptionError(
+            f"cognitive event {decoded.get('event_id')!r} contains invalid JSON"
+        ) from exc
+    if not isinstance(payload, dict) or (model_input is not None and not isinstance(model_input, dict)):
+        raise ExecutionJournalCorruptionError(
+            f"cognitive event {decoded.get('event_id')!r} contains a non-object payload"
+        )
+    decoded["payload"] = payload
+    decoded["model_input"] = model_input
+    return decoded
 
 
 class MemoryStore:
@@ -590,12 +709,187 @@ class MemoryStore:
                 raise RuntimeError("cognitive event insert did not return a sequence")
             return cursor.lastrowid
 
+    async def append_cognitive_event_idempotent(self, event: Any) -> CognitiveEventAppendResult:
+        """Append once by deterministic ``event_id``.
+
+        A retry with identical causal content returns the original sequence and
+        ``inserted=False``.  ``observed_at`` is deliberately excluded from causal
+        equality because a reconstructed retry cannot reproduce wall-clock time.
+        Reusing the ID for any other field is journal corruption and raises.
+        """
+
+        record = _cognitive_event_record(event)
+        values = tuple(record[name] for name in _COGNITIVE_EVENT_COLUMNS)
+        with self._lock:
+            conn = self._conn()
+            try:
+                cursor = conn.execute(
+                    "INSERT INTO cognitive_events "
+                    "(event_id, episode_id, event_type, source, payload, model_input, checkpoint_id, "
+                    "parent_event_id, schema_version, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(event_id) DO NOTHING",
+                    values,
+                )
+                if cursor.rowcount == 1:
+                    conn.commit()
+                    if cursor.lastrowid is None:
+                        raise RuntimeError("cognitive event insert did not return a sequence")
+                    return CognitiveEventAppendResult(sequence=int(cursor.lastrowid), inserted=True)
+                existing_row = conn.execute(
+                    "SELECT * FROM cognitive_events WHERE event_id = ?",
+                    (record["event_id"],),
+                ).fetchone()
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+        if existing_row is None:  # pragma: no cover - protected by the unique index
+            raise RuntimeError("cognitive event conflict did not resolve to an existing row")
+        existing = _cognitive_event_record(_decode_cognitive_event_row(dict(existing_row)))
+        if _event_identity(existing) != _event_identity(record):
+            raise CognitiveEventConflictError(
+                f"cognitive event ID {record['event_id']!r} already has different causal content"
+            )
+        return CognitiveEventAppendResult(sequence=int(existing_row["sequence"]), inserted=False)
+
     async def cognitive_events(self, episode_id: str) -> list[dict[str, Any]]:
         rows = self._fetchall("SELECT * FROM cognitive_events WHERE episode_id = ? ORDER BY sequence", (episode_id,))
         for row in rows:
             row["payload"] = json.loads(row.get("payload") or "{}")
             row["model_input"] = json.loads(row["model_input"]) if row.get("model_input") is not None else None
         return rows
+
+    async def unresolved_execution_intents(self) -> list[dict[str, Any]]:
+        """Return every validated intent without a terminal journal record.
+
+        The query is deliberately unbounded.  ``execution_outcome`` and
+        operator ``execution_reconciliation`` records are terminal;
+        ``execution_recovery`` is an audit marker only and never resolves an
+        uncertain dispatch.  Malformed, conflicting, duplicated, or out-of-order
+        records raise instead of silently changing recovery behavior.
+        """
+
+        from conscio.v3.contracts import (  # noqa: PLC0415
+            ExecutionIntent,
+            ExecutionOutcome,
+            ExecutionReconciliation,
+            ExecutionRecovery,
+        )
+
+        placeholders = ",".join("?" for _ in _EXECUTION_JOURNAL_EVENT_TYPES)
+        rows = self._fetchall(
+            f"SELECT * FROM cognitive_events WHERE event_type IN ({placeholders}) ORDER BY sequence",
+            _EXECUTION_JOURNAL_EVENT_TYPES,
+        )
+        decoded = [_decode_cognitive_event_row(row) for row in rows]
+        intents: dict[str, tuple[dict[str, Any], ExecutionIntent]] = {}
+        terminals: dict[str, list[dict[str, Any]]] = {}
+        recoveries: dict[str, list[dict[str, Any]]] = {}
+        required_sources = {
+            "execution_intent": "runtime_executor",
+            "execution_outcome": "runtime_executor",
+            "execution_reconciliation": "operator_reconciliation",
+            "execution_recovery": "runtime_recovery",
+        }
+
+        for row in decoded:
+            event_type = str(row["event_type"])
+            payload = row["payload"]
+            assert isinstance(payload, dict)  # established by _decode_cognitive_event_row
+            try:
+                if row["source"] != required_sources[event_type]:
+                    raise ExecutionJournalCorruptionError(
+                        f"{event_type} event {row.get('event_id')!r} has the wrong source"
+                    )
+                if event_type == "execution_intent":
+                    intent = ExecutionIntent.from_dict(payload)
+                    if intent.execution_id in intents:
+                        raise ExecutionJournalCorruptionError(f"duplicate execution intent for {intent.execution_id!r}")
+                    if row["event_id"] != intent.event_id:
+                        raise ExecutionJournalCorruptionError(
+                            f"execution intent {intent.execution_id!r} has a non-deterministic event ID"
+                        )
+                    intents[intent.execution_id] = (row, intent)
+                    continue
+
+                record: ExecutionOutcome | ExecutionRecovery | ExecutionReconciliation
+                if event_type == "execution_outcome":
+                    record = ExecutionOutcome.from_dict(payload)
+                elif event_type == "execution_recovery":
+                    record = ExecutionRecovery.from_dict(payload)
+                else:
+                    record = ExecutionReconciliation.from_dict(payload)
+                execution_id = record.execution_id
+                if row["event_id"] != record.event_id:
+                    raise ExecutionJournalCorruptionError(
+                        f"{event_type} {execution_id!r} has a non-deterministic event ID"
+                    )
+                row["_journal_record"] = record
+                target = recoveries if event_type == "execution_recovery" else terminals
+                target.setdefault(execution_id, []).append(row)
+                if event_type == "execution_outcome":
+                    row["_outcome"] = record
+            except ExecutionJournalCorruptionError:
+                raise
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ExecutionJournalCorruptionError(
+                    f"invalid {event_type} event {row.get('event_id')!r}: {exc}"
+                ) from exc
+
+        referenced_ids = set(terminals) | set(recoveries)
+        missing_intents = sorted(referenced_ids - set(intents))
+        if missing_intents:
+            raise ExecutionJournalCorruptionError(
+                f"execution journal records reference missing intents: {missing_intents}"
+            )
+
+        unresolved: list[dict[str, Any]] = []
+        for execution_id, (intent_row, intent) in intents.items():
+            terminal_rows = terminals.get(execution_id, [])
+            recovery_rows = recoveries.get(execution_id, [])
+            if len(terminal_rows) > 1:
+                raise ExecutionJournalCorruptionError(f"execution {execution_id!r} has multiple terminal records")
+            if len(recovery_rows) > 1:
+                raise ExecutionJournalCorruptionError(f"execution {execution_id!r} has multiple recovery records")
+            for reference in (*terminal_rows, *recovery_rows):
+                if reference["episode_id"] != intent_row["episode_id"]:
+                    raise ExecutionJournalCorruptionError(
+                        f"execution journal record for {execution_id!r} belongs to a different episode"
+                    )
+                if reference["parent_event_id"] != intent.event_id:
+                    raise ExecutionJournalCorruptionError(
+                        f"execution journal record for {execution_id!r} has the wrong parent event"
+                    )
+                if int(reference["sequence"]) <= int(intent_row["sequence"]):
+                    raise ExecutionJournalCorruptionError(
+                        f"execution journal record for {execution_id!r} precedes its intent"
+                    )
+                if reference["_journal_record"].intent_digest != intent.intent_digest:
+                    raise ExecutionJournalCorruptionError(
+                        f"execution journal record for {execution_id!r} has the wrong intent digest"
+                    )
+            if terminal_rows:
+                terminal = terminal_rows[0]
+                terminal_outcome = terminal.get("_outcome")
+                if terminal_outcome is not None and (
+                    terminal_outcome.proposal_id != intent.proposal_id
+                    or terminal_outcome.action_digest != intent.action_digest
+                    or terminal_outcome.tool != intent.tool
+                ):
+                    raise ExecutionJournalCorruptionError(
+                        f"execution outcome for {execution_id!r} disagrees with its intent identity"
+                    )
+                if recovery_rows and int(recovery_rows[0]["sequence"]) >= int(terminal["sequence"]):
+                    raise ExecutionJournalCorruptionError(
+                        f"execution recovery for {execution_id!r} was appended after a terminal record"
+                    )
+                continue
+            unresolved.append(intent_row)
+
+        for row in decoded:
+            row.pop("_journal_record", None)
+            row.pop("_outcome", None)
+        return unresolved
 
     async def save_core_checkpoint(self, checkpoint: Any) -> None:
         """Persist a versioned immutable checkpoint; duplicate ids are errors."""

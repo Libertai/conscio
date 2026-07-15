@@ -146,6 +146,57 @@ def test_horizon_uses_the_matching_later_outcome() -> None:
     assert dataset.samples[0].resolution_event_id == "second_episode"
 
 
+def test_unobserved_action_outcome_cannot_resolve_replay_predictions() -> None:
+    events = [
+        _prediction("episode", "observation", 0.6, "next_observation", 1),
+        _prediction("episode", "success", 0.4, "action_success", 2),
+        _outcome(
+            "episode",
+            3,
+            observation="synthetic output must not become evidence",
+            succeeded=True,
+            observed=False,
+            learning_eligible=False,
+            prediction_outcomes={"success": True},
+        ),
+    ]
+
+    dataset = derive_replay_samples(events)
+
+    assert not dataset.samples
+    assert len(dataset.rejections) == 2
+    assert all("not resolved" in rejection.reason for rejection in dataset.rejections)
+
+
+@pytest.mark.parametrize(
+    ("marker", "observed", "reason"),
+    [
+        ("false", False, "learning_eligible marker is not boolean"),
+        (True, False, "not explicitly observed"),
+    ],
+)
+def test_malformed_or_inconsistent_learning_markers_are_rejected(
+    marker: object,
+    observed: object,
+    reason: str,
+) -> None:
+    dataset = derive_replay_samples(
+        [
+            _prediction("episode", "success", 0.4, "action_success", 1),
+            _outcome(
+                "episode",
+                2,
+                succeeded=True,
+                observed=observed,
+                learning_eligible=marker,
+            ),
+        ]
+    )
+
+    assert not dataset.samples
+    assert any(reason in rejection.reason for rejection in dataset.rejections)
+
+
 def test_malformed_ambiguous_and_unrecognized_predictions_are_rejected() -> None:
     events = [
         _prediction("episode", "invalid", 1.2, "action_success", 1),
@@ -181,9 +232,7 @@ def test_deterministic_split_is_order_independent_and_episode_disjoint() -> None
     assert first == second
     assert len(first.train) == 15
     assert len(first.validation) == 5
-    assert {item.episode_id for item in first.train}.isdisjoint(
-        item.episode_id for item in first.validation
-    )
+    assert {item.episode_id for item in first.train}.isdisjoint(item.episode_id for item in first.validation)
     assert deterministic_split(samples, validation_fraction=0.25, seed=43) != first
 
 

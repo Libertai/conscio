@@ -12,9 +12,7 @@ from conscio.service import ConscioService, EpisodeCancelled
 def _tool_call_response(name: str, arguments: str, call_id: str = "call-1") -> dict:
     return {
         "content": "",
-        "tool_calls": [
-            {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
-        ],
+        "tool_calls": [{"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}],
     }
 
 
@@ -56,11 +54,7 @@ def _preset_event() -> asyncio.Event:
 def _write_config(tmp: str) -> Path:
     path = Path(tmp) / "config.toml"
     path.write_text(
-        "[service]\n"
-        f'home = "{tmp}"\n'
-        'api_key = "k"\n'
-        'web_password = "p"\n'
-        "autonomous = false\n",
+        f'[service]\nhome = "{tmp}"\napi_key = "k"\nweb_password = "p"\nautonomous = false\n',
         encoding="utf-8",
     )
     return path
@@ -103,8 +97,7 @@ class PreemptionSkipsGoalReviewTests(unittest.IsolatedAsyncioTestCase):
             order: list[str] = []
             gate = asyncio.Event()
             auto_responses = [
-                _tool_call_response("note_progress", '{"note": "working"}', f"call-{i}")
-                for i in range(1, 30)
+                _tool_call_response("note_progress", '{"content": "working"}', f"call-{i}") for i in range(1, 30)
             ]
             auto_llm = _GatedLLM("auto", order, gate, auto_responses)
             chat_llm = _GatedLLM("chat", order, gate, [{"content": "hi there"}])
@@ -138,8 +131,7 @@ class PreemptionTests(unittest.IsolatedAsyncioTestCase):
             gate = asyncio.Event()
             # Endless tool-calling stub: would run STEP ticks until budget without preemption.
             auto_responses = [
-                _tool_call_response("note_progress", '{"note": "working"}', f"call-{i}")
-                for i in range(1, 30)
+                _tool_call_response("note_progress", '{"content": "working"}', f"call-{i}") for i in range(1, 30)
             ]
             auto_llm = _GatedLLM("auto", order, gate, auto_responses)
             chat_llm = _GatedLLM("chat", order, gate, [{"content": "hi there"}])
@@ -180,9 +172,7 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(service.paused)
                 self.assertEqual(service.last_error, "episode_cancelled")
                 # Worker survives: a fresh message still processes.
-                service.runtime.chat_strategy.llm = _GatedLLM(
-                    "chat", [], _preset_event(), [{"content": "still alive"}]
-                )
+                service.runtime.chat_strategy.llm = _GatedLLM("chat", [], _preset_event(), [{"content": "still alive"}])
                 result = await asyncio.wait_for(service.submit_message("ping"), 10)
                 self.assertEqual(result.output, "still alive")
             finally:

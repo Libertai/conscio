@@ -11,12 +11,20 @@ from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 
 import httpx
 
+from conscio.blocking import BoundedBlockingRunner, current_blocking_runner
 from conscio.tools.env import resolve_tool, tool_env
 from conscio.tools.registry import tool
 
 _HTTP_TIMEOUT = 20
+_DNS_TIMEOUT = 5.0
 _FETCH_LIMIT_CHARS = 8000
 _MAX_REDIRECTS = 5
+_FALLBACK_BLOCKING_RUNNER = BoundedBlockingRunner(
+    io_workers=1,
+    io_queue=0,
+    cpu_workers=1,
+    cpu_queue=0,
+)
 
 _BLOCKED_HOSTS = {
     "localhost",
@@ -42,14 +50,7 @@ def _is_unsafe_address(ip_str: str) -> bool:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
         return True
-    return (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    )
+    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified
 
 
 def _validate_url_basic(url: str) -> tuple[bool, str]:
@@ -110,7 +111,15 @@ async def _validate_url_full_async(url: str) -> tuple[bool, str]:
     except ValueError:
         pass
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    addresses = await asyncio.to_thread(_resolve_host, host, port)
+    # Direct library/CLI calls have no service-owned registry context. Reuse a
+    # bounded fallback instead of asyncio's shared executor; closing a fresh
+    # runner after a DNS deadline would wait for the timed-out resolver and
+    # defeat the deadline itself.
+    runner = current_blocking_runner() or _FALLBACK_BLOCKING_RUNNER
+    try:
+        addresses = await runner.run_dns(_resolve_host, host, port, deadline=_DNS_TIMEOUT)
+    except TimeoutError:
+        return False, f"DNS resolution timed out for host '{host}'."
     if not addresses:
         return False, f"DNS resolution failed for host '{host}'."
     for address in addresses:
@@ -288,9 +297,7 @@ async def _run_libertai(*args: str) -> tuple[bool, str]:
 
 
 async def _http_get(url: str) -> str:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; Conscio/0.1; +https://github.com/Libertai/consciousness)"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; Conscio/0.1; +https://github.com/Libertai/consciousness)"}
     current = url
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=False, headers=headers) as client:
         for _ in range(_MAX_REDIRECTS + 1):
@@ -489,4 +496,3 @@ async def web_fetch(
             return {"output": "Fetch timed out.", "error": True}
     except Exception as e:
         return {"output": f"Fetch error: {e}", "error": True}
-

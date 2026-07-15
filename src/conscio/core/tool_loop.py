@@ -1,11 +1,12 @@
 """LLM tool-use loop, factored out so it can drive both the user-chat and
 autonomous-action paths."""
+
 from __future__ import annotations
 
 import copy
 import json
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -33,7 +34,7 @@ class ToolLoopResult:
 
 @dataclass
 class StepResult:
-    kind: Literal["tool", "final", "control", "empty", "exhausted"]
+    kind: Literal["tool", "final", "control", "wait", "empty", "exhausted"]
     text: str = ""
     tool_request: ToolRequest | None = None
     tool_result: dict[str, Any] | None = None
@@ -44,6 +45,8 @@ class StepResult:
 
 ToolObservationCallback = Callable[[ToolRequest, dict[str, Any]], Awaitable[None]]
 PreToolHook = Callable[[ToolRequest], Awaitable[Any]]
+PreToolBatchHook = Callable[[tuple[tuple[str, ToolRequest], ...]], Awaitable[Any]]
+SelectedActionIntentCallback = Callable[[ToolRequest, dict[str, Any]], Awaitable[None]]
 
 _CONTROL_KINDS = {"ask_user": "ask", "refuse": "refuse"}
 
@@ -146,27 +149,81 @@ def truncate_spotlighted(text: str, limit: int) -> str:
     return head
 
 
+def _safe_output_text(value: Any) -> str:
+    try:
+        return str(value)
+    except Exception:  # noqa: BLE001 - malformed tool objects must remain auditable
+        return f"<unprintable tool output: {type(value).__name__}>"
+
+
 def _spotlight_web_output(request: ToolRequest, result: dict[str, Any]) -> dict[str, Any]:
     """Wrap web tool output in explicit data-delimiters, after neutralizing any
     delimiter tokens the page itself contains (delimiter forgery). Spotlighting
     is probabilistic, not a guarantee — a sufficiently clever page could still
     influence reasoning within an episode; the taint/trust pipeline bounds the
     blast radius rather than eliminating it."""
-    output = neutralize_untrusted_delimiters(str(result.get("output", "")))
+    output = neutralize_untrusted_delimiters(_safe_output_text(result.get("output", "")))
     begin = UNTRUSTED_WEB_BEGIN.format(url=web_request_url(request) or request.name)
     return {**result, "output": f"{begin}\n{output}\n{UNTRUSTED_WEB_END}"}
 
 
-async def _execute_tool(tools: Any, request: ToolRequest, workspace: Workspace) -> dict[str, Any]:
+async def _execute_tool(
+    tools: Any,
+    request: ToolRequest,
+    workspace: Workspace | None = None,
+) -> dict[str, Any]:
     if tools is None:
-        return {"output": "Tool registry is unavailable.", "error": True}
+        return {
+            "output": "Tool registry is unavailable.",
+            "error": True,
+            "executed": False,
+        }
     try:
-        result = await tools.call(request.name, request.args)
+        raw_result = await tools.call(request.name, request.args)
     except Exception as exc:  # noqa: BLE001 — one misbehaving tool must not abort the episode
-        result = {"output": f"Tool {request.name} raised {type(exc).__name__}: {exc}", "error": True}
+        raw_result = {
+            "output": f"Tool {request.name} raised {type(exc).__name__}: {exc}",
+            "error": True,
+            "executed": True,
+        }
+    if not isinstance(raw_result, Mapping):
+        raw_result = {
+            "output": f"Tool {request.name} returned a malformed result.",
+            "error": True,
+            "executed": True,
+        }
+    result = dict(raw_result)
+    raw_policy_denied = result.get("policy_denied", False)
+    policy_denied = raw_policy_denied if type(raw_policy_denied) is bool else False
+    raw_executed = result.get("executed")
+    executed = raw_executed if type(raw_executed) is bool else not policy_denied
+    raw_error = result.get("error", False)
+    if type(raw_error) is bool:
+        error = raw_error
+    else:
+        error = True
+        result["malformed_error_flag"] = True
+    result["policy_denied"] = policy_denied
+    result["executed"] = executed
+    result["error"] = error
+    result["output"] = _safe_output_text(result.get("output", ""))
     capabilities = _tool_capabilities(tools, request.name)
-    if request.name in WEB_CONTENT_TOOLS or EXTERNAL_CONTENT_CAPABILITY in capabilities:
+    if executed and (request.name in WEB_CONTENT_TOOLS or EXTERNAL_CONTENT_CAPABILITY in capabilities):
         result = _spotlight_web_output(request, result)
+    if workspace is not None:
+        _write_tool_observation(request, result, workspace)
+    return result
+
+
+def _write_tool_observation(
+    request: ToolRequest,
+    result: Mapping[str, Any],
+    workspace: Workspace,
+) -> None:
+    """Expose only durably observed executions to the recurrent workspace."""
+
+    if result.get("executed") is not True:
+        return
     output = str(result.get("output", ""))
     workspace.write(
         f"Tool {request.name} returned: {truncate_spotlighted(output, 1000)}",
@@ -174,12 +231,16 @@ async def _execute_tool(tools: Any, request: ToolRequest, workspace: Workspace) 
         type=EntryType.OBSERVATION,
         priority=6,
         salience=0.72,
-        confidence=0.9 if not result.get("error") else 0.35,
+        confidence=0.9 if result.get("error") is not True else 0.35,
         novelty=0.75,
         urgency=0.45,
-        metadata={"source": "tool", "event_type": "tool_result", "tool": request.name, "result": result},
+        metadata={
+            "source": "tool",
+            "event_type": "tool_result",
+            "tool": request.name,
+            "result": dict(result),
+        },
     )
-    return result
 
 
 def _tool_capabilities(tools: Any, name: str) -> frozenset[str]:
@@ -209,6 +270,9 @@ class ToolLoopSession:
         control_tool_names: frozenset[str] = frozenset({"ask_user", "refuse"}),
         on_tool_observation: ToolObservationCallback | None = None,
         pre_tool_hook: PreToolHook | None = None,
+        pre_tool_batch_hook: PreToolBatchHook | None = None,
+        on_selected_action_intent: SelectedActionIntentCallback | None = None,
+        on_selected_action_outcome: ToolObservationCallback | None = None,
         on_stream_event: Callable[[dict[str, Any]], None] | None = None,
         limit_message: str = DEFAULT_LIMIT_MESSAGE,
     ) -> None:
@@ -222,18 +286,31 @@ class ToolLoopSession:
         self.control_tool_names = control_tool_names
         self.on_tool_observation = on_tool_observation
         self.pre_tool_hook = pre_tool_hook
+        self.pre_tool_batch_hook = pre_tool_batch_hook
+        self.on_selected_action_intent = on_selected_action_intent
+        self.on_selected_action_outcome = on_selected_action_outcome
         self.on_stream_event = on_stream_event
         self.limit_message = limit_message
         self.tool_requests: list[ToolRequest] = []
+        self.tool_proposals: list[ToolRequest] = []
+        self.last_proposal_response: dict[str, Any] = {}
         self.model_inputs: list[dict[str, Any]] = []
         self._known_names = _schema_tool_names(self.tool_schemas)
         self._rounds = 0
+        self._tool_rounds = 0
         self._closed = False
         self._streamed_this_round = 0
+        self._suppress_tools_once = False
 
     @property
     def rounds_used(self) -> int:
         return self._rounds
+
+    @property
+    def tool_rounds(self) -> int:
+        """Model rounds that proposed one or more tools, not proposal count."""
+
+        return self._tool_rounds
 
     @property
     def exhausted(self) -> bool:
@@ -309,18 +386,166 @@ class ToolLoopSession:
                 return await self._forced_final(workspace, rounds_this_step)
             self._rounds += 1
             rounds_this_step += 1
-            response = await self._completion(tools=self.tool_schemas, round_no=self._rounds)
-            requests = ToolLoop._tool_requests(response, self._known_names) if self.tool_schemas else []
+            offered_tools = None if self._suppress_tools_once else self.tool_schemas
+            self._suppress_tools_once = False
+            response = await self._completion(tools=offered_tools, round_no=self._rounds)
+            requests = ToolLoop._tool_requests(response, self._known_names) if offered_tools else []
+            self.last_proposal_response = copy.deepcopy(response)
+            if requests and not response.get("tool_calls"):
+                # DSML markup is a recovered action encoding, not response
+                # content. Keep the raw provider response in model_inputs while
+                # exposing no synthetic markup to action competition.
+                self.last_proposal_response["content"] = ""
             if not requests:
                 content = str(response.get("content") or "").strip()
-                if not content:
+                if self.pre_tool_batch_hook is not None:
+                    decision = _normalize_batch_decision(
+                        await self.pre_tool_batch_hook(()),
+                        [],
+                        self.control_tool_names,
+                    )
+                    if decision["action"] == "wait":
+                        self._emit_round_outcome("discard")
+                        return StepResult(
+                            kind="wait",
+                            text=str(decision["reason"]),
+                            rounds_used=rounds_this_step,
+                        )
+                    if decision["action"] != "respond":  # pragma: no cover - normalized
+                        raise RuntimeError("content-only action competition selected an invalid action")
+                    if not content:
+                        raise ValueError("respond selection requires exact response content")
+                elif not content:
                     return StepResult(kind="empty", rounds_used=rounds_this_step)
                 self.messages.append({"role": "assistant", "content": content})
                 self._emit_round_outcome("final")
                 return StepResult(kind="final", text=content, rounds_used=rounds_this_step)
-            control = next(
-                (req for _, req in requests if req.name in self.control_tool_names), None
-            )
+            self._tool_rounds += 1
+            self.tool_proposals.extend(request for _, request in requests)
+
+            if self.pre_tool_batch_hook is not None:
+                decision = _normalize_batch_decision(
+                    await self.pre_tool_batch_hook(tuple(requests)),
+                    requests,
+                    self.control_tool_names,
+                )
+                action = str(decision["action"])
+                reason = str(decision["reason"])
+                selected_call_id = decision.get("selected_call_id")
+                selected = next(
+                    ((call_id, request) for call_id, request in requests if call_id == selected_call_id),
+                    None,
+                )
+                # Canonicalize the complete protocol before an authorized side
+                # effect. Serialization failure is therefore pre-dispatch.
+                assistant_protocol = ToolLoop._assistant_tool_call_message(response, requests)
+
+                if action in {"respond", "wait"}:
+                    batch_outcomes = [
+                        (
+                            call_id,
+                            request,
+                            _unselected_result(decision, call_id, reason),
+                        )
+                        for call_id, request in requests
+                    ]
+                    self._append_tool_protocol(
+                        response,
+                        batch_outcomes,
+                        assistant_message=assistant_protocol,
+                    )
+                    _, last_request, last_result = batch_outcomes[-1]
+                    if action == "wait":
+                        self._emit_round_outcome("discard")
+                        return StepResult(
+                            kind="wait",
+                            text=reason,
+                            rounds_used=rounds_this_step,
+                        )
+                    content = str(self.last_proposal_response.get("content") or "").strip()
+                    if not content:
+                        raise ValueError("respond selection requires exact response content")
+                    self._emit_round_outcome("final")
+                    return StepResult(
+                        kind="final",
+                        text=content,
+                        rounds_used=rounds_this_step,
+                    )
+
+                if selected is None:  # pragma: no cover - normalization proves this
+                    raise RuntimeError("batch authorization selected no call")
+                self._emit_round_outcome("discard")
+                selected_id, selected_request = selected
+                if self.on_selected_action_intent is not None:
+                    # Authorization has passed local shape, identity, and JSON
+                    # checks. Durable intent persistence must now succeed
+                    # immediately before dispatch.
+                    await self.on_selected_action_intent(selected_request, decision)
+                if action == "control":
+                    text = self._control_text(selected_request, response)
+                    control_result = _selected_result(
+                        decision,
+                        selected_id,
+                        {"output": text, "error": False, "executed": True, "control": True},
+                    )
+                    control_outcomes = [
+                        (
+                            call_id,
+                            request,
+                            control_result
+                            if call_id == selected_id
+                            else _unselected_result(decision, call_id, "another action won competition"),
+                        )
+                        for call_id, request in requests
+                    ]
+                    self._append_tool_protocol(
+                        response,
+                        control_outcomes,
+                        assistant_message=assistant_protocol,
+                    )
+                    if self.on_selected_action_outcome is not None:
+                        await self.on_selected_action_outcome(selected_request, control_result)
+                    return StepResult(
+                        kind="control",
+                        text=text,
+                        tool_request=selected_request,
+                        tool_result=control_result,
+                        control=_CONTROL_KINDS.get(selected_request.name, selected_request.name),
+                        rounds_used=rounds_this_step,
+                    )
+
+                self.tool_requests.append(selected_request)
+                raw_result = await _execute_tool(self.tools, selected_request)
+                selected_result = _selected_result(decision, selected_id, raw_result)
+                selected_outcomes = [
+                    (
+                        call_id,
+                        request,
+                        selected_result
+                        if call_id == selected_id
+                        else _unselected_result(decision, call_id, "another action won competition"),
+                    )
+                    for call_id, request in requests
+                ]
+                # Complete the model protocol before callbacks. If durable
+                # outcome persistence fails after the side effect, resuming the
+                # session cannot make the prior call look unanswered.
+                self._append_tool_protocol(
+                    response,
+                    selected_outcomes,
+                    assistant_message=assistant_protocol,
+                )
+                if self.on_selected_action_outcome is not None:
+                    await self.on_selected_action_outcome(selected_request, selected_result)
+                _write_tool_observation(selected_request, selected_result, workspace)
+                if self.on_tool_observation is not None:
+                    await self.on_tool_observation(selected_request, selected_result)
+                last_request, last_result = selected_request, selected_result
+                if should_stop is not None and should_stop():
+                    break
+                continue
+
+            control = next((req for _, req in requests if req.name in self.control_tool_names), None)
             if control is not None:
                 self._emit_round_outcome("discard")
                 text = self._control_text(control, response)
@@ -358,7 +583,8 @@ class ToolLoopSession:
                         "authorization_rejected": True,
                     }
                 else:
-                    result = await _execute_tool(self.tools, request, workspace)
+                    result = await _execute_tool(self.tools, request)
+                    _write_tool_observation(request, result, workspace)
                 if self.on_tool_observation is not None:
                     await self.on_tool_observation(request, result)
                 outcomes.append((call_id, request, result))
@@ -368,12 +594,14 @@ class ToolLoopSession:
                 )
             )
             for call_id, request, result in outcomes:
-                self.messages.append({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "name": request.name,
-                    "content": truncate_spotlighted(str(result.get("output", "")), 8000),
-                })
+                self.messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "name": request.name,
+                        "content": truncate_spotlighted(str(result.get("output", "")), 8000),
+                    }
+                )
             _, last_request, last_result = outcomes[-1]
             # Round boundary: assistant echo + matching tool replies are already
             # appended, so stopping here keeps the message protocol consistent.
@@ -385,6 +613,33 @@ class ToolLoopSession:
             tool_result=last_result,
             rounds_used=rounds_this_step,
         )
+
+    def _append_tool_protocol(
+        self,
+        response: dict[str, Any],
+        outcomes: list[tuple[str, ToolRequest, dict[str, Any]]],
+        *,
+        assistant_message: dict[str, Any] | None = None,
+    ) -> None:
+        """Echo every proposed call with one matching tool-role response."""
+
+        self.messages.append(
+            assistant_message
+            if assistant_message is not None
+            else ToolLoop._assistant_tool_call_message(
+                response,
+                [(call_id, request) for call_id, request, _ in outcomes],
+            )
+        )
+        for call_id, request, result in outcomes:
+            self.messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": request.name,
+                    "content": truncate_spotlighted(str(result.get("output", "")), 8000),
+                }
+            )
 
     async def _forced_final(self, workspace: Workspace, rounds_this_step: int) -> StepResult:
         """Total budget hit — append the limit message and force one final answer."""
@@ -405,6 +660,24 @@ class ToolLoopSession:
             # workspace.read sorts by (-priority, -timestamp), so [0] is the
             # highest-priority most-recent tool observation.
             content = observations[0] if observations else "Tool-use limit reached before a final answer."
+        response = {**response, "content": content}
+        self.last_proposal_response = copy.deepcopy(response)
+        if self.pre_tool_batch_hook is not None:
+            decision = _normalize_batch_decision(
+                await self.pre_tool_batch_hook(()),
+                [],
+                self.control_tool_names,
+            )
+            if decision["action"] == "wait":
+                self._emit_round_outcome("discard")
+                return StepResult(
+                    kind="wait",
+                    text=str(decision["reason"]),
+                    rounds_used=rounds_this_step,
+                    limit_reached=True,
+                )
+            if decision["action"] != "respond":  # pragma: no cover - normalized
+                raise RuntimeError("forced-final competition selected an invalid action")
         self.messages.append({"role": "assistant", "content": content})
         self._emit_round_outcome("final")
         return StepResult(kind="final", text=content, rounds_used=rounds_this_step, limit_reached=True)
@@ -416,6 +689,119 @@ class ToolLoopSession:
             if value:
                 return value
         return str(response.get("content") or "").strip()
+
+
+def _normalize_batch_decision(
+    raw: Any,
+    requests: list[tuple[str, ToolRequest]],
+    control_tool_names: frozenset[str],
+) -> dict[str, Any]:
+    """Validate a whole-batch authorization result before any side effect.
+
+    A missing or malformed decision raises.  Falling back to execution would
+    turn an unavailable cognitive gate into implicit permission.
+    """
+
+    if not isinstance(raw, Mapping):
+        raise ValueError("batch tool authorization must return a decision object")
+    action = raw.get("action")
+    if action not in {"tool", "control", "respond", "wait"}:
+        raise ValueError("batch tool authorization returned an invalid action")
+    reason = raw.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("batch tool authorization must include a non-empty reason")
+    selected_call_id = raw.get("selected_call_id")
+    by_id = {call_id: request for call_id, request in requests}
+    if len(by_id) != len(requests):
+        raise ValueError("batch tool call IDs must be unique")
+    if any(not isinstance(call_id, str) or not call_id.strip() for call_id in by_id):
+        raise ValueError("batch tool call IDs must be non-empty strings")
+    for request in by_id.values():
+        try:
+            encoded = json.dumps(
+                request.args,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            decoded = json.loads(encoded)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("batch tool arguments must be finite JSON data") from exc
+        if not isinstance(decoded, dict):
+            raise ValueError("batch tool arguments must encode an object")
+    if action in {"tool", "control"}:
+        if not isinstance(selected_call_id, str) or selected_call_id not in by_id:
+            raise ValueError("batch tool authorization selected an unknown call")
+        selected_is_control = by_id[selected_call_id].name in control_tool_names
+        if (action == "control") != selected_is_control:
+            raise ValueError("batch tool authorization action does not match the selected call")
+    elif selected_call_id is not None:
+        raise ValueError("respond/wait decisions may not select a call")
+    execution_id = raw.get("execution_id")
+    proposal_id = raw.get("proposal_id")
+    if action in {"tool", "control"}:
+        if not isinstance(execution_id, str) or not execution_id.strip():
+            raise ValueError("selected batch action requires an execution_id")
+        if not isinstance(proposal_id, str) or not proposal_id.strip():
+            raise ValueError("selected batch action requires a proposal_id")
+    elif execution_id is not None or proposal_id is not None:
+        raise ValueError("respond/wait decisions may not claim proposal execution identity")
+    proposal_ids = raw.get("proposal_ids", {})
+    if not isinstance(proposal_ids, Mapping):
+        raise ValueError("batch proposal_ids must be an object")
+    if set(proposal_ids) != set(by_id):
+        raise ValueError("batch proposal_ids must cover every call exactly once")
+    if any(not isinstance(identifier, str) or not identifier.strip() for identifier in proposal_ids.values()):
+        raise ValueError("batch proposal IDs must be non-empty strings")
+    if len(set(proposal_ids.values())) != len(proposal_ids):
+        raise ValueError("batch proposal IDs must be unique")
+    if action in {"tool", "control"} and proposal_ids[selected_call_id] != proposal_id:
+        raise ValueError("selected proposal_id must match the selected call mapping")
+    normalized = dict(raw)
+    normalized["action"] = action
+    normalized["reason"] = reason.strip()
+    normalized["selected_call_id"] = selected_call_id
+    normalized["proposal_ids"] = dict(proposal_ids)
+    return normalized
+
+
+def _selected_result(
+    decision: Mapping[str, Any],
+    call_id: str,
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    raw_policy_denied = result.get("policy_denied", False)
+    policy_denied = raw_policy_denied if type(raw_policy_denied) is bool else False
+    raw_executed = result.get("executed")
+    executed = raw_executed if type(raw_executed) is bool else not policy_denied
+    return {
+        **dict(result),
+        "executed": executed,
+        "policy_denied": policy_denied,
+        "cognitively_authorized": True,
+        "execution_id": str(decision["execution_id"]),
+        "proposal_id": str(decision["proposal_id"]),
+        "call_id": call_id,
+    }
+
+
+def _unselected_result(
+    decision: Mapping[str, Any],
+    call_id: str,
+    reason: str,
+) -> dict[str, Any]:
+    proposal_ids = decision.get("proposal_ids", {})
+    proposal_id = proposal_ids.get(call_id, "") if isinstance(proposal_ids, Mapping) else ""
+    return {
+        "output": f"Tool proposal rejected: {reason}",
+        "error": True,
+        "executed": False,
+        "authorization_rejected": True,
+        "disposition": "not_selected",
+        "proposal_id": str(proposal_id),
+        "call_id": call_id,
+    }
 
 
 class ToolLoop:
@@ -478,30 +864,31 @@ class ToolLoop:
             )
 
     @staticmethod
-    def _tool_requests(
-        response: dict[str, Any], known_names: set[str] | None = None
-    ) -> list[tuple[str, ToolRequest]]:
+    def _tool_requests(response: dict[str, Any], known_names: set[str] | None = None) -> list[tuple[str, ToolRequest]]:
         """All (call_id, request) pairs from the response — models may emit
         several parallel tool calls in one turn and each must be executed (or
         at least answered), not just calls[0]."""
         calls = response.get("tool_calls") or []
         if not calls:
-            parsed = _parse_dsml_tool_call(
-                str(response.get("content") or ""), known_names=known_names
-            )
+            parsed = _parse_dsml_tool_call(str(response.get("content") or ""), known_names=known_names)
             return [("call-1", parsed)] if parsed is not None else []
         requests: list[tuple[str, ToolRequest]] = []
         for index, call in enumerate(calls):
+            if not isinstance(call, Mapping):
+                continue
             function = call.get("function") or {}
+            if not isinstance(function, Mapping):
+                continue
             name = str(function.get("name") or "").strip()
-            if not name:
+            if not name or (known_names is not None and name not in known_names):
                 continue
             try:
                 args = json.loads(function.get("arguments") or "{}")
-            except json.JSONDecodeError:
-                args = {"input": str(function.get("arguments") or "")}
+                json.dumps(args, allow_nan=False)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
             if not isinstance(args, dict):
-                args = {"input": args}
+                continue
             call_id = str(call.get("id") or f"call-{index + 1}")
             requests.append((call_id, ToolRequest(name=name, args=args)))
         return requests
@@ -520,11 +907,21 @@ class ToolLoop:
                 {
                     "id": call_id,
                     "type": "function",
-                    "function": {"name": request.name, "arguments": json.dumps(request.args)},
+                    "function": {
+                        "name": request.name,
+                        "arguments": json.dumps(
+                            request.args,
+                            ensure_ascii=False,
+                            allow_nan=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    },
                 }
                 for call_id, request in executed
             ],
         }
+
 
 # Recovers DeepSeek-style native tool-call markers that leak into the assistant
 # `content` field instead of arriving as proper OpenAI `tool_calls`. Tokens
@@ -632,14 +1029,14 @@ def _parse_dsml_tool_call(content: str, known_names: set[str] | None = None) -> 
     # Restrict to the first call's region: prefer per-call markers, fall back
     # to the plural wrapper so prose before the leak never enters the parse.
     begin_match = _DSML_CALL_BEGIN.search(content) or _DSML_CALLS_BEGIN.search(content)
-    region = content[begin_match.end():] if begin_match else content
+    region = content[begin_match.end() :] if begin_match else content
     end_match = _DSML_CALL_END.search(region) or _DSML_CALLS_END.search(region)
     if end_match:
         region = region[: end_match.start()]
     sep_match = _DSML_SEP.search(region)
     if sep_match:
         # Strip a leading role token like "function" before <｜tool_sep｜>.
-        name_and_args = region[sep_match.end():]
+        name_and_args = region[sep_match.end() :]
     else:
         name_and_args = region
     fence = _JSON_FENCE.search(name_and_args)
@@ -672,6 +1069,18 @@ def _parse_dsml_tool_call(content: str, known_names: set[str] | None = None) -> 
         args = {"input": args_raw}
     if not isinstance(args, dict):
         args = {"input": args}
+    try:
+        args = json.loads(
+            json.dumps(
+                args,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+    except (TypeError, ValueError):
+        return None
     return ToolRequest(name=name, args=args)
 
 

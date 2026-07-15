@@ -142,6 +142,7 @@ class McpManager:
                 await asyncio.wait_for(task, timeout=10.0)
             except (TimeoutError, asyncio.CancelledError):
                 task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
             state = self._states.get(name)
             if state is not None and state.status != "disabled":
                 state.status = "stopped"
@@ -216,6 +217,7 @@ class McpManager:
                     finally:
                         stop_wait.cancel()
                         reconnect_wait.cancel()
+                        await asyncio.gather(stop_wait, reconnect_wait, return_exceptions=True)
             except Exception as exc:
                 state.status = "error"
                 state.last_error = str(exc)
@@ -255,7 +257,7 @@ class McpManager:
             if tool.name in cfg.denied:
                 continue
             name = mcp_tool_name(cfg.name, tool.name)
-            if name in self._registry.list_tools() and name not in registered:
+            if self._registry.tool_manifest(name) is not None:
                 logger.warning("MCP tool %s collides with an existing tool; skipped", name)
                 continue
             schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else DEFAULT_TOOL_SCHEMA
@@ -279,14 +281,21 @@ class McpManager:
             try:
                 async with asyncio.timeout(cfg.call_timeout):
                     result = await session.call_tool(tool_name, args or None)
+                return _fold_result(result)
             except TimeoutError:
+                message = f"MCP tool {tool_name} timed out after {cfg.call_timeout:.0f}s."
+                self.request_reconnect(cfg.name, message)
                 return {
-                    "output": f"MCP tool {tool_name} timed out after {cfg.call_timeout:.0f}s.",
+                    "output": message,
                     "error": True,
+                    "execution_unknown": True,
                 }
             except Exception as exc:
                 self.request_reconnect(cfg.name, str(exc))
-                return {"output": f"MCP server '{cfg.name}' error: {exc}", "error": True}
-            return _fold_result(result)
+                return {
+                    "output": f"MCP server '{cfg.name}' error: {exc}",
+                    "error": True,
+                    "execution_unknown": True,
+                }
 
         return call_mcp_tool

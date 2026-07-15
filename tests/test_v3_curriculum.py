@@ -157,12 +157,8 @@ def test_event_history_derives_all_families_with_scoped_provenance() -> None:
 
     tool = next(item for item in dataset.examples if item.target_family == "tool_outcome")
     action = next(item for item in dataset.examples if item.target_family == "action_effect")
-    affect = next(
-        item for item in dataset.examples if item.target_family == "homeostatic_affect_change"
-    )
-    uncertainty = next(
-        item for item in dataset.examples if item.target_family == "future_uncertainty"
-    )
+    affect = next(item for item in dataset.examples if item.target_family == "homeostatic_affect_change")
+    uncertainty = next(item for item in dataset.examples if item.target_family == "future_uncertainty")
     assert tool.target == {"status": "ok", "succeeded": True}
     assert action.target == {"succeeded": True}
     assert affect.target["delta"]["valence"] == pytest.approx(0.25)
@@ -207,6 +203,104 @@ def test_model_generated_text_is_never_promoted_as_a_target() -> None:
     assert "generated hypothesis as fact" not in serialized
     assert "private model output" not in serialized
     assert dataset.examples[0].provenance.model_output_as_fact is False
+
+
+@pytest.mark.parametrize("action", ["wait", "unknown"])
+def test_unobserved_action_outcomes_do_not_train_action_effect(action: str) -> None:
+    events = [
+        _event(
+            1,
+            "action_outcome",
+            "environment",
+            {
+                "proposal_id": f"{action}-proposal",
+                "action": action,
+                "succeeded": False,
+                "observed": False,
+                "learning_eligible": False,
+            },
+        )
+    ]
+
+    dataset = derive_curriculum_examples(events)
+
+    assert not any(example.target_family == "action_effect" for example in dataset.examples)
+    assert not dataset.rejections
+
+
+def test_legacy_action_outcome_without_learning_marker_remains_compatible() -> None:
+    events = [
+        _event(
+            1,
+            "action_outcome",
+            "environment",
+            {
+                "proposal_id": "legacy-proposal",
+                "action": "wait",
+                "succeeded": False,
+            },
+        )
+    ]
+
+    dataset = derive_curriculum_examples(events)
+
+    assert not dataset.rejections
+    assert len(dataset.examples) == 1
+    assert dataset.examples[0].target_family == "action_effect"
+    assert dataset.examples[0].target == {"succeeded": False}
+
+
+@pytest.mark.parametrize(
+    ("marker", "observed", "reason"),
+    [
+        ("false", False, "learning_eligible marker is not boolean"),
+        (True, False, "not explicitly observed"),
+        (True, "yes", "observed marker is not boolean"),
+    ],
+)
+def test_action_outcome_learning_markers_fail_closed(
+    marker: object,
+    observed: object,
+    reason: str,
+) -> None:
+    dataset = derive_curriculum_examples(
+        [
+            _event(
+                1,
+                "action_outcome",
+                "environment",
+                {
+                    "proposal_id": "proposal",
+                    "action": "answer",
+                    "succeeded": True,
+                    "observed": observed,
+                    "learning_eligible": marker,
+                },
+            )
+        ]
+    )
+
+    assert not dataset.examples
+    assert any(reason in rejection.reason for rejection in dataset.rejections)
+
+
+def test_unobserved_action_affect_does_not_train_homeostatic_change() -> None:
+    unobserved = {
+        **_affect(-0.1, 0.5, 0.4),
+        "phase": "action_outcome",
+        "outcome_observed": False,
+        "learning_eligible": False,
+        "succeeded": None,
+    }
+    dataset = derive_curriculum_examples(
+        [
+            _event(1, "affect", "affect", _affect(-0.2, 0.6, 0.3)),
+            _event(2, "affect", "action_evaluation", unobserved),
+        ]
+    )
+
+    assert not any(example.target_family == "homeostatic_affect_change" for example in dataset.examples)
+    assert not dataset.rejections
 
 
 def test_untrusted_and_malformed_labels_are_rejected_not_inferred() -> None:
@@ -273,9 +367,7 @@ def test_split_is_deterministic_order_independent_and_episode_disjoint() -> None
     assert train_episodes.isdisjoint(validation_episodes)
     assert len(train_episodes) == 15
     assert len(validation_episodes) == 5
-    assert deterministic_curriculum_split(examples, seed=43) != deterministic_curriculum_split(
-        examples, seed=42
-    )
+    assert deterministic_curriculum_split(examples, seed=43) != deterministic_curriculum_split(examples, seed=42)
 
 
 def test_single_episode_stays_wholly_in_training() -> None:

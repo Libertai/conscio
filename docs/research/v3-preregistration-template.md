@@ -88,6 +88,13 @@ formatting alone predicts no access once tokens are matched and removed.
 - Manifest and sealed-mapping hashes
 - Exact revision, model, checkpoint, adapter digest, and lesion implementation
 - Pinned language manifests plus canonical request/response digests
+- Action-competition scorer version, frozen context digest, canonical candidate
+  and selected-action digests, complete rankings, and execution identifiers
+- Ordered proposal, pre-action forecast, competition, intention, authorization,
+  execution-intent, and execution-outcome events, including every unselected or
+  policy-denied disposition
+- Effective-argument/schema validation, tool-manifest digest, typed recovery or
+  reconciliation records, and any non-terminal execution-uncertainty marker
 - Mechanism manifest, blinded trial plan, condition-seal digest, information
   constraint, production-adapter identity, and hash-chain head
 - All assignments, exclusions, traces, and model inputs

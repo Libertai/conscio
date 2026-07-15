@@ -13,7 +13,12 @@ from conscio.v3.contracts import (
     CandidateContent,
     CognitiveEvent,
     CoreCheckpoint,
+    ExecutionIntent,
+    ExecutionOutcome,
+    ExecutionReconciliation,
+    ExecutionRecovery,
     Prediction,
+    deterministic_execution_event_id,
 )
 from conscio.v3.runtime import V3CognitiveRuntime
 
@@ -25,6 +30,11 @@ __all__ = [
     "CandidateContent",
     "CognitiveEvent",
     "CoreCheckpoint",
+    "ExecutionIntent",
+    "ExecutionOutcome",
+    "ExecutionReconciliation",
+    "ExecutionRecovery",
     "Prediction",
     "V3CognitiveRuntime",
+    "deterministic_execution_event_id",
 ]

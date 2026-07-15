@@ -69,6 +69,7 @@ class EpisodeMetrics:
     duration: float = 0.0
     attention_selections: int = 0
     prediction_errors: int = 0
+    tool_proposals: int = 0
     tool_calls: int = 0
     global_broadcasts: int = 0
     # v2 additive fields:
@@ -132,6 +133,8 @@ class _TickState:
     prev_failures: int = 0
     prev_llm_calls: int = 0
     prev_tool_rounds: int = 0
+    prev_tool_proposals: int = 0
+    prev_tool_calls: int = 0
     prev_state: dict[str, Any] = field(default_factory=dict)
     selection: Any = None
     step: StepResult | None = None
@@ -569,6 +572,11 @@ class CognitiveRuntime:
                 ActionKind.ASK if step.control == "ask" else ActionKind.REFUSE,
                 step.text,
             )
+        elif step.kind == "wait":
+            ts.forced_decision = TickDecision(
+                ActionKind.WAIT,
+                step.text or "action competition selected wait",
+            )
         elif step.kind == "empty":
             if step.text:
                 # Deterministic offline path (autonomous, no LLM):
@@ -642,14 +650,20 @@ class CognitiveRuntime:
             "reason": decision.reason,
             "broadcast": [f"{e.source}:{e.type.value}" for e in ts.selection.selected],
             "llm_calls": self.executor.llm_calls - ts.prev_llm_calls,
-            "tool_rounds": len(self.executor.tool_requests) - ts.prev_tool_rounds,
+            "tool_rounds": self.executor.tool_rounds - ts.prev_tool_rounds,
+            "tool_proposals": len(self.executor.tool_proposals) - ts.prev_tool_proposals,
+            "tool_calls": (
+                sum(item.get("executed") is True for item in self.executor.tool_results) - ts.prev_tool_calls
+            ),
             "prediction_events": ts.fresh_failures,
         }
         if self.ablation.self_state_coupling:
             tick_record["self_state_delta"] = _state_delta(ts.prev_state, state_now)
         ts.tick_trace.append(tick_record)
         ts.prev_llm_calls = self.executor.llm_calls
-        ts.prev_tool_rounds = len(self.executor.tool_requests)
+        ts.prev_tool_rounds = self.executor.tool_rounds
+        ts.prev_tool_proposals = len(self.executor.tool_proposals)
+        ts.prev_tool_calls = sum(item.get("executed") is True for item in self.executor.tool_results)
         ts.prev_state = state_now
 
         if decision.kind in (ActionKind.ANSWER, ActionKind.ASK, ActionKind.REFUSE):
@@ -688,8 +702,9 @@ class CognitiveRuntime:
         metrics.global_broadcasts = len(self.workspace.global_entries)
         metrics.prediction_errors = self.prediction.episode_failures
         metrics.llm_calls = self.executor.llm_calls + ts.extra_llm_calls
-        metrics.tool_calls = len(self.executor.tool_requests)
-        metrics.tool_rounds = len(self.executor.tool_requests)
+        metrics.tool_proposals = len(self.executor.tool_proposals)
+        metrics.tool_calls = sum(item.get("executed") is True for item in self.executor.tool_results)
+        metrics.tool_rounds = self.executor.tool_rounds
         self._capture_model_context()
         result = EpisodeResult(
             output=output,

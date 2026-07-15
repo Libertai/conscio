@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 import unittest
 from unittest.mock import patch
 
+from conscio.blocking import BoundedBlockingRunner, blocking_runner_context
 from conscio.tools import web
 from conscio.tools.env import resolve_tool, tool_env
 
@@ -107,9 +110,11 @@ class WebToolTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(url, "https://example.com")
             return FETCH_PAGE
 
-        with patch.object(web, "_run_libertai", fake_run), \
-             patch.object(web, "_http_get", fake_get), \
-             patch.object(web, "_resolve_host", lambda h, p: ["93.184.215.14"]):
+        with (
+            patch.object(web, "_run_libertai", fake_run),
+            patch.object(web, "_http_get", fake_get),
+            patch.object(web, "_resolve_host", lambda h, p: ["93.184.215.14"]),
+        ):
             result = await web.web_fetch("https://example.com")
 
         self.assertFalse(result["error"])
@@ -159,12 +164,38 @@ class WebToolTests(unittest.IsolatedAsyncioTestCase):
         def fake_resolve(host: str, port: int) -> list[str]:
             return ["10.0.0.1"]
 
-        with patch.object(web, "_run_libertai", fake_run), \
-             patch.object(web, "_resolve_host", fake_resolve):
+        with patch.object(web, "_run_libertai", fake_run), patch.object(web, "_resolve_host", fake_resolve):
             result = await web.web_fetch("http://attacker.example/")
 
         self.assertTrue(result["error"])
         self.assertIn("10.0.0.1", result["output"])
+
+    async def test_dns_timeout_returns_before_stuck_resolver_finishes(self) -> None:
+        runner = BoundedBlockingRunner(dns_workers=1, dns_queue=0)
+        started = threading.Event()
+        release = threading.Event()
+
+        def stuck_resolve(host: str, port: int) -> list[str]:
+            started.set()
+            release.wait()
+            return ["93.184.215.14"]
+
+        try:
+            with (
+                blocking_runner_context(runner),
+                patch.object(web, "_DNS_TIMEOUT", 0.01),
+                patch.object(web, "_resolve_host", stuck_resolve),
+            ):
+                ok, reason = await asyncio.wait_for(
+                    web._validate_url_full_async("https://example.com"),
+                    timeout=0.2,
+                )
+            self.assertTrue(started.is_set())
+            self.assertFalse(ok)
+            self.assertIn("timed out", reason)
+        finally:
+            release.set()
+            await runner.close()
 
     async def test_fallback_fetch_rejects_redirect_to_private_ip(self) -> None:
         async def fake_run(*args: str) -> tuple[bool, str]:
@@ -204,9 +235,11 @@ class WebToolTests(unittest.IsolatedAsyncioTestCase):
 
         import httpx
 
-        with patch.object(web, "_run_libertai", fake_run), \
-             patch.object(web, "_resolve_host", fake_resolve), \
-             patch.object(web.httpx, "AsyncClient", lambda *a, **k: FakeClient()):
+        with (
+            patch.object(web, "_run_libertai", fake_run),
+            patch.object(web, "_resolve_host", fake_resolve),
+            patch.object(web.httpx, "AsyncClient", lambda *a, **k: FakeClient()),
+        ):
             result = await web.web_fetch("http://attacker.example/")
 
         self.assertTrue(result["error"])
@@ -215,15 +248,18 @@ class WebToolTests(unittest.IsolatedAsyncioTestCase):
     def test_tool_env_strips_secret_env_vars(self) -> None:
         from conscio.tools.env import _is_secret_env
 
-        with patch.dict("os.environ", {
-            "CONSCIO_API_KEY": "secret1",
-            "OPENAI_API_KEY": "secret2",
-            "LIBERTAI_API_KEY": "secret3",
-            "CONSCIO_WEB_PASSWORD": "secret4",
-            "DATABASE_TOKEN": "secret5",
-            "PATH": "/usr/bin:/bin",
-            "HOME": "/tmp",
-        }):
+        with patch.dict(
+            "os.environ",
+            {
+                "CONSCIO_API_KEY": "secret1",
+                "OPENAI_API_KEY": "secret2",
+                "LIBERTAI_API_KEY": "secret3",
+                "CONSCIO_WEB_PASSWORD": "secret4",
+                "DATABASE_TOKEN": "secret5",
+                "PATH": "/usr/bin:/bin",
+                "HOME": "/tmp",
+            },
+        ):
             env = tool_env()
 
         self.assertNotIn("CONSCIO_API_KEY", env)

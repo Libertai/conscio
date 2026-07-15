@@ -16,6 +16,7 @@ against the returned result dict and notes repeated failures on SelfState.
 ``ask_user``/``refuse`` control tools make ``ActionKind.ASK``/``REFUSE``
 reachable: a control StepResult ends the episode with that action.
 """
+
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
@@ -39,9 +40,7 @@ NEUTRAL_SELF_DESCRIPTION = (
     "cognitive load) that can be inspected."
 )
 
-OFFLINE_AUTONOMOUS_MESSAGE = (
-    "Autonomous heartbeat received but no LLM is configured; deferring action."
-)
+OFFLINE_AUTONOMOUS_MESSAGE = "Autonomous heartbeat received but no LLM is configured; deferring action."
 
 
 CONTROL_TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -102,9 +101,7 @@ def registry_tool_schemas(tools: Any) -> list[dict[str, Any]]:
             "function": {
                 "name": name,
                 "description": descriptions.get(name, ""),
-                "parameters": schemas.get(
-                    name, {"type": "object", "properties": {}, "additionalProperties": True}
-                ),
+                "parameters": schemas.get(name, {"type": "object", "properties": {}, "additionalProperties": True}),
             },
         }
         for name in descriptions
@@ -123,14 +120,11 @@ class PromptStrategy(Protocol):
         broadcast: list[WorkspaceEntry] | None,
         memory: MemoryStore,
         session_id: str,
-    ) -> AssembledPrompt:
-        ...
+    ) -> AssembledPrompt: ...
 
-    def tool_schemas(self, tools: Any) -> list[dict[str, Any]] | None:
-        ...
+    def tool_schemas(self, tools: Any) -> list[dict[str, Any]] | None: ...
 
-    def offline_final(self, event: InputEvent, workspace: Workspace) -> StepResult | None:
-        ...
+    def offline_final(self, event: InputEvent, workspace: Workspace) -> StepResult | None: ...
 
 
 class ChatStrategy:
@@ -285,6 +279,15 @@ class EpisodeExecutor:
         prediction: PredictionEngine,
         on_stream_event: Callable[[dict[str, Any]], None] | None = None,
         authorize_tool: Callable[[ToolRequest], Awaitable[dict[str, Any] | bool | None]] | None = None,
+        authorize_tools: (
+            Callable[
+                [tuple[tuple[str, ToolRequest], ...], dict[str, Any]],
+                Awaitable[dict[str, Any]],
+            ]
+            | None
+        ) = None,
+        on_execution_intent: (Callable[[ToolRequest, dict[str, Any]], Awaitable[None]] | None) = None,
+        on_execution_outcome: (Callable[[ToolRequest, dict[str, Any]], Awaitable[None]] | None) = None,
     ) -> None:
         self.tools = tools
         self.memory = memory
@@ -297,9 +300,14 @@ class EpisodeExecutor:
         self.prediction = prediction
         self.on_stream_event = on_stream_event
         self.authorize_tool = authorize_tool
+        self.authorize_tools = authorize_tools
+        self.on_execution_intent = on_execution_intent
+        self.on_execution_outcome = on_execution_outcome
         self.last_model_context = ""
         self.tool_requests: list[ToolRequest] = []
+        self.tool_proposals: list[ToolRequest] = []
         self.tool_results: list[dict[str, Any]] = []
+        self.tool_rounds = 0
         self.llm_calls = 0
         self._session: ToolLoopSession | None = None
         self._strategy: ChatStrategy | AutonomousStrategy | None = None
@@ -327,7 +335,9 @@ class EpisodeExecutor:
         """Per-episode reset; strategies (and their settable llm) persist."""
         self.last_model_context = ""
         self.tool_requests = []
+        self.tool_proposals = []
         self.tool_results = []
+        self.tool_rounds = 0
         self.llm_calls = 0
         self.autonomous.last_tool_requests = []
         self._session = None
@@ -377,19 +387,26 @@ class EpisodeExecutor:
                 max_tokens=self.max_tokens,
                 on_tool_observation=self._on_tool_observation,
                 pre_tool_hook=self._pre_tool_hook,
+                pre_tool_batch_hook=(self._pre_tool_batch_hook if self.authorize_tools is not None else None),
+                on_selected_action_intent=(
+                    self._on_selected_action_intent if self.authorize_tools is not None else None
+                ),
+                on_selected_action_outcome=(
+                    self._on_selected_action_outcome if self.on_execution_outcome is not None else None
+                ),
                 on_stream_event=self.on_stream_event,
             )
         elif broadcast:
             self._session.inject(self.chat.assembler.format_workspace_update(broadcast))
         try:
-            step = await self._session.step(
-                workspace, max_rounds=self.rounds_per_tick, should_stop=should_stop
-            )
+            step = await self._session.step(workspace, max_rounds=self.rounds_per_tick, should_stop=should_stop)
         except Exception as exc:
             state.last_error = f"{type(exc).__name__}: {exc}"
             raise
         self.llm_calls += step.rounds_used
         self.tool_requests = list(self._session.tool_requests)
+        self.tool_proposals = list(self._session.tool_proposals)
+        self.tool_rounds = self._session.tool_rounds
         if self._strategy is self.autonomous:
             self.autonomous.last_tool_requests = list(self._session.tool_requests)
         return step
@@ -411,17 +428,57 @@ class EpisodeExecutor:
             return await self.authorize_tool(request)
         return None
 
+    async def _pre_tool_batch_hook(
+        self,
+        requests: tuple[tuple[str, ToolRequest], ...],
+    ) -> dict[str, Any]:
+        """Authorize the complete proposal set before forming an execution expectation."""
+
+        if self.authorize_tools is None:
+            raise RuntimeError("batch authorization hook is not configured")
+        response = dict(self._session.last_proposal_response) if self._session is not None else {}
+        return await self.authorize_tools(requests, response)
+
+    async def _on_selected_action_intent(
+        self,
+        request: ToolRequest,
+        decision: dict[str, Any],
+    ) -> None:
+        self._pending_expectation = (
+            self.prediction.expect_tool(request, self._tick) if decision.get("action") == "tool" else None
+        )
+        try:
+            if self.on_execution_intent is not None:
+                await self.on_execution_intent(request, decision)
+        except Exception:
+            # Dispatch did not happen, so this expectation has no observable
+            # outcome and must not survive into a later action.
+            self._pending_expectation = None
+            raise
+
+    async def _on_selected_action_outcome(
+        self,
+        request: ToolRequest,
+        result: dict[str, Any],
+    ) -> None:
+        if self.on_execution_outcome is not None:
+            await self.on_execution_outcome(request, result)
+
     async def _on_tool_observation(self, request: ToolRequest, result: dict[str, Any]) -> None:
-        self.tool_results.append({"tool": request.name, **result})
+        raw_executed = result.get("executed")
+        authorization_rejected = result.get("authorization_rejected") is True
+        executed = raw_executed if type(raw_executed) is bool else not authorization_rejected
+        outcome_known = result.get("execution_unknown") is not True
+        # Request identity is authoritative; a tool result cannot relabel
+        # itself as another tool and corrupt audit joins or training examples.
+        self.tool_results.append({**result, "tool": request.name, "executed": executed})
         expectation = self._pending_expectation
         self._pending_expectation = None
-        if expectation is not None and self._hook_workspace is not None:
-            conflict = self.prediction.resolve_tool(
-                expectation, result, self._hook_workspace, self._tick
-            )
+        if executed and outcome_known and expectation is not None and self._hook_workspace is not None:
+            conflict = self.prediction.resolve_tool(expectation, result, self._hook_workspace, self._tick)
             if conflict is not None and self._hook_state is not None:
                 detail = str(result.get("output") or result.get("error") or "")
                 self._hook_state.note_tool_failure(request.name, detail)
         extra = getattr(self._strategy, "on_tool_observation", None)
-        if extra is not None:
+        if executed and extra is not None:
             await extra(request, result)

@@ -52,7 +52,7 @@ def test_backup_loop_fires_and_survives_failure(tmp_path: Path, monkeypatch) -> 
         await svc.start(acquire_lock=False, background=True)
         try:
             for _ in range(200):
-                if len(calls) >= 2:
+                if len(calls) >= 2 and svc.last_backup_at > 0:
                     break
                 await asyncio.sleep(0.02)
             assert len(calls) >= 2, "backup loop did not fire twice"

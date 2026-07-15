@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
@@ -239,9 +238,7 @@ class DriveScheduler:
     async def record_serviced(self, goal_id: str) -> None:
         """Mark a goal as serviced (it produced an episode): bump its drive's
         satiation and stamp last_serviced_at on both goal and drive."""
-        row = self.store.memory.fetchone(
-            "SELECT drive_id FROM goals WHERE id = ?", (goal_id,)
-        )
+        row = self.store.memory.fetchone("SELECT drive_id FROM goals WHERE id = ?", (goal_id,))
         if row is None:
             return
         now = time.time()
@@ -253,11 +250,13 @@ class DriveScheduler:
         ]
         drive_id = row.get("drive_id")
         if drive_id:
-            ops.append((
-                "UPDATE drives SET satiation = MIN(1.0, satiation + ?), "
-                "last_serviced_at = ?, updated_at = ? WHERE id = ?",
-                (self.satiate_step, now, now, drive_id),
-            ))
+            ops.append(
+                (
+                    "UPDATE drives SET satiation = MIN(1.0, satiation + ?), "
+                    "last_serviced_at = ?, updated_at = ? WHERE id = ?",
+                    (self.satiate_step, now, now, drive_id),
+                )
+            )
         self.store.memory.transaction(ops)
 
     async def decay_tick(self) -> None:
@@ -274,16 +273,13 @@ class DriveScheduler:
 class GoalStore:
     """Durable goals, drives, and influences.
 
-    DB access convention: single-row execute/fetch helpers stay synchronous by
-    design (sub-millisecond on the RLock-guarded store); multi-statement writes
-    are batched into one ``memory.transaction`` and run via ``asyncio.to_thread``
-    so a commit fsync burst never stalls the event loop."""
+    DB access convention: execute/fetch helpers stay synchronous by design on
+    the connection's owning thread. Multi-statement writes are batched into one
+    RLock-guarded transaction and commit."""
 
     def __init__(self, memory: MemoryStore, *, motivation: Any | None = None) -> None:
         self.memory = memory
-        self.goal_dup_threshold = float(
-            getattr(motivation, "goal_dup_threshold", GOAL_DUP_THRESHOLD)
-        )
+        self.goal_dup_threshold = float(getattr(motivation, "goal_dup_threshold", GOAL_DUP_THRESHOLD))
         self.scheduler = DriveScheduler(self, motivation=motivation)
 
     async def initialize(self) -> None:
@@ -297,19 +293,23 @@ class GoalStore:
         for idx, drive in enumerate(SEED_DRIVES):
             drive_id = f"seed-{idx + 1}"
             base_weight = 0.8 - (idx * 0.04)
-            items.append((
-                "INSERT OR IGNORE INTO drives "
-                "(id, description, base_weight, appetite, satiation, created_at, updated_at) "
-                "VALUES (?, ?, ?, 0.5, 0.0, ?, ?)",
-                (drive_id, drive, base_weight, now, now),
-            ))
-            items.append((
-                "INSERT OR IGNORE INTO goals "
-                "(id, description, source, status, priority, confidence, "
-                "appraisal_weight, drive_id, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (drive_id, drive, "seed", "active", base_weight, 0.75, 0.75, drive_id, now, now),
-            ))
+            items.append(
+                (
+                    "INSERT OR IGNORE INTO drives "
+                    "(id, description, base_weight, appetite, satiation, created_at, updated_at) "
+                    "VALUES (?, ?, ?, 0.5, 0.0, ?, ?)",
+                    (drive_id, drive, base_weight, now, now),
+                )
+            )
+            items.append(
+                (
+                    "INSERT OR IGNORE INTO goals "
+                    "(id, description, source, status, priority, confidence, "
+                    "appraisal_weight, drive_id, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (drive_id, drive, "seed", "active", base_weight, 0.75, 0.75, drive_id, now, now),
+                )
+            )
         self.memory.transaction(items)
 
     def record_action_event(self, kind: str) -> None:
@@ -418,8 +418,7 @@ class GoalStore:
                 vec = None
         if vec is not None:
             rows = self.memory.fetchall(
-                "SELECT id, description, embedding FROM goals "
-                "WHERE status = 'active' AND embedding IS NOT NULL"
+                "SELECT id, description, embedding FROM goals WHERE status = 'active' AND embedding IS NOT NULL"
             )
             best_id: str | None = None
             best_desc = ""
@@ -449,9 +448,7 @@ class GoalStore:
         )
         return {"accepted": True, "goal": goal, "reason": "accepted", "similar_goal_id": None}
 
-    async def appraise_influence(
-        self, content: str, kind: str, llm: Any | None = None
-    ) -> InfluenceDecision:
+    async def appraise_influence(self, content: str, kind: str, llm: Any | None = None) -> InfluenceDecision:
         """Structured influence appraisal. REJECT_TERMS is the non-negotiable
         keyword floor; offline (llm=None) never auto-adopts — it negotiates;
         otherwise one LLM call judges the influence against current goals,
@@ -478,9 +475,7 @@ class GoalStore:
             "CURRENT_GOALS:",
         ]
         for g in goals:
-            lines.append(
-                f"  - priority={g.get('priority', 0):.2f} {str(g.get('description') or '')[:160]}"
-            )
+            lines.append(f"  - priority={g.get('priority', 0):.2f} {str(g.get('description') or '')[:160]}")
         lines.append("")
         lines.append("VALUES (seed drives):")
         for drive in SEED_DRIVES:
@@ -498,9 +493,9 @@ class GoalStore:
                     "You are Conscio appraising an external influence against your current "
                     "goals, values, and constraints. Decide whether to adopt it, negotiate "
                     "it, defer it, or reject it. Output ONLY a JSON object: "
-                    "{\"decision\": one of [\"adopt\", \"negotiate\", \"defer\", \"reject\"], "
-                    "\"reasoning\": short string, "
-                    "\"response_to_user\": short reply shown to the user}."
+                    '{"decision": one of ["adopt", "negotiate", "defer", "reject"], '
+                    '"reasoning": short string, '
+                    '"response_to_user": short reply shown to the user}.'
                 ),
             },
             {"role": "user", "content": "\n".join(lines)},
@@ -689,30 +684,27 @@ class GoalStore:
         new_priority = priority if priority is not None else current["priority"]
         new_notes = review_notes if review_notes is not None else current["review_notes"]
         self.memory.execute(
-            "UPDATE goals SET description = ?, status = ?, priority = ?, "
-            "review_notes = ?, updated_at = ? WHERE id = ?",
+            "UPDATE goals SET description = ?, status = ?, priority = ?, review_notes = ?, updated_at = ? WHERE id = ?",
             (new_desc, new_status, new_priority, new_notes, time.time(), goal_id),
         )
         return await self.get_goal(goal_id)
 
     async def retire_goal(self, goal_id: str) -> dict[str, Any] | None:
         return await self.update_goal(
-            goal_id, status="retired", review_notes="Retired via operator console.",
+            goal_id,
+            status="retired",
+            review_notes="Retired via operator console.",
         )
 
     async def retire_influence(self, influence_id: str) -> dict[str, Any] | None:
-        current = self.memory.fetchone(
-            "SELECT * FROM influences WHERE id = ?", (influence_id,)
-        )
+        current = self.memory.fetchone("SELECT * FROM influences WHERE id = ?", (influence_id,))
         if current is None:
             return None
         self.memory.execute(
             "UPDATE influences SET status = 'retired', updated_at = ? WHERE id = ?",
             (time.time(), influence_id),
         )
-        return self.memory.fetchone(
-            "SELECT * FROM influences WHERE id = ?", (influence_id,)
-        )
+        return self.memory.fetchone("SELECT * FROM influences WHERE id = ?", (influence_id,))
 
     async def active_constraints(self, limit: int = 20) -> list[dict[str, Any]]:
         return self.memory.fetchall(
@@ -750,9 +742,7 @@ class GoalStore:
         if not goals:
             return []
         drives = await self.list_drives()
-        prompt = self._build_review_prompt(
-            goals, recent_episodes or [], recent_influences or [], drives
-        )
+        prompt = self._build_review_prompt(goals, recent_episodes or [], recent_influences or [], drives)
         messages = [
             {
                 "role": "system",
@@ -761,9 +751,9 @@ class GoalStore:
                     "state to keep goals balanced across drives, not just per-goal priority. "
                     "Output a JSON array of decisions, "
                     "one per goal you want to update. Each item must have: "
-                    "{\"goal_id\": string, \"action\": one of [\"keep\", \"retire\", \"reprioritize\"], "
-                    "\"new_priority\": optional number in [0, 1] required if action=reprioritize, "
-                    "\"reason\": short string}. "
+                    '{"goal_id": string, "action": one of ["keep", "retire", "reprioritize"], '
+                    '"new_priority": optional number in [0, 1] required if action=reprioritize, '
+                    '"reason": short string}. '
                     "Output ONLY the JSON array, no surrounding prose."
                 ),
             },
@@ -808,17 +798,21 @@ class GoalStore:
             if goal_id not in valid_ids:
                 continue
             if action == "keep":
-                statements.append((
-                    "UPDATE goals SET last_reviewed_at = ?, updated_at = ?, review_notes = ? WHERE id = ?",
-                    (now, now, reason or "kept by self-review", goal_id),
-                ))
+                statements.append(
+                    (
+                        "UPDATE goals SET last_reviewed_at = ?, updated_at = ?, review_notes = ? WHERE id = ?",
+                        (now, now, reason or "kept by self-review", goal_id),
+                    )
+                )
                 applied.append({"goal_id": goal_id, "action": "keep", "reason": reason})
             elif action == "retire":
-                statements.append((
-                    "UPDATE goals SET status = 'retired', last_reviewed_at = ?, updated_at = ?, "
-                    "review_notes = ? WHERE id = ?",
-                    (now, now, reason or "retired by self-review", goal_id),
-                ))
+                statements.append(
+                    (
+                        "UPDATE goals SET status = 'retired', last_reviewed_at = ?, updated_at = ?, "
+                        "review_notes = ? WHERE id = ?",
+                        (now, now, reason or "retired by self-review", goal_id),
+                    )
+                )
                 applied.append({"goal_id": goal_id, "action": "retire", "reason": reason})
             elif action == "reprioritize":
                 try:
@@ -826,21 +820,27 @@ class GoalStore:
                 except (TypeError, ValueError):
                     continue
                 new_priority = max(0.0, min(1.0, new_priority))
-                statements.append((
-                    "UPDATE goals SET priority = ?, last_reviewed_at = ?, updated_at = ?, "
-                    "review_notes = ? WHERE id = ?",
-                    (new_priority, now, now, reason or "reprioritized by self-review", goal_id),
-                ))
-                applied.append({
-                    "goal_id": goal_id,
-                    "action": "reprioritize",
-                    "new_priority": new_priority,
-                    "reason": reason,
-                })
+                statements.append(
+                    (
+                        "UPDATE goals SET priority = ?, last_reviewed_at = ?, updated_at = ?, "
+                        "review_notes = ? WHERE id = ?",
+                        (new_priority, now, now, reason or "reprioritized by self-review", goal_id),
+                    )
+                )
+                applied.append(
+                    {
+                        "goal_id": goal_id,
+                        "action": "reprioritize",
+                        "new_priority": new_priority,
+                        "reason": reason,
+                    }
+                )
         if statements:
-            # One locked commit off the event loop: the "transactionally"
-            # promise above, without a per-decision fsync stall per UPDATE.
-            await asyncio.to_thread(self.memory.transaction, statements)
+            # Keep SQLite access on the connection's owning thread. The batch is
+            # still one locked commit, so review decisions remain atomic without
+            # a per-decision fsync; moving this shared connection through
+            # ``asyncio.to_thread`` can deadlock on supported SQLite runtimes.
+            self.memory.transaction(statements)
             for entry in applied:
                 self.record_action_event(f"goal_review_applied:{entry['action']}")
         if applied:
@@ -915,7 +915,6 @@ class GoalStore:
                 f"content={(inf.get('content') or '')[:160]}"
             )
         return "\n".join(lines)
-
 
     async def review(self, note: str = "Autonomous review kept current priorities.") -> Goal | None:
         goal = await self.active_goal()

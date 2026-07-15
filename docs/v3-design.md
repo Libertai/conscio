@@ -63,9 +63,42 @@ but the service now instantiates `V3CognitiveRuntime`.
   prompt exposure, and self-state updates. Prediction and broadcast lesions also
   remove their V3 computations/exposure.
 - Condition-blind system instructions that do not disclose the architecture.
-- Pre-execution action competition. Language-model tool calls are typed proposals
-  that receive an independent risk decision before the existing policy registry
-  can execute them; rejected proposals become observable outcomes.
+- Versioned pre-execution action competition. Each language-model tool/control
+  batch is converted into inert candidates and ranked together with built-in
+  respond/wait alternatives by a pure deterministic scorer. Its frozen input is
+  limited to the final recurrent cycle's calibrated predictions, public bounded
+  affect/need state, selected upstream intention, active lesions, constraints,
+  runtime/model identities, and risk limits. Provider rationale, confidence,
+  ordering, and call identifiers are provenance only and cannot change an
+  action's identity or score. Equivalent proposals merge conservatively, hard
+  gates dominate score, and at most one action can reach execution.
+- A fail-closed language-action boundary records proposal identities,
+  pre-action forecasts, the complete scored ranking, the selected intention,
+  authorization dispositions, and an execution intent before a selected call.
+  Every delivered language response, including content-only and forced-final
+  responses, passes through the same competition and is bound to its canonical
+  semantic digest. Tool arguments are validated against the advertised JSON
+  Schema before competition and again at dispatch. Effective policy-injected
+  arguments, capabilities, schema, policy state, dispatch defaults, and a
+  monotonic registration revision are bound by a tool-manifest digest in the
+  durable intent; any pre-dispatch manifest drift terminates as not executed.
+  Unselected candidates and policy-denied calls remain counterfactual or
+  authorization records: they are not emitted as trusted tool outcomes and do
+  not become prediction, affect, or replay-training failure labels.
+- Learning eligibility and observation markers are exact booleans and fail
+  closed when malformed or inconsistent. Unknown dispatches, safe waits, and
+  internal fallback text cannot resolve action, affect, or next-observation
+  predictions and cannot enter replay or curriculum targets.
+- Execution intents and outcomes use deterministic, idempotent journal IDs. On
+  restart, any intent without a terminal outcome is recorded as
+  `execution_unknown`, is never replayed, and activates a tools-only safe mode.
+  Respond, wait, clarification, and refusal remain available. An authenticated
+  operator may acknowledge the uncertainty through an append-only
+  reconciliation record; reconciliation never invents an executed/succeeded
+  value and is excluded from learning targets. Ambiguous remote timeouts and
+  transport failures remain unresolved and are never retried automatically.
+  Cancellation rebuilds the in-memory gate from the authoritative journal so a
+  commit/cancellation race cannot silently clear or fabricate safe mode.
 - Prediction resolution against observable action results using Brier error.
   Replay extraction is conservative and records rejected/ambiguous examples.
 - A bounded affine-logit prediction adapter trained only in shadow with an
@@ -134,12 +167,23 @@ during a persistence trial. Artifacts and audit logs live under
 ## Persistence invariants
 
 Every V3 episode orders its causal record as observation, recurrent cycles,
-predictions and proposals, authenticated language-specialist calls, executor
-outcome, then checkpoint. Event rows are insert-only. Checkpoints have a parent
-link and lineage id. The checkpoint event stores the exact model dynamic
-context, canonical language requests/responses and manifests, and the hidden
-lesion manifest for later condition-blind analysis; hidden condition data is
-never inserted into the model prompt.
+predictions and proposals, authenticated language-specialist calls, and then—for
+each proposed language-action batch—tool proposals, pre-action forecasts,
+versioned competition, selected intention, authorization dispositions, and any
+selected execution intent/outcome. Episode-level prediction resolution and the
+checkpoint follow. Event rows are insert-only. Checkpoints have a parent link
+and lineage id. The checkpoint event stores the exact model dynamic context,
+canonical language requests/responses and manifests, scorer/context identities,
+and the hidden lesion manifest for later condition-blind analysis; hidden
+condition data is never inserted into the model prompt.
+
+The authenticated status surface and SSE stream report execution safe mode and
+unresolved execution IDs without exposing tool arguments. Reconciliation is
+allowed for restart-recovered and same-process unresolved executions only while
+the service holds its episode lock, so it cannot race an in-flight dispatch.
+CPU training, backup/event-file I/O, and DNS resolution run through dedicated
+bounded worker pools with backpressure and bounded shutdown; they neither block
+the cognitive event loop nor depend on the shared asyncio executor.
 
 ## Primary research configuration
 

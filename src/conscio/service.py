@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from conscio.autonomy import AutonomyStore
+from conscio.blocking import BoundedBlockingRunner
 from conscio.config import ServiceConfig, load_config
 from conscio.core.cognition import InputEvent
 from conscio.core.context import ContextSettings
@@ -85,6 +86,7 @@ _REDACT_KEYS = ("password", "token", "secret", "api_key", "apikey", "key")
 # these are just fast-access caches / audit files.
 _MAX_IN_MEMORY_EPISODES = 200
 _MAX_EVENT_FILES = 500
+_BLOCKING_SHUTDOWN_TIMEOUT = 5.0
 
 _WORLD_MODEL_FAMILY = "conscio-v3-hybrid-rssm"
 # Immutable learned-weight ABI from the first world-model artifact schema.
@@ -208,6 +210,9 @@ class ServiceStatus:
     actions_last_hour: int = 0
     episode_count: int = 0
     last_error: str = ""
+    execution_safe_mode: bool = False
+    unresolved_execution_count: int = 0
+    unresolved_execution_ids: tuple[str, ...] = ()
 
 
 @dataclass
@@ -280,10 +285,22 @@ class ServiceLock:
 
 
 class ConscioService:
-    def __init__(self, config: ServiceConfig | None = None) -> None:
+    """Long-running agent service.
+
+    Ownership of an injected ``blocking_runner`` transfers to the service; it
+    is closed during :meth:`stop` just like the runtime and MCP manager.
+    """
+
+    def __init__(
+        self,
+        config: ServiceConfig | None = None,
+        *,
+        blocking_runner: BoundedBlockingRunner | None = None,
+    ) -> None:
         self.config = config or load_config()
         self.config.validate()
         self.config.ensure_layout()
+        self.blocking_runner = blocking_runner or BoundedBlockingRunner()
         self.world_model_registry = ModelArtifactRegistry(self.config.world_model_path)
         self.world_model_artifact = self.world_model_registry.latest_promoted()
         self.world_weights = (
@@ -298,6 +315,7 @@ class ConscioService:
             denied_tools=self.config.denied_tools,
             shell_timeout=self.config.shell_timeout,
             working_directory=self.config.working_directory,
+            blocking_runner=self.blocking_runner,
         )
         tools.load_builtins()
         register_self_tools(self, tools)
@@ -461,6 +479,15 @@ class ConscioService:
             self.running = True
             self.started_at = time.time()
             self._event_broker.attach()
+            if self.runtime.execution_safe_mode:
+                self._event_broker.emit(
+                    "execution.safe_mode",
+                    {
+                        "active": True,
+                        "unresolved_execution_ids": list(self.runtime.unresolved_execution_ids),
+                        "reason": "restart_detected_unresolved_intent",
+                    },
+                )
             await self.mcp.start()
             goal = await self.goals.active_goal()
             if goal:
@@ -504,6 +531,7 @@ class ConscioService:
         await self.mcp.stop()
         self._event_broker.detach()
         await self.runtime.close()
+        await self.blocking_runner.close(deadline=_BLOCKING_SHUTDOWN_TIMEOUT)
         self.lock.release()
 
     @property
@@ -543,6 +571,44 @@ class ConscioService:
                 after=payload,
             )
         return payload
+
+    async def reconcile_execution(
+        self,
+        execution_id: str,
+        reason: str,
+        *,
+        operator: str = "api_operator",
+    ) -> dict[str, Any]:
+        """Acknowledge an unresolved dispatch without claiming its outcome."""
+
+        async with self._event_lock:
+            payload = await self.runtime.reconcile_execution(
+                execution_id,
+                reason=reason,
+                operator=operator,
+                allow_live=True,
+            )
+        self._event_broker.emit(
+            "execution.reconciled",
+            {
+                **payload,
+                "execution_safe_mode": self.runtime.execution_safe_mode,
+                "unresolved_execution_ids": list(self.runtime.unresolved_execution_ids),
+            },
+        )
+        self._event_broker.emit(
+            "execution.safe_mode",
+            {
+                "active": self.runtime.execution_safe_mode,
+                "unresolved_execution_ids": list(self.runtime.unresolved_execution_ids),
+                "reason": "operator_reconciliation",
+            },
+        )
+        return {
+            **payload,
+            "execution_safe_mode": self.runtime.execution_safe_mode,
+            "unresolved_execution_ids": list(self.runtime.unresolved_execution_ids),
+        }
 
     async def _initialize_world_model_registry(self) -> None:
         """Register the deterministic baseline or require a verified migration."""
@@ -645,7 +711,7 @@ class ConscioService:
             manifest = build_curriculum_manifest(curriculum)
             settings = WorldTrainingConfig(seed=seed)
             incumbent = active_world_weights(self.runtime.recurrent_core)
-            outcome = await asyncio.to_thread(
+            outcome = await self.blocking_runner.run_cpu(
                 train_shadow_world_model,
                 training_examples,
                 incumbent=incumbent,
@@ -1082,9 +1148,39 @@ class ConscioService:
             self.latest_model_context = result.model_context
             await self._store_episode(event, result)
             await self._record_persistence_trial_episode(result)
+            if self.runtime.execution_safe_mode:
+                self._event_broker.emit(
+                    "execution.safe_mode",
+                    {
+                        "active": True,
+                        "unresolved_execution_ids": list(self.runtime.unresolved_execution_ids),
+                        "reason": "execution_outcome_unknown",
+                    },
+                )
             return result
+        except asyncio.CancelledError:
+            self.last_error = "episode_cancelled"
+            if self.runtime.execution_safe_mode:
+                self._event_broker.emit(
+                    "execution.safe_mode",
+                    {
+                        "active": True,
+                        "unresolved_execution_ids": list(self.runtime.unresolved_execution_ids),
+                        "reason": "episode_cancelled_with_unresolved_execution",
+                    },
+                )
+            raise
         except Exception as exc:
             self.last_error = str(exc)
+            if self.runtime.execution_safe_mode:
+                self._event_broker.emit(
+                    "execution.safe_mode",
+                    {
+                        "active": True,
+                        "unresolved_execution_ids": list(self.runtime.unresolved_execution_ids),
+                        "reason": "execution_outcome_not_durable",
+                    },
+                )
             if self.config.pause_on_error:
                 self.pause()
             raise
@@ -1441,6 +1537,9 @@ class ConscioService:
             actions_last_hour=await self.autonomy.count_recent_actions("tool"),
             episode_count=await self.memory.count_episodes(),
             last_error=self.last_error,
+            execution_safe_mode=self.runtime.execution_safe_mode,
+            unresolved_execution_count=len(self.runtime.unresolved_execution_ids),
+            unresolved_execution_ids=self.runtime.unresolved_execution_ids,
         )
 
     async def recent_episodes(self, limit: int = 20) -> list[dict[str, Any]]:
@@ -1536,8 +1635,8 @@ class ConscioService:
         while self.running:
             await asyncio.sleep(interval)
             try:
-                archive = await asyncio.to_thread(create_home_backup, self.config)
-                await asyncio.to_thread(prune_backups, self.config, self.config.backup_retain)
+                archive = await self.blocking_runner.run_io(create_home_backup, self.config)
+                await self.blocking_runner.run_io(prune_backups, self.config, self.config.backup_retain)
                 self.last_backup_at = time.time()
                 self.last_backup_error = ""
                 logger.info("scheduled backup written: %s", archive)
@@ -1611,7 +1710,7 @@ class ConscioService:
 
         # Runs on every episode; the write plus the prune's stat-walk over the
         # events directory must not stall the event loop mid-cognition.
-        await asyncio.to_thread(_write_and_prune)
+        await self.blocking_runner.run_io(_write_and_prune)
         await self.memory.record_episode(
             episode_id=ep.id,
             source=ep.source,

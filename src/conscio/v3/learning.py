@@ -108,9 +108,7 @@ class AdapterState:
             raise ValueError("adapter counters must be non-negative")
         if not math.isfinite(self.log_scale) or not math.isfinite(self.bias):
             raise ValueError("adapter parameters must be finite")
-        if self.validation_loss is not None and (
-            not math.isfinite(self.validation_loss) or self.validation_loss < 0.0
-        ):
+        if self.validation_loss is not None and (not math.isfinite(self.validation_loss) or self.validation_loss < 0.0):
             raise ValueError("validation_loss must be a finite non-negative value")
 
     @property
@@ -168,9 +166,7 @@ class AdapterState:
                 bias=float(data["bias"]),
                 trained_examples=_strict_int(data["trained_examples"], "trained_examples"),
                 validation_examples=_strict_int(data["validation_examples"], "validation_examples"),
-                validation_loss=(
-                    None if data.get("validation_loss") is None else float(data["validation_loss"])
-                ),
+                validation_loss=(None if data.get("validation_loss") is None else float(data["validation_loss"])),
                 parent_digest=(None if data.get("parent_digest") is None else str(data["parent_digest"])),
                 schema_version=schema_version,
                 adapter_kind=str(adapter_kind),
@@ -319,6 +315,13 @@ def derive_replay_samples(events: Iterable[Mapping[str, Any]]) -> ReplayDataset:
         if event_type != "action_outcome":
             continue
 
+        learning_eligible, eligibility_error = _action_outcome_learning_eligibility(payload)
+        if eligibility_error is not None:
+            rejections.append(ReplayRejection(event_id, episode_id, None, eligibility_error))
+            continue
+        if not learning_eligible:
+            continue
+
         explicit = _explicit_prediction_outcomes(payload)
         for key, prediction in tuple(pending.items()):
             if prediction.episode_id != episode_id:
@@ -391,10 +394,7 @@ def brier_loss(state: AdapterState, samples: Sequence[ReplaySample], *, epsilon:
     """Mean held-out Brier loss; lower is better."""
     if not samples:
         raise ValueError("Brier loss requires at least one sample")
-    errors = [
-        (state.calibrate(sample.probability, epsilon=epsilon) - float(sample.outcome)) ** 2
-        for sample in samples
-    ]
+    errors = [(state.calibrate(sample.probability, epsilon=epsilon) - float(sample.outcome)) ** 2 for sample in samples]
     return math.fsum(errors) / len(errors)
 
 
@@ -421,9 +421,7 @@ def train_shadow_adapter(
     )
     fitted = _fit_parameters(split.train, incumbent, config)
     incumbent_loss = (
-        brier_loss(incumbent, split.validation, epsilon=config.probability_epsilon)
-        if split.validation
-        else None
+        brier_loss(incumbent, split.validation, epsilon=config.probability_epsilon) if split.validation else None
     )
     provisional = AdapterState(
         base_model_version=incumbent.base_model_version,
@@ -436,9 +434,7 @@ def train_shadow_adapter(
         parent_digest=incumbent.digest(),
     )
     candidate_loss = (
-        brier_loss(provisional, split.validation, epsilon=config.probability_epsilon)
-        if split.validation
-        else None
+        brier_loss(provisional, split.validation, epsilon=config.probability_epsilon) if split.validation else None
     )
     candidate = AdapterState(
         base_model_version=provisional.base_model_version,
@@ -450,11 +446,7 @@ def train_shadow_adapter(
         validation_loss=candidate_loss,
         parent_digest=provisional.parent_digest,
     )
-    improvement = (
-        incumbent_loss - candidate_loss
-        if incumbent_loss is not None and candidate_loss is not None
-        else None
-    )
+    improvement = incumbent_loss - candidate_loss if incumbent_loss is not None and candidate_loss is not None else None
 
     promoted = False
     if len(split.train) < config.min_training_examples:
@@ -571,9 +563,7 @@ def _sample(
     resolution_event_id: str,
     resolution_kind: str,
 ) -> ReplaySample:
-    identity = "\0".join(
-        (prediction.episode_id, prediction.prediction_id, prediction.event_id, resolution_event_id)
-    )
+    identity = "\0".join((prediction.episode_id, prediction.prediction_id, prediction.event_id, resolution_event_id))
     sample_id = f"replay_{hashlib.sha256(identity.encode()).hexdigest()[:24]}"
     return ReplaySample(
         sample_id=sample_id,
@@ -649,6 +639,34 @@ def _explicit_prediction_outcomes(payload: Mapping[str, Any]) -> dict[str, bool]
             if label is not None:
                 outcomes[str(prediction_id)] = label
     return outcomes
+
+
+def _action_outcome_learning_eligibility(payload: Mapping[str, Any]) -> tuple[bool, str | None]:
+    """Validate the observation/learning marker while preserving old logs.
+
+    Legacy outcomes with neither field remain eligible. Once either field is
+    present, only exact booleans are accepted, and an explicit opt-in requires
+    an observed outcome. Explicitly unobserved or ineligible outcomes remain in
+    the causal trace but cannot resolve replay predictions.
+    """
+
+    marker_present = "learning_eligible" in payload
+    observed_present = "observed" in payload
+    marker = payload.get("learning_eligible")
+    observed = payload.get("observed")
+    if marker_present and type(marker) is not bool:
+        return False, "action outcome learning_eligible marker is not boolean"
+    if observed_present and type(observed) is not bool:
+        return False, "action outcome observed marker is not boolean"
+    if marker_present:
+        if marker is False:
+            return False, None
+        if observed is not True:
+            return False, "learning-eligible action outcome is not explicitly observed"
+        return True, None
+    if observed_present:
+        return observed is True, None
+    return True, None
 
 
 def _label_from_action_outcome(

@@ -50,6 +50,10 @@ class AffectSafeRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=1_000)
 
 
+class ExecutionReconcileRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=1_000)
+
+
 class ShadowLearningRequest(BaseModel):
     promote: bool = False
 
@@ -99,6 +103,7 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
 
     if svc.config.max_request_bytes > 0:
         from conscio.web.limits import BodySizeLimitMiddleware  # noqa: PLC0415
+
         app.add_middleware(BodySizeLimitMiddleware, max_bytes=svc.config.max_request_bytes)
 
     @app.get("/health")
@@ -173,9 +178,7 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
             client = broker.register()  # before enqueue: no token can be missed
         except SSEClientLimitError as exc:
             raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "10"}) from exc
-        task = asyncio.create_task(
-            svc.submit_message(req.content, source=_validated_source(req.source), ref=ref)
-        )
+        task = asyncio.create_task(svc.submit_message(req.content, source=_validated_source(req.source), ref=ref))
 
         async def _gen():
             try:
@@ -264,6 +267,23 @@ def create_app(service: ConscioService | None = None, config: ServiceConfig | No
     @app.post("/control/affect-safe", dependencies=[Depends(require_auth)])
     async def affect_safe(req: AffectSafeRequest) -> dict[str, Any]:
         return await svc.set_safe_affect_state(req.reason)
+
+    @app.post(
+        "/control/executions/{execution_id}/reconcile",
+        dependencies=[Depends(require_auth)],
+    )
+    async def reconcile_execution(
+        execution_id: str,
+        req: ExecutionReconcileRequest,
+    ) -> dict[str, Any]:
+        try:
+            return await svc.reconcile_execution(execution_id, req.reason)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="unresolved execution not found") from None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/learning/prediction-shadow", dependencies=[Depends(require_auth)])
     async def prediction_shadow(req: ShadowLearningRequest) -> dict[str, Any]:

@@ -113,15 +113,11 @@ _INTERNAL_SOURCE_PARTS = frozenset(
     }
 )
 _TOOL_OUTCOME_TYPES = frozenset({"tool_outcome", "tool_result"})
-_TRUSTED_TOOL_SOURCES = frozenset(
-    {"environment", "policy_executor", "runtime_executor", "tool", "tool_executor"}
-)
+_TRUSTED_TOOL_SOURCES = frozenset({"environment", "policy_executor", "runtime_executor", "tool", "tool_executor"})
 _TRUSTED_ACTION_SOURCES = frozenset({"environment", "runtime_executor"})
 _TRUSTED_AFFECT_SOURCES = frozenset({"action_evaluation", "affect", "homeostasis"})
 _TRUSTED_RESOLUTION_SOURCES = frozenset({"action_evaluation", "environment"})
-_TYPED_TOOL_STATUSES = frozenset(
-    {"cancelled", "denied", "error", "failed", "failure", "ok", "success", "timeout"}
-)
+_TYPED_TOOL_STATUSES = frozenset({"cancelled", "denied", "error", "failed", "failure", "ok", "success", "timeout"})
 
 
 class CurriculumCorruptionError(ValueError):
@@ -147,10 +143,7 @@ class ExampleProvenance:
         object.__setattr__(self, "source_event_ids", tuple(self.source_event_ids))
         if not isinstance(self.origin, str) or self.origin not in {"synthetic", "event_log"}:
             raise ValueError(f"unsupported provenance origin: {self.origin!r}")
-        if (
-            not isinstance(self.epistemic_status, str)
-            or self.epistemic_status not in _EPISTEMIC_STATUS_SET
-        ):
+        if not isinstance(self.epistemic_status, str) or self.epistemic_status not in _EPISTEMIC_STATUS_SET:
             raise ValueError(f"unsupported epistemic status: {self.epistemic_status!r}")
         if not isinstance(self.evidence_kind, str) or self.evidence_kind not in _EVIDENCE_KIND_SET:
             raise ValueError(f"unsupported evidence kind: {self.evidence_kind!r}")
@@ -404,13 +397,9 @@ def generate_synthetic_curriculum(*, seed: int, episodes: int = 32) -> tuple[Cur
         affect_after: dict[str, Any] = {
             "valence": _rounded(valence_before + (0.18 if tool_succeeded else -0.12)),
             "arousal": _rounded(max(0.0, arousal_before - (0.1 if tool_succeeded else 0.02))),
-            "controllability": _rounded(
-                min(1.0, controllability_before + (0.16 if tool_succeeded else -0.08))
-            ),
+            "controllability": _rounded(min(1.0, controllability_before + (0.16 if tool_succeeded else -0.08))),
             "need_errors": {
-                "competence": _rounded(
-                    max(0.0, competence_before - (0.2 if tool_succeeded else -0.08))
-                ),
+                "competence": _rounded(max(0.0, competence_before - (0.2 if tool_succeeded else -0.08))),
                 "epistemic_coherence": _rounded(
                     max(
                         0.0,
@@ -500,14 +489,10 @@ def derive_curriculum_examples(events: Iterable[Mapping[str, Any]]) -> Curriculu
         episode_id = str(event.get("episode_id") or "")
         event_id = str(event.get("event_id") or "")
         if not episode_id:
-            rejections.append(
-                CurriculumRejection(event_id or f"input_{input_index}", "", "event has no episode_id")
-            )
+            rejections.append(CurriculumRejection(event_id or f"input_{input_index}", "", "event has no episode_id"))
             continue
         if not event_id:
-            rejections.append(
-                CurriculumRejection(f"input_{input_index}", episode_id, "event has no event_id")
-            )
+            rejections.append(CurriculumRejection(f"input_{input_index}", episode_id, "event has no event_id"))
             continue
         groups[episode_id].append((input_index, event))
 
@@ -524,16 +509,18 @@ def derive_curriculum_examples(events: Iterable[Mapping[str, Any]]) -> Curriculu
             source = str(event.get("source") or "")
             payload = event.get("payload")
             if not isinstance(payload, Mapping):
-                recognized = _EXTERNAL_EVENT_TYPES | _TOOL_OUTCOME_TYPES | {
-                    "action_outcome",
-                    "affect",
-                    "prediction_resolution",
-                }
+                recognized = (
+                    _EXTERNAL_EVENT_TYPES
+                    | _TOOL_OUTCOME_TYPES
+                    | {
+                        "action_outcome",
+                        "affect",
+                        "prediction_resolution",
+                    }
+                )
                 if event_type in recognized:
                     rejections.append(
-                        CurriculumRejection(
-                            event_id, episode_id, "recognized event payload is not an object"
-                        )
+                        CurriculumRejection(event_id, episode_id, "recognized event payload is not an object")
                     )
                 continue
 
@@ -587,6 +574,16 @@ def derive_curriculum_examples(events: Iterable[Mapping[str, Any]]) -> Curriculu
                 if source not in _TRUSTED_ACTION_SOURCES:
                     rejections.append(CurriculumRejection(event_id, episode_id, "action outcome source is not trusted"))
                     continue
+                learning_eligible, eligibility_error = _learning_eligibility(
+                    payload,
+                    observed_key="observed",
+                    subject="action outcome",
+                )
+                if eligibility_error is not None:
+                    rejections.append(CurriculumRejection(event_id, episode_id, eligibility_error))
+                    continue
+                if not learning_eligible:
+                    continue
                 succeeded = payload.get("succeeded")
                 action = payload.get("action")
                 if type(succeeded) is not bool or not isinstance(action, str) or not action.strip():
@@ -622,12 +619,20 @@ def derive_curriculum_examples(events: Iterable[Mapping[str, Any]]) -> Curriculu
                 if source not in _TRUSTED_AFFECT_SOURCES:
                     rejections.append(CurriculumRejection(event_id, episode_id, "affect source is not trusted"))
                     continue
+                learning_eligible, eligibility_error = _learning_eligibility(
+                    payload,
+                    observed_key="outcome_observed",
+                    subject="affect transition",
+                )
+                if eligibility_error is not None:
+                    rejections.append(CurriculumRejection(event_id, episode_id, eligibility_error))
+                    continue
+                if not learning_eligible:
+                    continue
                 state = _parse_affect(payload)
                 if state is None:
                     rejections.append(
-                        CurriculumRejection(
-                            event_id, episode_id, "affect payload is not a finite typed state"
-                        )
+                        CurriculumRejection(event_id, episode_id, "affect payload is not a finite typed state")
                     )
                     continue
                 if previous_affect is not None:
@@ -654,9 +659,7 @@ def derive_curriculum_examples(events: Iterable[Mapping[str, Any]]) -> Curriculu
             if event_type == "prediction_resolution" and payload.get("target") == "future_uncertainty":
                 if source not in _TRUSTED_RESOLUTION_SOURCES:
                     rejections.append(
-                        CurriculumRejection(
-                            event_id, episode_id, "uncertainty resolution source is not trusted"
-                        )
+                        CurriculumRejection(event_id, episode_id, "uncertainty resolution source is not trusted")
                     )
                     continue
                 prediction_id = str(payload.get("prediction_id") or "")
@@ -684,9 +687,7 @@ def derive_curriculum_examples(events: Iterable[Mapping[str, Any]]) -> Curriculu
                 probability = _finite_probability(prediction_payload.get("probability"))
                 if probability is None or prediction_payload.get("target") != "future_uncertainty":
                     rejections.append(
-                        CurriculumRejection(
-                            event_id, episode_id, "uncertainty prediction is incompatible"
-                        )
+                        CurriculumRejection(event_id, episode_id, "uncertainty prediction is incompatible")
                     )
                     continue
                 uncertainty_target: dict[str, Any] = {"nonincrease": observed}
@@ -802,18 +803,13 @@ def build_curriculum_manifest(examples: Sequence[CurriculumExample]) -> Curricul
     )
 
 
-def write_curriculum_jsonl(
-    path: str | os.PathLike[str], examples: Sequence[CurriculumExample]
-) -> CurriculumManifest:
+def write_curriculum_jsonl(path: str | os.PathLike[str], examples: Sequence[CurriculumExample]) -> CurriculumManifest:
     """Atomically write canonical examples preceded by their manifest."""
     canonical = _canonical_examples(examples)
     manifest = build_curriculum_manifest(canonical)
     records = [
         _canonical_json({"record_type": "manifest", "data": manifest.to_dict()}),
-        *(
-            _canonical_json({"record_type": "example", "data": example.to_dict()})
-            for example in canonical
-        ),
+        *(_canonical_json({"record_type": "example", "data": example.to_dict()}) for example in canonical),
     ]
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -945,6 +941,33 @@ def _is_external_observation(event_type: str, source: str, payload: Mapping[str,
     return bool(source.strip()) and not normalized_parts.intersection(_INTERNAL_SOURCE_PARTS)
 
 
+def _learning_eligibility(
+    payload: Mapping[str, Any],
+    *,
+    observed_key: str,
+    subject: str,
+) -> tuple[bool, str | None]:
+    """Validate explicit learning gates while retaining marker-free legacy logs."""
+
+    marker_present = "learning_eligible" in payload
+    observed_present = observed_key in payload
+    marker = payload.get("learning_eligible")
+    observed = payload.get(observed_key)
+    if marker_present and type(marker) is not bool:
+        return False, f"{subject} learning_eligible marker is not boolean"
+    if observed_present and type(observed) is not bool:
+        return False, f"{subject} {observed_key} marker is not boolean"
+    if marker_present:
+        if marker is False:
+            return False, None
+        if observed is not True:
+            return False, f"learning-eligible {subject} is not explicitly observed"
+        return True, None
+    if observed_present:
+        return observed is True, None
+    return True, None
+
+
 def _parse_tool_outcome(
     payload: Mapping[str, Any],
 ) -> tuple[str, dict[str, Any], dict[str, Any]] | None:
@@ -972,13 +995,13 @@ def _parse_affect(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     if not -1.0 <= valence <= 1.0 or not 0.0 <= arousal <= 1.0 or not 0.0 <= controllability <= 1.0:
         return None
     raw_needs = payload.get("need_errors")
-    if not isinstance(raw_needs, Mapping) or not raw_needs or any(
-        not isinstance(key, str) or not _is_finite_number(value) for key, value in raw_needs.items()
+    if (
+        not isinstance(raw_needs, Mapping)
+        or not raw_needs
+        or any(not isinstance(key, str) or not _is_finite_number(value) for key, value in raw_needs.items())
     ):
         return None
-    need_errors = {
-        str(key): float(cast(int | float, value)) for key, value in sorted(raw_needs.items())
-    }
+    need_errors = {str(key): float(cast(int | float, value)) for key, value in sorted(raw_needs.items())}
     if any(not -1.0 <= value <= 1.0 for value in need_errors.values()):
         return None
     return {
@@ -996,9 +1019,7 @@ def _affect_delta(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[s
     return {
         "valence": _rounded(float(after["valence"]) - float(before["valence"])),
         "arousal": _rounded(float(after["arousal"]) - float(before["arousal"])),
-        "controllability": _rounded(
-            float(after["controllability"]) - float(before["controllability"])
-        ),
+        "controllability": _rounded(float(after["controllability"]) - float(before["controllability"])),
         "need_errors": {
             name: _rounded(float(after_needs.get(name, 0.0)) - float(before_needs.get(name, 0.0)))
             for name in need_names

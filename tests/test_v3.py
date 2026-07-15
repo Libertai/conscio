@@ -427,7 +427,7 @@ class V3RuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
             await runtime.initialize()
             try:
-                result = await runtime.run_episode("inspect it")
+                result = await runtime.run_episode(InputEvent(content="inspect it", source="autonomous"))
             finally:
                 await runtime.close()
 
@@ -436,6 +436,14 @@ class V3RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(types.index("tool_proposal"), types.index("action_outcome"))
         authorization = next(event for event in result.causal_trace if event["event_type"] == "tool_authorization")
         self.assertTrue(authorization["payload"]["allowed"])
+        self.assertEqual(authorization["payload"]["policy_status"], "pending_final_gate")
+        execution_intent = next(event for event in result.causal_trace if event["event_type"] == "execution_intent")
+        execution_outcome = next(event for event in result.causal_trace if event["event_type"] == "execution_outcome")
+        self.assertEqual(
+            execution_intent["payload"]["execution_id"],
+            execution_outcome["payload"]["execution_id"],
+        )
+        self.assertTrue(execution_outcome["payload"]["executed"])
         curriculum = derive_curriculum_examples(result.causal_trace)
         families = {example.target_family for example in curriculum.examples}
         self.assertEqual(
