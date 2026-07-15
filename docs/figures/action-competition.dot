@@ -1,0 +1,40 @@
+digraph action_competition {
+  graph [bgcolor="transparent", fontname="Inter,Arial,sans-serif", nodesep=0.27, ranksep=0.5, pad=0.08, splines=spline];
+  node [shape=box, style="rounded,filled", fillcolor="#e6f0ff", color="#3b82f6", fontcolor="#102a43", fontname="Inter,Arial,sans-serif", fontsize=15, margin="0.14,0.09"];
+  edge [color="#52606d", fontcolor="#334e68", fontname="Inter,Arial,sans-serif", fontsize=11, penwidth=1.35, arrowsize=0.7];
+
+  { rank=same; language; prep; }
+  { rank=same; plan; builtin; batch; }
+  { rank=same; internal; external; }
+  { rank=same; cognitive; validate; }
+  { rank=same; intent; dispatch; }
+  { rank=same; known; uncertain; }
+  { rank=same; learn; safe; }
+
+  plan [label="Recurrent intention\n(scoring context)"];
+  language [label="Language proposals"];
+  prep [label="Pre-competition schema\n+ policy preparation"];
+  builtin [label="Built-in respond + wait"];
+  batch [label="Candidate batch"];
+  score [label="Deterministic competition"];
+  internal [label="Respond / wait"];
+  external [label="Tool / ask / refuse"];
+  cognitive [label="Cognitive outcome\n(no execution intent)"];
+  validate [label="Revalidate schema + manifest\n+ policy"];
+  intent [label="Append execution intent"];
+  dispatch [label="At most one dispatch"];
+  known [label="Known outcome"];
+  uncertain [label="Execution uncertainty", fillcolor="#fff4e5", color="#d97706"];
+  learn [label="Prediction resolution\n+ learning gate"];
+  safe [label="Safe mode + operator\nacknowledgement", fillcolor="#fff4e5", color="#d97706"];
+
+  language -> prep -> batch;
+  plan -> score [label="alignment"];
+  builtin -> batch;
+  batch -> score;
+  score -> internal -> cognitive;
+  score -> external -> validate -> intent -> dispatch;
+  dispatch -> known -> learn;
+  dispatch -> uncertain [color="#d97706"];
+  uncertain -> safe [color="#d97706"];
+}

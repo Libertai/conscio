@@ -204,6 +204,22 @@ img {
   max-width: 100%;
 }
 
+.paper-figure {
+  break-inside: avoid;
+  margin: 0.15in 0 0.22in;
+  text-align: center;
+}
+
+.paper-figure img {
+  margin: 0 auto 0.08in;
+}
+
+.paper-figure figcaption {
+  color: #243b53;
+  font-size: 9.5pt;
+  font-weight: 700;
+}
+
 table {
   break-inside: avoid;
   border-collapse: collapse;
@@ -211,6 +227,16 @@ table {
   line-height: 1.35;
   margin: 0.18in 0 0.24in;
   width: 100%;
+}
+
+p:has(+ table) {
+  break-after: avoid;
+  margin-bottom: 0.08in;
+}
+
+p:has(+ table) + table {
+  break-before: avoid;
+  margin-top: 0;
 }
 
 td,

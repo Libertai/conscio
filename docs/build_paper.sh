@@ -5,72 +5,70 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DOCS="$ROOT/docs"
 FIGURES="$DOCS/figures"
 BUILD="$DOCS/build"
-MERMAID_OUT="$BUILD/figures"
-MERMAID_PDF_OUT="$BUILD/figures-pdf"
-PUPPETEER_CONFIG="$FIGURES/puppeteer-config.json"
+FIGURE_OUT="$BUILD/figures"
+FIGURE_PDF_OUT="$BUILD/figures-pdf"
 PAPER="$DOCS/paper.md"
 PDF_MD="$BUILD/paper.pdf.md"
 PDF_OUT="$BUILD/paper.pdf"
+PUBLISHED_PDF="$DOCS/paper.pdf"
 CSS="$DOCS/paper.css"
-MERMAID_PNG_SCALE="${MERMAID_PNG_SCALE:-3}"
-MERMAID_PNG_WIDTH="${MERMAID_PNG_WIDTH:-2400}"
-MERMAID_PNG_HEIGHT="${MERMAID_PNG_HEIGHT:-1600}"
+GRAPHVIZ_DPI="${GRAPHVIZ_DPI:-220}"
 
-mkdir -p "$MERMAID_OUT" "$MERMAID_PDF_OUT"
+mkdir -p "$FIGURE_OUT" "$FIGURE_PDF_OUT"
 
-render_mermaid() {
+render_graphviz() {
     local input="$1"
     local output="$2"
-    shift 2
-    local extra_args=("$@")
+    local format="${output##*.}"
 
-    if command -v mmdc >/dev/null 2>&1; then
-        mmdc -i "$input" -o "$output" -b transparent -t neutral -p "$PUPPETEER_CONFIG" "${extra_args[@]}"
-        return
+    if ! command -v dot >/dev/null 2>&1; then
+        echo "error: install Graphviz to render paper figures" >&2
+        exit 1
     fi
 
-    if command -v npx >/dev/null 2>&1; then
-        npx -y @mermaid-js/mermaid-cli -i "$input" -o "$output" -b transparent -t neutral -p "$PUPPETEER_CONFIG" "${extra_args[@]}"
-        return
+    if [[ "$format" == "png" ]]; then
+        dot -Tpng -Gdpi="$GRAPHVIZ_DPI" "$input" -o "$output"
+    else
+        dot -T"$format" "$input" -o "$output"
     fi
-
-    echo "error: install mermaid-cli first: npm install -g @mermaid-js/mermaid-cli" >&2
-    exit 1
 }
 
 render_all_figures() {
-    render_mermaid "$FIGURES/runtime-loop.mmd" "$MERMAID_OUT/runtime-loop.svg"
-    render_mermaid "$FIGURES/service-loop.mmd" "$MERMAID_OUT/service-loop.svg"
-    render_mermaid "$FIGURES/attention-weights.mmd" "$MERMAID_OUT/attention-weights.svg"
-    render_mermaid "$FIGURES/evaluation-ladder.mmd" "$MERMAID_OUT/evaluation-ladder.svg"
-    local png_args=(-s "$MERMAID_PNG_SCALE" -w "$MERMAID_PNG_WIDTH" -H "$MERMAID_PNG_HEIGHT")
-    render_mermaid "$FIGURES/runtime-loop.mmd" "$MERMAID_PDF_OUT/runtime-loop.png" "${png_args[@]}"
-    render_mermaid "$FIGURES/service-loop.mmd" "$MERMAID_PDF_OUT/service-loop.png" "${png_args[@]}"
-    render_mermaid "$FIGURES/attention-weights.mmd" "$MERMAID_PDF_OUT/attention-weights.png" "${png_args[@]}"
-    render_mermaid "$FIGURES/evaluation-ladder.mmd" "$MERMAID_PDF_OUT/evaluation-ladder.png" "${png_args[@]}"
+    render_graphviz "$FIGURES/runtime-loop.dot" "$FIGURE_OUT/runtime-loop.svg"
+    render_graphviz "$FIGURES/service-loop.dot" "$FIGURE_OUT/service-loop.svg"
+    render_graphviz "$FIGURES/action-competition.dot" "$FIGURE_OUT/action-competition.svg"
+    render_graphviz "$FIGURES/evaluation-ladder.dot" "$FIGURE_OUT/evaluation-ladder.svg"
+    render_graphviz "$FIGURES/runtime-loop.dot" "$FIGURE_PDF_OUT/runtime-loop.png"
+    render_graphviz "$FIGURES/service-loop.dot" "$FIGURE_PDF_OUT/service-loop.png"
+    render_graphviz "$FIGURES/action-competition.dot" "$FIGURE_PDF_OUT/action-competition.png"
+    render_graphviz "$FIGURES/evaluation-ladder.dot" "$FIGURE_PDF_OUT/evaluation-ladder.png"
 }
 
 write_pdf_markdown() {
-    awk '
+    awk -v figure_dir="file://$FIGURE_PDF_OUT" '
         BEGIN {
             n = 0
             in_mermaid = 0
             skip_header = 1
-            images[1] = "![Figure 1. Per-Episode Cognitive Runtime](docs/build/figures-pdf/runtime-loop.png)"
-            images[2] = "![Figure 2. Persistent Service and Autonomy Loop](docs/build/figures-pdf/service-loop.png)"
-            images[3] = "![Figure 3. Base Attention Score Weights](docs/build/figures-pdf/attention-weights.png)"
-            images[4] = "![Figure 4. Evaluation Ladder](docs/build/figures-pdf/evaluation-ladder.png)"
+            paths[1] = figure_dir "/runtime-loop.png"
+            paths[2] = figure_dir "/service-loop.png"
+            paths[3] = figure_dir "/action-competition.png"
+            paths[4] = figure_dir "/evaluation-ladder.png"
+            captions[1] = "Figure 1. V3 Recurrent Cognitive Runtime"
+            captions[2] = "Figure 2. Persistent Service and Autonomy Loop"
+            captions[3] = "Figure 3. V3 Action Competition and Execution Ordering"
+            captions[4] = "Figure 4. Historical V2 Evaluation Ladder"
 
             print "<section class=\"cover-page\">"
             print "<div class=\"cover-kicker\">Conscio Research Draft</div>"
-            print "<h1>Conscio</h1>"
-            print "<p class=\"cover-subtitle\">An Operational Architecture and Evaluation for Auditable Machine Consciousness</p>"
+            print "<h1>Conscio V3</h1>"
+            print "<p class=\"cover-subtitle\">An Auditable Recurrent Architecture for Machine Consciousness Research</p>"
             print "<div class=\"cover-rule\"></div>"
             print "<p class=\"cover-author\">Jonathan Schemoul<br/><span>LibertAI</span></p>"
-            print "<p class=\"cover-thesis\">A persistent agent runtime for studying operational consciousness through inspectable mechanisms: attention, self-modeling, memory, appraisal, goals, prediction error, reflection, and autonomous action — with baseline-ladder, ablation, and trace-grounded self-report results on two model families.</p>"
+            print "<p class=\"cover-thesis\">A text-first research instrument with private specialists, recurrent global broadcast, prospective prediction, bounded affect, independent action arbitration, restart continuity, and condition-blind intervention machinery. Historical V2 results are reported separately from the unrun V3 studies.</p>"
             print "<div class=\"cover-meta\">"
-            print "<div><span>Version</span><strong>Draft v2.0</strong></div>"
-            print "<div><span>Date</span><strong>June 2026</strong></div>"
+            print "<div><span>Version</span><strong>Draft v3.0</strong></div>"
+            print "<div><span>Date</span><strong>July 2026</strong></div>"
             print "<div><span>Affiliation</span><strong>LibertAI</strong></div>"
             print "</div>"
             print "</section>"
@@ -81,20 +79,20 @@ write_pdf_markdown() {
             print "<div class=\"toc-list\">"
             print "<div><span>1</span>Introduction</div>"
             print "<div><span>2</span>Background and Related Work</div>"
-            print "<div><span>3</span>Operational Definition</div>"
+            print "<div><span>3</span>Operational Target and Evidence Rubric</div>"
             print "<div><span>4</span>Architecture</div>"
             print "<div><span>5</span>Threat Model and Containment</div>"
             print "<div><span>6</span>Implementation Status</div>"
             print "</div>"
             print "<div class=\"toc-list\">"
-            print "<div><span>7</span>Evaluation and Results</div>"
+            print "<div><span>7</span>Historical V2 Results and V3 Protocol</div>"
             print "<div><span>8</span>Discussion</div>"
             print "<div><span>9</span>Limitations</div>"
             print "<div><span>10</span>Future Work</div>"
             print "<div><span>11</span>Conclusion</div>"
             print "</div>"
             print "</div>"
-            print "<div class=\"toc-note\">Figures and tables are generated from editable Mermaid and Markdown sources during the PDF build.</div>"
+            print "<div class=\"toc-note\">Figures and tables are generated from editable Graphviz and Markdown sources during the PDF build.</div>"
             print "</section>"
             print ""
         }
@@ -104,10 +102,16 @@ write_pdf_markdown() {
         skip_header {
             skip_header = 0
         }
+        /^\*\*Figure [1-4]\./ {
+            next
+        }
         /^```mermaid$/ {
             in_mermaid = 1
             n += 1
-            print images[n]
+            print "<figure class=\"paper-figure\">"
+            print "<img src=\"" paths[n] "\" alt=\"" captions[n] "\"/>"
+            print "<figcaption>" captions[n] "</figcaption>"
+            print "</figure>"
             next
         }
         in_mermaid && /^```$/ {
@@ -143,9 +147,10 @@ build_pdf() {
         --from gfm+raw_html \
         --standalone \
         --resource-path "$DOCS" \
-        --metadata pagetitle="Conscio: An Operational Architecture and Evaluation for Auditable Machine Consciousness" \
+        --metadata pagetitle="Conscio V3: An Auditable Recurrent Architecture for Machine Consciousness Research" \
         "${pdf_engine[@]}" \
         -o "$PDF_OUT"
+    cp "$PDF_OUT" "$PUBLISHED_PDF"
 }
 
 case "${1:-}" in

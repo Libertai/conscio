@@ -1,12 +1,15 @@
 %%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "26px", "primaryColor": "#e6f0ff", "primaryBorderColor": "#3b82f6", "primaryTextColor": "#102a43", "lineColor": "#52606d"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 34, "rankSpacing": 46, "curve": "basis"}}}%%
 flowchart TD
-    SERVICE["ConscioService"] --> SCHED["DriveScheduler scores goals"]
-    SCHED --> PROJECT["Project + task"]
-    PROJECT --> EPISODE["Cognitive episode"]
-    EPISODE --> CONSOLIDATE["Consolidate memory"]
-    CONSOLIDATE --> DRIVES["Satiate + decay drives"]
-    DRIVES --> SERVICE
-
-    USER["User message or influence"] --> LOCK["Serialized service event"]
-    LOCK --> EPISODE
-    GUARD["Quarantine, budgets, tool policy"] --> EPISODE
+    EVENT["Message / time / tool / operator"] --> LOCK["Serialized service event"]
+    LOCK --> EPISODE["V3 recurrent episode"]
+    GOALS["Goals, projects, durable memory"] --> EPISODE
+    EPISODE --> JOURNAL["Append-only causal journal"]
+    JOURNAL --> CHECKPOINT["Versioned recurrent checkpoint"]
+    CHECKPOINT --> RESTORE["Restart restore / explicit migration"]
+    RESTORE --> EPISODE
+    EPISODE --> POLICY["Schema, manifest, risk, tool policy"]
+    POLICY --> ENV["Environment action"]
+    ENV -->|known| JOURNAL
+    ENV -->|ambiguous| SAFE["Tools-only safe mode"]
+    SAFE -->|authenticated acknowledge| OPERATOR["Reconciliation"]
+    OPERATOR -->|clear gate| EPISODE

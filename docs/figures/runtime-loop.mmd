@@ -1,11 +1,17 @@
 %%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "30px", "primaryColor": "#e6f0ff", "primaryBorderColor": "#3b82f6", "primaryTextColor": "#102a43", "lineColor": "#52606d"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 22, "rankSpacing": 34, "curve": "basis"}}}%%
 flowchart LR
-    INPUT["Input event"] --> SENSE["Sense: module evidence"]
-    SENSE --> APPRAISE["Appraise"]
-    APPRAISE --> ATTEND["Attend + broadcast"]
-    ATTEND --> EXECUTE["Executor step: LLM tool-loop"]
-    EXECUTE --> VALIDATE["Validate constraints + predictions"]
-    VALIDATE --> SELF["Self-state update"]
-    SELF --> DECIDE["Decide tick"]
-    DECIDE -->|step / reflect| SENSE
-    DECIDE -->|answer / ask / refuse / wait| OUT["Episode result + traces"]
+    INPUT["Environment event"] --> PRIVATE["Private specialists"]
+    STATE["Restored recurrent + specialist state"] --> PRIVATE
+    PRIOR["Previous-cycle broadcast (same episode)"] --> PRIVATE
+    PRIVATE --> CANDIDATES["Typed candidates"]
+    CANDIDATES --> BROADCAST["Bounded global broadcast"]
+    BROADCAST -->|next cycle| PRIVATE
+    BROADCAST --> PREDICT["World/self predictions + intention"]
+    PREDICT --> LANGUAGE["Pinned language specialist (research mode)"]
+    LANGUAGE --> COMPETE["Action competition"]
+    COMPETE --> INTERNAL["Respond / wait: no execution intent"]
+    COMPETE --> INTENT["Tool / ask / refuse: durable intent"]
+    INTENT --> ACT["Policy-gated tool/control dispatch"]
+    ACT --> OUTCOME["Known outcome / uncertainty marker"]
+    INTERNAL --> CHECKPOINT
+    OUTCOME --> CHECKPOINT["Affect, learning gate, checkpoint"]

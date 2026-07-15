@@ -1,0 +1,17 @@
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "27px", "primaryColor": "#e6f0ff", "primaryBorderColor": "#3b82f6", "primaryTextColor": "#102a43", "lineColor": "#52606d"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 25, "rankSpacing": 38, "curve": "basis"}}}%%
+flowchart LR
+    PLAN["Recurrent intention (scoring context)"] --> SCORE["Deterministic competition"]
+    LANGUAGE["Language proposals"] --> PREP["Pre-competition schema + policy preparation"]
+    PREP --> BATCH
+    BUILTIN["Built-in respond + wait"] --> BATCH
+    BATCH --> SCORE
+    SCORE --> INTERNAL["Respond / wait: no execution intent"]
+    SCORE --> EXTERNAL["Tool / ask / refuse"]
+    EXTERNAL --> VALIDATE["Revalidate schema + manifest + policy"]
+    VALIDATE --> INTENT["Append execution intent"]
+    INTENT --> DISPATCH["At most one dispatch"]
+    DISPATCH --> KNOWN["Known outcome"]
+    DISPATCH --> UNKNOWN["Execution uncertainty"]
+    KNOWN --> LEARN["Prediction resolution + learning gate"]
+    UNKNOWN --> SAFE["Safe mode + operator acknowledgement"]
+    INTERNAL --> COGNITIVE["Cognitive outcome"]

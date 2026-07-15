@@ -1,0 +1,18 @@
+digraph evaluation_ladder {
+  graph [bgcolor="transparent", fontname="Inter,Arial,sans-serif", nodesep=0.3, ranksep=0.48, pad=0.08, splines=spline];
+  node [shape=box, style="rounded,filled", fillcolor="#e6f0ff", color="#3b82f6", fontcolor="#102a43", fontname="Inter,Arial,sans-serif", fontsize=15, margin="0.14,0.09"];
+  edge [color="#52606d", penwidth=1.35, arrowsize=0.7];
+
+  b0 [label="Direct response"];
+  b1 [label="Prompted reflection"];
+  b2 [label="Evented workspace"];
+  b3 [label="Workspace + self-model"];
+  b4 [label="Full V2 runtime"];
+  result [label="Compare behavior + traces"];
+
+  { rank=same; b0; b1; b2; }
+  { rank=same; b3; b4; result; }
+
+  b0 -> b1 -> b2;
+  b2 -> b3 -> b4 -> result;
+}

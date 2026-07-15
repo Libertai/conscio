@@ -1,7 +1,7 @@
 # Paper Figures
 
-This directory stores editable Mermaid sources for the figures in
-`docs/paper.md`.
+This directory stores editable Mermaid diagrams used in `docs/paper.md` and
+matching Graphviz sources used for deterministic PDF rendering.
 
 Generate figure assets with:
 
@@ -16,10 +16,18 @@ docs/build_paper.sh
 ```
 
 The build script writes generated SVGs for inspection and high-resolution PNGs
-for PDF embedding under `docs/build/`, leaving these source files untouched.
+for PDF embedding under `docs/build/`, then publishes the finished artifact as
+`docs/paper.pdf`. Mermaid sources remain editable and untouched.
 
-PNG resolution can be tuned with environment variables:
+The V3 PDF figure set is:
+
+- `runtime-loop.dot` - recurrent specialist and broadcast cycle;
+- `service-loop.dot` - persistence, policy, and restart recovery;
+- `action-competition.dot` - proposal competition and execution ordering;
+- `evaluation-ladder.dot` - historical V2 baseline ladder.
+
+PNG resolution can be tuned with an environment variable:
 
 ```bash
-MERMAID_PNG_SCALE=4 MERMAID_PNG_WIDTH=3200 MERMAID_PNG_HEIGHT=2000 docs/build_paper.sh
+GRAPHVIZ_DPI=300 docs/build_paper.sh
 ```

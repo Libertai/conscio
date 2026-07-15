@@ -1,0 +1,37 @@
+digraph runtime_loop {
+  graph [bgcolor="transparent", fontname="Inter,Arial,sans-serif", nodesep=0.24, ranksep=0.48, pad=0.08, splines=spline];
+  node [shape=box, style="rounded,filled", fillcolor="#e6f0ff", color="#3b82f6", fontcolor="#102a43", fontname="Inter,Arial,sans-serif", fontsize=16, margin="0.14,0.09"];
+  edge [color="#52606d", fontcolor="#334e68", fontname="Inter,Arial,sans-serif", fontsize=12, penwidth=1.4, arrowsize=0.7];
+
+  { rank=same; input; state; }
+  { rank=same; prior; private; }
+  { rank=same; candidates; broadcast; }
+  { rank=same; predict; language; }
+  { rank=same; internal; intent; }
+  { rank=same; act; outcome; }
+
+  input [label="Environment event"];
+  state [label="Restored recurrent + specialist state"];
+  prior [label="Previous-cycle broadcast\n(same episode)"];
+  private [label="Private specialists"];
+  candidates [label="Typed candidates"];
+  broadcast [label="Bounded global broadcast"];
+  predict [label="World/self predictions\n+ intention"];
+  language [label="Pinned language specialist\n(research mode)"];
+  compete [label="Action competition"];
+  internal [label="Respond / wait\n(no execution intent)"];
+  intent [label="Tool / ask / refuse:\ndurable intent"];
+  act [label="Policy-gated\ntool/control dispatch"];
+  outcome [label="Known outcome /\nuncertainty marker"];
+  checkpoint [label="Affect + learning gate + checkpoint"];
+
+  input -> private;
+  state -> private;
+  prior -> private;
+  private -> candidates -> broadcast;
+  broadcast -> private [label="next cycle", constraint=false, color="#3b82f6", minlen=2];
+  broadcast -> predict;
+  predict -> language -> compete;
+  compete -> internal -> checkpoint;
+  compete -> intent -> act -> outcome -> checkpoint;
+}

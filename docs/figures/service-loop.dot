@@ -1,0 +1,25 @@
+digraph service_loop {
+  graph [bgcolor="transparent", fontname="Inter,Arial,sans-serif", nodesep=0.32, ranksep=0.48, pad=0.08, splines=spline];
+  node [shape=box, style="rounded,filled", fillcolor="#e6f0ff", color="#3b82f6", fontcolor="#102a43", fontname="Inter,Arial,sans-serif", fontsize=15, margin="0.14,0.09"];
+  edge [color="#52606d", fontcolor="#334e68", fontname="Inter,Arial,sans-serif", fontsize=11, penwidth=1.35, arrowsize=0.7];
+
+  event [label="Message / time / tool / operator"];
+  lock [label="Serialized service event"];
+  episode [label="V3 recurrent episode"];
+  goals [label="Goals, projects, durable memory"];
+  journal [label="Append-only causal journal"];
+  checkpoint [label="Versioned recurrent checkpoint"];
+  restore [label="Restart restore / explicit migration"];
+  policy [label="Schema, manifest, risk, tool policy"];
+  env [label="Environment action"];
+  safe [label="Tools-only safe mode", fillcolor="#fff4e5", color="#d97706"];
+  operator [label="Authenticated reconciliation", fillcolor="#fff4e5", color="#d97706"];
+
+  event -> lock -> episode -> journal -> checkpoint -> restore -> episode;
+  goals -> episode;
+  episode -> policy -> env;
+  env -> journal [label="known"];
+  env -> safe [label="ambiguous", color="#d97706"];
+  safe -> operator [label="acknowledge", color="#d97706"];
+  operator -> episode [label="clear gate", color="#d97706"];
+}
